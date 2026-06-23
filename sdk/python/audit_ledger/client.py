@@ -261,7 +261,7 @@ class AuditLedgerClient:
         preimage = (
             contract_id.encode()
             + submitter.encode()
-            + struct.pack("<Q", hash(event_type))  # simplified; contract uses Symbol payload
+            + event_type.encode()  # use raw bytes; contract uses Symbol payload
             + metadata
             + struct.pack("<Q", timestamp)
             + struct.pack("<I", index)
