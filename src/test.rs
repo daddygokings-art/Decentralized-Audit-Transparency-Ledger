@@ -611,3 +611,54 @@ fn test_mixed_types_with_limits() {
     let result = client.try_log_event(&submitter, &type_a, &Bytes::from_slice(&env, b"a3"));
     assert!(result.is_err());
 }
+
+// ── issue #68: pause/unpause ─────────────────────────────────────────────
+
+#[test]
+fn test_pause_blocks_writes_but_allows_reads() {
+    let (env, owner, client) = create_ledger();
+    let submitter = Address::generate(&env);
+
+    env.mock_all_auths();
+    let id = client.log_event(&submitter, &symbol_short!("p"), &Bytes::from_slice(&env, b"x"));
+
+    client.pause(&owner);
+
+    let r = client.try_log_event(&submitter, &symbol_short!("p"), &Bytes::from_slice(&env, b"y"));
+    assert!(r.is_err());
+
+    let r2 = client.try_set_global_max_logs(&owner, &10);
+    assert!(r2.is_err());
+
+    // reads still work
+    let evt = client.get_event(&id);
+    assert_eq!(evt.metadata, Bytes::from_slice(&env, b"x"));
+}
+
+#[test]
+fn test_unpause_resumes_operations() {
+    let (env, owner, client) = create_ledger();
+    let submitter = Address::generate(&env);
+
+    env.mock_all_auths();
+    client.pause(&owner);
+
+    let r = client.try_log_event(&submitter, &symbol_short!("p"), &Bytes::from_slice(&env, b"y"));
+    assert!(r.is_err());
+
+    client.unpause(&owner);
+
+    let id = client.log_event(&submitter, &symbol_short!("p"), &Bytes::from_slice(&env, b"y"));
+    let evt = client.get_event(&id);
+    assert_eq!(evt.metadata, Bytes::from_slice(&env, b"y"));
+}
+
+#[test]
+#[should_panic(expected = "HostError: Error(Contract, #1)")]
+fn test_non_owner_cannot_pause() {
+    let (env, _owner, client) = create_ledger();
+    let attacker = Address::generate(&env);
+
+    env.mock_all_auths();
+    client.pause(&attacker);
+}

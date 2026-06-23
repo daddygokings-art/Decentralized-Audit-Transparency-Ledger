@@ -1,0 +1,7 @@
+FROM rust:1.72-slim
+WORKDIR /work
+COPY . /work
+RUN cargo build --release
+
+# This image prepares the contract WASM and provides a placeholder entrypoint
+CMD ["/bin/sh", "-c", "echo Contract build complete; sleep infinity"]

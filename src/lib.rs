@@ -37,6 +37,8 @@ pub struct Event {
 pub enum DataKey {
     Owner,
     GlobalMaxLogs,
+    /// Paused flag: when true, write operations are blocked.
+    Paused,
     TotalEvents,
     EventCapSet(Symbol),
     EventMaxLogs(Symbol),
@@ -67,6 +69,7 @@ pub enum ContractError {
     CapNotSet = 7,
     MetadataTooLarge = 8,
     InvalidSignature = 9,
+    ContractPaused = 10,
 }
 
 const NULL_ACCOUNT: &str = "GAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAWHF";
@@ -83,6 +86,8 @@ impl AuditLedger {
             .instance()
             .set(&DataKey::GlobalMaxLogs, &global_max_logs);
         env.storage().instance().set(&DataKey::TotalEvents, &0u32);
+        // start unpaused
+        env.storage().instance().set(&DataKey::Paused, &false);
     }
 
     /// Log an event and return its content-addressed `BytesN<32>` ID.
@@ -93,6 +98,11 @@ impl AuditLedger {
         metadata: Bytes,
     ) -> BytesN<32> {
         submitter.require_auth();
+
+        // Reject writes when contract is paused.
+        if let Some(true) = env.storage().instance().get::<_, bool>(&DataKey::Paused) {
+            panic_with_error!(&env, ContractError::ContractPaused);
+        }
 
         // --- issue #67: enforce metadata size cap ---
         let max_meta = Self::effective_metadata_max_size(&env, &event_type);
@@ -281,6 +291,10 @@ impl AuditLedger {
 
     pub fn set_global_max_logs(env: Env, caller: Address, new_max: u32) {
         caller.require_auth();
+        // governance writes should be blocked while paused
+        if let Some(true) = env.storage().instance().get::<_, bool>(&DataKey::Paused) {
+            panic_with_error!(&env, ContractError::ContractPaused);
+        }
         Self::require_owner(&env, &caller);
         env.storage()
             .instance()
@@ -289,6 +303,9 @@ impl AuditLedger {
 
     pub fn set_event_max_logs(env: Env, caller: Address, event_type: Symbol, new_max: u32) {
         caller.require_auth();
+        if let Some(true) = env.storage().instance().get::<_, bool>(&DataKey::Paused) {
+            panic_with_error!(&env, ContractError::ContractPaused);
+        }
         Self::require_owner(&env, &caller);
         env.storage()
             .instance()
@@ -300,6 +317,9 @@ impl AuditLedger {
 
     pub fn remove_event_cap(env: Env, caller: Address, event_type: Symbol) {
         caller.require_auth();
+        if let Some(true) = env.storage().instance().get::<_, bool>(&DataKey::Paused) {
+            panic_with_error!(&env, ContractError::ContractPaused);
+        }
         Self::require_owner(&env, &caller);
         if !env
             .storage()
@@ -318,6 +338,9 @@ impl AuditLedger {
 
     pub fn transfer_ownership(env: Env, caller: Address, new_owner: Address) {
         caller.require_auth();
+        if let Some(true) = env.storage().instance().get::<_, bool>(&DataKey::Paused) {
+            panic_with_error!(&env, ContractError::ContractPaused);
+        }
         Self::require_owner(&env, &caller);
         if new_owner == Address::from_str(&env, NULL_ACCOUNT) {
             panic_with_error!(&env, ContractError::NewOwnerIsZero);
@@ -332,6 +355,9 @@ impl AuditLedger {
     /// Pass `u32::MAX` to effectively disable the limit.
     pub fn set_metadata_max_size(env: Env, caller: Address, max_size: u32) {
         caller.require_auth();
+        if let Some(true) = env.storage().instance().get::<_, bool>(&DataKey::Paused) {
+            panic_with_error!(&env, ContractError::ContractPaused);
+        }
         Self::require_owner(&env, &caller);
         env.storage()
             .instance()
@@ -347,10 +373,30 @@ impl AuditLedger {
         max_size: u32,
     ) {
         caller.require_auth();
+        if let Some(true) = env.storage().instance().get::<_, bool>(&DataKey::Paused) {
+            panic_with_error!(&env, ContractError::ContractPaused);
+        }
         Self::require_owner(&env, &caller);
         env.storage()
             .instance()
             .set(&DataKey::EventMetadataMaxSize(event_type), &max_size);
+    }
+
+    /// Pause write operations. Owner-only. Works even if contract already paused.
+    pub fn pause(env: Env, caller: Address) {
+        caller.require_auth();
+        Self::require_owner(&env, &caller);
+        env.storage().instance().set(&DataKey::Paused, &true);
+        env.events().publish((Symbol::new(&env, "contract_paused"),), (caller,));
+    }
+
+    /// Unpause write operations. Owner-only.
+    pub fn unpause(env: Env, caller: Address) {
+        caller.require_auth();
+        Self::require_owner(&env, &caller);
+        env.storage().instance().set(&DataKey::Paused, &false);
+        env.events()
+            .publish((Symbol::new(&env, "contract_unpaused"),), (caller,));
     }
 
     /// Get the effective metadata size limit for the given event type.
