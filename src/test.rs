@@ -460,6 +460,130 @@ fn test_remove_cap_then_unlimited() {
     assert_eq!(client.event_count(&payment), 1);
 }
 
+// ── issue #67: metadata size cap ──────────────────────────────────────────
+
+#[test]
+fn test_metadata_size_cap_default_allows_1kb() {
+    let (env, _owner, client) = create_ledger();
+    let submitter = Address::generate(&env);
+
+    env.mock_all_auths();
+    // Default max is 1024; 100 bytes should pass.
+    let meta = Bytes::from_slice(&env, &[0u8; 100]);
+    let id = client.log_event(&submitter, &symbol_short!("p"), &meta);
+    assert_eq!(client.total_events(), 1);
+}
+
+#[test]
+fn test_metadata_size_cap_rejects_oversized_default() {
+    let (env, _owner, client) = create_ledger();
+    let submitter = Address::generate(&env);
+
+    env.mock_all_auths();
+    // 1025 > 1024 default → rejected
+    let meta = Bytes::from_slice(&env, &[0u8; 1025]);
+    let result = client.try_log_event(&submitter, &symbol_short!("p"), &meta);
+    assert!(result.is_err());
+}
+
+#[test]
+fn test_metadata_size_cap_owner_can_set_global() {
+    let (env, owner, client) = create_ledger();
+    let submitter = Address::generate(&env);
+
+    env.mock_all_auths();
+    client.set_metadata_max_size(&owner, &50);
+    // 50 bytes → passes
+    let id = client.log_event(&submitter, &symbol_short!("t"), &Bytes::from_slice(&env, &[0u8; 50]));
+    assert_eq!(client.total_events(), 1);
+    // 51 bytes → rejected
+    let r2 = client.try_log_event(&submitter, &symbol_short!("t"), &Bytes::from_slice(&env, &[0u8; 51]));
+    assert!(r2.is_err());
+}
+
+#[test]
+fn test_metadata_size_cap_non_owner_cannot_set() {
+    let (env, _owner, client) = create_ledger();
+    let attacker = Address::generate(&env);
+
+    env.mock_all_auths();
+    let result = client.try_set_metadata_max_size(&attacker, &100);
+    assert!(result.is_err());
+}
+
+#[test]
+fn test_metadata_size_cap_per_type_overrides_global() {
+    let (env, owner, client) = create_ledger();
+    let submitter = Address::generate(&env);
+    let lett = symbol_short!("lett");
+
+    env.mock_all_auths();
+    client.set_metadata_max_size(&owner, &10);
+    client.set_event_metadata_max_size(&owner, &lett, &100);
+    // type "lett" allows 100 → 50 passes
+    let id = client.log_event(&submitter, &lett, &Bytes::from_slice(&env, &[0u8; 50]));
+    assert_eq!(client.total_events(), 1);
+    // type "z" uses global cap of 10 → 11 fails
+    let r2 = client.try_log_event(&submitter, &symbol_short!("z"), &Bytes::from_slice(&env, &[0u8; 11]));
+    assert!(r2.is_err());
+}
+
+#[test]
+fn test_metadata_size_cap_getter() {
+    let (env, owner, client) = create_ledger();
+    env.mock_all_auths();
+    client.set_event_metadata_max_size(&owner, &symbol_short!("x"), &77);
+    let cap = client.get_metadata_max_size(&symbol_short!("x"));
+    assert_eq!(cap, 77);
+}
+
+// ── issue #69: event signatures ──────────────────────────────────────────
+
+#[test]
+fn test_log_event_signed_stores_signature() {
+    let (env, _owner, client) = create_ledger();
+    let submitter = Address::generate(&env);
+
+    env.mock_all_auths();
+    let sig_payload = Bytes::from_slice(&env, &[0u8; 96]); // dummy 96 bytes
+    let id = client.log_event_signed(
+        &submitter,
+        &symbol_short!("pay"),
+        &Bytes::from_slice(&env, b"data"),
+        &sig_payload,
+    );
+    let stored = client.get_event_signature(&id);
+    assert!(stored.is_some());
+    assert_eq!(stored.unwrap().len(), 96);
+}
+
+#[test]
+#[should_panic(expected = "HostError: Error(Contract, #9)")]
+fn test_log_event_signed_rejects_wrong_length() {
+    let (env, _owner, client) = create_ledger();
+    let submitter = Address::generate(&env);
+
+    env.mock_all_auths();
+    let short_payload = Bytes::from_slice(&env, b"too-short");
+    client.log_event_signed(
+        &submitter,
+        &symbol_short!("pay"),
+        &Bytes::from_slice(&env, b"data"),
+        &short_payload,
+    );
+}
+
+#[test]
+fn test_get_event_signature_returns_none_for_unsigned() {
+    let (env, _owner, client) = create_ledger();
+    let submitter = Address::generate(&env);
+
+    env.mock_all_auths();
+    let id = client.log_event(&submitter, &symbol_short!("p"), &Bytes::from_slice(&env, b"x"));
+    let stored = client.get_event_signature(&id);
+    assert!(stored.is_none());
+}
+
 #[test]
 fn test_mixed_types_with_limits() {
     let (env, owner, client) = create_ledger();

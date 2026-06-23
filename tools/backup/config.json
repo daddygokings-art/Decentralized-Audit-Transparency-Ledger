@@ -1,0 +1,11 @@
+{
+  "rpc_url": "https://soroban-testnet.stellar.org",
+  "network_passphrase": "Test SDF Network ; September 2015",
+  "contract_id": "YOUR_CONTRACT_ID",
+  "backup_dir": "./backups",
+  "max_batch_size": 100,
+  "s3_bucket": "",
+  "s3_region": "",
+  "s3_access_key": "",
+  "s3_secret_key": ""
+}

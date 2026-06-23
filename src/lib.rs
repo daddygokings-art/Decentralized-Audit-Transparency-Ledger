@@ -5,6 +5,9 @@ use soroban_sdk::{
     BytesN, Env, Symbol, Vec,
 };
 
+/// Default maximum metadata size (1 KB). Used when no explicit cap is set.
+const DEFAULT_MAX_METADATA_SIZE: u32 = 1024;
+
 /// An audit event stored on-chain.
 ///
 /// # ID scheme (issue #70)
@@ -43,6 +46,12 @@ pub enum DataKey {
     EventData(BytesN<32>),
     /// Sequential index → event ID, for ordered retrieval.
     EventOrder(u32),
+    /// Per-event-type metadata size cap (issue #67). Absent = use global default.
+    EventMetadataMaxSize(Symbol),
+    /// Global metadata size cap (issue #67). Absent = DEFAULT_MAX_METADATA_SIZE.
+    GlobalMetadataMaxSize,
+    /// Signature stored for an event (issue #69): (pubkey, signature).
+    EventSignature(BytesN<32>),
 }
 
 #[contracterror]
@@ -56,6 +65,8 @@ pub enum ContractError {
     EventTypeIndexOutOfBounds = 5,
     NewOwnerIsZero = 6,
     CapNotSet = 7,
+    MetadataTooLarge = 8,
+    InvalidSignature = 9,
 }
 
 const NULL_ACCOUNT: &str = "GAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAWHF";
@@ -82,6 +93,12 @@ impl AuditLedger {
         metadata: Bytes,
     ) -> BytesN<32> {
         submitter.require_auth();
+
+        // --- issue #67: enforce metadata size cap ---
+        let max_meta = Self::effective_metadata_max_size(&env, &event_type);
+        if metadata.len() > max_meta {
+            panic_with_error!(&env, ContractError::MetadataTooLarge);
+        }
 
         let global_max: u32 = env
             .storage()
@@ -306,6 +323,94 @@ impl AuditLedger {
             panic_with_error!(&env, ContractError::NewOwnerIsZero);
         }
         env.storage().instance().set(&DataKey::Owner, &new_owner);
+    }
+
+    // ── issue #67: metadata size governance ──────────────────────────────────
+
+    /// Set a global metadata size limit (owner-only).
+    /// Events with `metadata.len() > max_size` will be rejected.
+    /// Pass `u32::MAX` to effectively disable the limit.
+    pub fn set_metadata_max_size(env: Env, caller: Address, max_size: u32) {
+        caller.require_auth();
+        Self::require_owner(&env, &caller);
+        env.storage()
+            .instance()
+            .set(&DataKey::GlobalMetadataMaxSize, &max_size);
+    }
+
+    /// Set a per-event-type metadata size limit (owner-only).
+    /// Overrides the global limit for the given event type.
+    pub fn set_event_metadata_max_size(
+        env: Env,
+        caller: Address,
+        event_type: Symbol,
+        max_size: u32,
+    ) {
+        caller.require_auth();
+        Self::require_owner(&env, &caller);
+        env.storage()
+            .instance()
+            .set(&DataKey::EventMetadataMaxSize(event_type), &max_size);
+    }
+
+    /// Get the effective metadata size limit for the given event type.
+    /// Returns the per-type cap if set, otherwise the global cap, otherwise the default.
+    pub fn get_metadata_max_size(env: Env, event_type: Symbol) -> u32 {
+        Self::effective_metadata_max_size(&env, &event_type)
+    }
+
+    fn effective_metadata_max_size(env: &Env, event_type: &Symbol) -> u32 {
+        // per-type overrides global
+        if let Some(v) = env
+            .storage()
+            .instance()
+            .get::<_, u32>(&DataKey::EventMetadataMaxSize(event_type.clone()))
+        {
+            return v;
+        }
+        // global fallback
+        if let Some(v) = env
+            .storage()
+            .instance()
+            .get::<_, u32>(&DataKey::GlobalMetadataMaxSize)
+        {
+            return v;
+        }
+        DEFAULT_MAX_METADATA_SIZE
+    }
+
+    // ── issue #69: event signatures (Ed25519) ────────────────────────────────
+
+    /// Log an event and attach a 96-byte Ed25519 signature payload
+    /// (`pubkey[32] || signature[64]`) for non-repudiation.
+    ///
+    /// The signature is **not** verified on-chain (gas efficiency); instead it is
+    /// stored and can be verified off-chain. The signed message SHOULD be the
+    /// event's content-addressed ID returned by this function.
+    pub fn log_event_signed(
+        env: Env,
+        submitter: Address,
+        event_type: Symbol,
+        metadata: Bytes,
+        signature_payload: Bytes,
+    ) -> BytesN<32> {
+        // Delegates auth to the inner log_event call.
+        if signature_payload.len() != 96 {
+            panic_with_error!(&env, ContractError::InvalidSignature);
+        }
+        let event_id = Self::log_event(env.clone(), submitter, event_type, metadata.clone());
+        env.storage()
+            .instance()
+            .set(&DataKey::EventSignature(event_id.clone()), &signature_payload);
+        event_id
+    }
+
+    /// Return the stored 96-byte signature payload (pubkey || signature) for an
+    /// event. Returns `None` if no signature was attached during logging.
+    pub fn get_event_signature(env: Env, event_id: BytesN<32>) -> Option<Bytes> {
+        env.storage()
+            .instance()
+            .get(&DataKey::EventSignature(event_id))
     }
 
     // ── Private helpers ─────────────────────────────────────────────────────
