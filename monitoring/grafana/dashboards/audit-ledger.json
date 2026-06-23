@@ -1,0 +1,233 @@
+{
+  "__inputs": [],
+  "__requires": [
+    { "type": "grafana", "id": "grafana", "name": "Grafana", "version": "9.0.0" },
+    { "type": "datasource", "id": "prometheus", "name": "Prometheus", "version": "1.0.0" }
+  ],
+  "annotations": { "list": [] },
+  "description": "AuditLedger contract health, event activity, and key performance metrics",
+  "editable": true,
+  "fiscalYearStartMonth": 0,
+  "graphTooltip": 1,
+  "id": null,
+  "links": [],
+  "liveNow": false,
+  "panels": [
+    {
+      "id": 1,
+      "type": "timeseries",
+      "title": "Event Rate (events/min)",
+      "description": "Number of new events logged per minute",
+      "datasource": { "type": "prometheus", "uid": "${DS_PROMETHEUS}" },
+      "gridPos": { "h": 8, "w": 12, "x": 0, "y": 0 },
+      "targets": [
+        {
+          "expr": "rate(audit_ledger_total_events[1m])",
+          "legendFormat": "events/min",
+          "refId": "A"
+        },
+        {
+          "expr": "rate(audit_ledger_total_events[1h])",
+          "legendFormat": "events/hr (scaled)",
+          "refId": "B"
+        }
+      ],
+      "options": { "tooltip": { "mode": "multi" } }
+    },
+    {
+      "id": 2,
+      "type": "gauge",
+      "title": "Total Events vs Global Max",
+      "description": "Current total events compared to global maximum",
+      "datasource": { "type": "prometheus", "uid": "${DS_PROMETHEUS}" },
+      "gridPos": { "h": 8, "w": 6, "x": 12, "y": 0 },
+      "targets": [
+        {
+          "expr": "audit_ledger_total_events",
+          "legendFormat": "Total Events",
+          "refId": "A"
+        }
+      ],
+      "options": {
+        "reduceOptions": { "calcs": ["lastNotNull"] },
+        "showThresholdLabels": true,
+        "showThresholdMarkers": true
+      },
+      "fieldConfig": {
+        "defaults": {
+          "thresholds": {
+            "mode": "percentage",
+            "steps": [
+              { "color": "green", "value": null },
+              { "color": "yellow", "value": 75 },
+              { "color": "red", "value": 90 }
+            ]
+          },
+          "min": 0,
+          "max": 100,
+          "unit": "short"
+        }
+      }
+    },
+    {
+      "id": 3,
+      "type": "gauge",
+      "title": "Storage Usage (%)",
+      "description": "Estimated storage utilisation based on event count",
+      "datasource": { "type": "prometheus", "uid": "${DS_PROMETHEUS}" },
+      "gridPos": { "h": 8, "w": 6, "x": 18, "y": 0 },
+      "targets": [
+        {
+          "expr": "audit_ledger_storage_usage_percent",
+          "legendFormat": "Storage %",
+          "refId": "A"
+        }
+      ],
+      "options": {
+        "reduceOptions": { "calcs": ["lastNotNull"] },
+        "showThresholdLabels": true,
+        "showThresholdMarkers": true
+      },
+      "fieldConfig": {
+        "defaults": {
+          "thresholds": {
+            "mode": "absolute",
+            "steps": [
+              { "color": "green", "value": null },
+              { "color": "yellow", "value": 75 },
+              { "color": "red", "value": 90 }
+            ]
+          },
+          "min": 0,
+          "max": 100,
+          "unit": "percent"
+        }
+      }
+    },
+    {
+      "id": 4,
+      "type": "piechart",
+      "title": "Events by Type",
+      "description": "Distribution of events across all event types",
+      "datasource": { "type": "prometheus", "uid": "${DS_PROMETHEUS}" },
+      "gridPos": { "h": 8, "w": 12, "x": 0, "y": 8 },
+      "targets": [
+        {
+          "expr": "audit_ledger_events_by_type",
+          "legendFormat": "{{event_type}}",
+          "refId": "A"
+        }
+      ],
+      "options": { "pieType": "pie", "tooltip": { "mode": "multi" } }
+    },
+    {
+      "id": 5,
+      "type": "bargauge",
+      "title": "Top Submitters",
+      "description": "Most active event submitters",
+      "datasource": { "type": "prometheus", "uid": "${DS_PROMETHEUS}" },
+      "gridPos": { "h": 8, "w": 12, "x": 12, "y": 8 },
+      "targets": [
+        {
+          "expr": "topk(10, audit_ledger_events_by_submitter)",
+          "legendFormat": "{{submitter}}",
+          "refId": "A"
+        }
+      ],
+      "options": {
+        "reduceOptions": { "calcs": ["lastNotNull"] },
+        "orientation": "horizontal",
+        "displayMode": "gradient"
+      }
+    },
+    {
+      "id": 6,
+      "type": "table",
+      "title": "Recent Events",
+      "description": "Most recently logged events",
+      "datasource": { "type": "prometheus", "uid": "${DS_PROMETHEUS}" },
+      "gridPos": { "h": 8, "w": 24, "x": 0, "y": 16 },
+      "targets": [
+        {
+          "expr": "audit_ledger_recent_event_timestamp",
+          "legendFormat": "{{event_id}} | {{event_type}} | {{submitter}}",
+          "refId": "A",
+          "instant": true
+        }
+      ],
+      "transformations": [
+        { "id": "labelsToFields", "options": {} },
+        {
+          "id": "organize",
+          "options": {
+            "renameByName": {
+              "event_id": "Event ID",
+              "event_type": "Type",
+              "submitter": "Submitter",
+              "Value": "Timestamp"
+            }
+          }
+        }
+      ]
+    },
+    {
+      "id": 7,
+      "type": "timeseries",
+      "title": "Error Rate",
+      "description": "Failed transaction count over time",
+      "datasource": { "type": "prometheus", "uid": "${DS_PROMETHEUS}" },
+      "gridPos": { "h": 8, "w": 12, "x": 0, "y": 24 },
+      "targets": [
+        {
+          "expr": "rate(audit_ledger_error_count[5m])",
+          "legendFormat": "errors/s",
+          "refId": "A"
+        }
+      ],
+      "fieldConfig": {
+        "defaults": {
+          "color": { "mode": "fixed", "fixedColor": "red" }
+        }
+      }
+    },
+    {
+      "id": 8,
+      "type": "timeseries",
+      "title": "Average Gas Cost per Event",
+      "description": "Mean gas/fee cost per log_event invocation over time",
+      "datasource": { "type": "prometheus", "uid": "${DS_PROMETHEUS}" },
+      "gridPos": { "h": 8, "w": 12, "x": 12, "y": 24 },
+      "targets": [
+        {
+          "expr": "audit_ledger_avg_gas_cost",
+          "legendFormat": "avg gas cost",
+          "refId": "A"
+        }
+      ]
+    }
+  ],
+  "refresh": "30s",
+  "schemaVersion": 37,
+  "style": "dark",
+  "tags": ["soroban", "audit", "stellar"],
+  "templating": {
+    "list": [
+      {
+        "current": {},
+        "hide": 0,
+        "includeAll": false,
+        "name": "DS_PROMETHEUS",
+        "options": [],
+        "query": "prometheus",
+        "refresh": 1,
+        "type": "datasource"
+      }
+    ]
+  },
+  "time": { "from": "now-6h", "to": "now" },
+  "timepicker": {},
+  "timezone": "browser",
+  "title": "AuditLedger Contract Dashboard",
+  "uid": "audit-ledger-main",
+  "version": 1
+}

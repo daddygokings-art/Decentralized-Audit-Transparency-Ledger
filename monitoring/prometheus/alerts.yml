@@ -1,0 +1,38 @@
+groups:
+  - name: audit_ledger
+    rules:
+      - alert: StorageNearCapacity
+        expr: audit_ledger_storage_usage_percent > 90
+        for: 1m
+        labels:
+          severity: critical
+        annotations:
+          summary: "AuditLedger storage near capacity"
+          description: "Storage usage is {{ $value | printf \"%.1f\" }}% (threshold: 90%)."
+
+      - alert: UnusualEventVolumeSpike
+        expr: rate(audit_ledger_total_events[5m]) > 10
+        for: 2m
+        labels:
+          severity: warning
+        annotations:
+          summary: "Unusual event volume spike detected"
+          description: "Event rate is {{ $value | printf \"%.2f\" }} events/s over the last 5 minutes."
+
+      - alert: NoEventsLoggedFor1Hour
+        expr: increase(audit_ledger_total_events[1h]) == 0
+        for: 60m
+        labels:
+          severity: warning
+        annotations:
+          summary: "No events logged for 1 hour"
+          description: "Zero new events have been logged in the past hour — potential contract or feeder issue."
+
+      - alert: ContractPausedUnexpectedly
+        expr: audit_ledger_global_max_logs == 0
+        for: 1m
+        labels:
+          severity: critical
+        annotations:
+          summary: "AuditLedger contract appears paused"
+          description: "global_max_logs is 0, blocking all new event logging."
