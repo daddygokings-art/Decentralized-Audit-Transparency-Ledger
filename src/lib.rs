@@ -66,6 +66,7 @@ pub enum DataKey {
     EventEmissionVersion,
     /// Low-cost mode configuration (issue #57): 0=normal, 1=low-cost.
     LowCostMode,
+}
 
 #[contracterror]
 #[derive(Copy, Clone, Debug, Eq, PartialEq, PartialOrd, Ord)]
@@ -237,7 +238,7 @@ impl AuditLedger {
             let emission_mode = Self::effective_event_emission_mode(&env);
             if emission_mode == 1 {
                 env.events().publish(
-                    (Symbol::new(&env, "log_event"), event_type, submitter),
+                    (Symbol::new(&env, "log_event"), event_type.clone(), submitter.clone()),
                     (index,),
                 );
             }
@@ -252,7 +253,7 @@ impl AuditLedger {
             1 => {
                 // Index-only emission (issue #60)
                 env.events().publish(
-                    (Symbol::new(&env, "log_event"), event_type, submitter),
+                    (Symbol::new(&env, "log_event"), event_type.clone(), submitter.clone()),
                     (index,),
                 );
             }
@@ -260,8 +261,8 @@ impl AuditLedger {
                 // Hash-only emission (issue #60)
                 let metadata_hash = env.crypto().sha256(&metadata);
                 env.events().publish(
-                    (Symbol::new(&env, "log_event"), event_type, submitter),
-                    (index, metadata_hash),
+                    (Symbol::new(&env, "log_event"), event_type.clone(), submitter.clone()),
+                    (index, metadata_hash.to_val()),
                 );
             }
             3 => {
@@ -270,7 +271,7 @@ impl AuditLedger {
             _ => {
                 // Default: full metadata emission (backward compatible)
                 env.events().publish(
-                    (Symbol::new(&env, "log_event"), event_type, submitter),
+                    (Symbol::new(&env, "log_event"), event_type.clone(), submitter.clone()),
                     (index, timestamp, metadata),
                 );
             }
@@ -764,3 +765,12 @@ impl AuditLedger {
 
 #[cfg(test)]
 mod test;
+
+#[cfg(test)]
+mod regression_tests;
+
+#[cfg(test)]
+mod boundary_tests;
+
+#[cfg(test)]
+mod cross_contract_tests;
