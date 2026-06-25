@@ -32,6 +32,16 @@ pub struct Event {
     pub prev_hash: BytesN<32>,
 }
 
+/// Lightweight event header without metadata (issue #56).
+#[contracttype]
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct EventHeader {
+    pub index: u32,
+    pub timestamp: u64,
+    pub event_type: Symbol,
+    pub submitter: Address,
+}
+
 #[derive(Clone)]
 #[contracttype]
 pub enum DataKey {
@@ -42,7 +52,7 @@ pub enum DataKey {
     TotalEvents,
     EventCapSet(Symbol),
     EventMaxLogs(Symbol),
-    /// Stores `Vec<BytesN<32>>` – ordered list of event IDs for a type.
+    /// Stores packed Bytes of u32 global-order indices (4 bytes each, LE) for a type (issue #54).
     EventTypeIndices(Symbol),
     /// Primary storage: event ID → Event.
     EventData(BytesN<32>),
@@ -56,6 +66,8 @@ pub enum DataKey {
     EventSignature(BytesN<32>),
     /// Cached event count per type (issue #52). Updated alongside EventTypeIndices.
     EventTypeCount(Symbol),
+    /// Lightweight header (issue #56): EventHeader stored separately from metadata.
+    EventHeaderKey(BytesN<32>),
     /// Optimized storage for event headers (issue #53): (index, timestamp, event_type, submitter).
     EventMeta(BytesN<32>),
     /// Optimized storage for event metadata alone (issue #53).
@@ -66,6 +78,10 @@ pub enum DataKey {
     EventEmissionVersion,
     /// Low-cost mode configuration (issue #57): 0=normal, 1=low-cost.
     LowCostMode,
+    /// Rate limit (max events per ledger timestamp) for a submitter (issue #62). 0 = blocked.
+    SubmitterRateLimit(Address),
+    /// Rate-limit state (last_timestamp, count) per submitter (issue #62).
+    SubmitterRateState(Address),
 }
 
 #[contracterror]
@@ -82,6 +98,7 @@ pub enum ContractError {
     MetadataTooLarge = 8,
     InvalidSignature = 9,
     ContractPaused = 10,
+    RateLimitExceeded = 11,
 }
 
 const NULL_ACCOUNT: &str = "GAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAWHF";
@@ -114,6 +131,37 @@ impl AuditLedger {
         // Reject writes when contract is paused.
         if let Some(true) = env.storage().instance().get::<_, bool>(&DataKey::Paused) {
             panic_with_error!(&env, ContractError::ContractPaused);
+        }
+
+        // --- issue #62: enforce per-submitter rate limit ---
+        if let Some(limit) = env
+            .storage()
+            .instance()
+            .get::<_, u32>(&DataKey::SubmitterRateLimit(submitter.clone()))
+        {
+            let now = env.ledger().timestamp();
+            let (last_ts, count): (u64, u32) = env
+                .storage()
+                .instance()
+                .get(&DataKey::SubmitterRateState(submitter.clone()))
+                .unwrap_or((0u64, 0u32));
+            if now == last_ts {
+                if count >= limit {
+                    panic_with_error!(&env, ContractError::RateLimitExceeded);
+                }
+                env.storage().instance().set(
+                    &DataKey::SubmitterRateState(submitter.clone()),
+                    &(now, count + 1),
+                );
+            } else {
+                if limit == 0 {
+                    panic_with_error!(&env, ContractError::RateLimitExceeded);
+                }
+                env.storage().instance().set(
+                    &DataKey::SubmitterRateState(submitter.clone()),
+                    &(now, 1u32),
+                );
+            }
         }
 
         // --- issue #67: enforce metadata size cap ---
@@ -199,7 +247,17 @@ impl AuditLedger {
         env.storage()
             .instance()
             .set(&DataKey::EventOrder(index), &event_id);
-        
+
+        // --- issue #56: store lightweight header separately ---
+        let header = EventHeader {
+            index,
+            timestamp,
+            event_type: event_type.clone(),
+            submitter: submitter.clone(),
+        };
+        env.storage()
+            .instance()
+            .set(&DataKey::EventHeaderKey(event_id.clone()), &header);
         env.storage()
             .instance()
             .set(&DataKey::EventMeta(event_id.clone()), &evt);
@@ -207,21 +265,9 @@ impl AuditLedger {
             .instance()
             .set(&DataKey::EventMetadata(event_id.clone()), &metadata);
 
-        let mut indices: Vec<BytesN<32>> = if !Self::effective_low_cost_mode(&env) {
-            env.storage()
-                .instance()
-                .get(&DataKey::EventTypeIndices(event_type.clone()))
-                .unwrap_or(Vec::new(&env))
-        } else {
-            Vec::new(&env)
-        };
-        
+        // --- issue #54: packed-Bytes index storage ---
         if !Self::effective_low_cost_mode(&env) {
-            indices.push_back(event_id.clone());
-            env.storage()
-                .instance()
-                .set(&DataKey::EventTypeIndices(event_type.clone()), &indices);
-            
+            Self::push_type_index(&env, event_type.clone(), index);
             let mut count: u32 = env
                 .storage()
                 .instance()
@@ -259,7 +305,7 @@ impl AuditLedger {
             }
             2 => {
                 // Hash-only emission (issue #60)
-                let metadata_hash = env.crypto().sha256(&metadata);
+                let metadata_hash: BytesN<32> = env.crypto().sha256(&metadata).into();
                 env.events().publish(
                     (Symbol::new(&env, "log_event"), event_type.clone(), submitter.clone()),
                     (index, metadata_hash.to_val()),
@@ -307,11 +353,11 @@ impl AuditLedger {
             })
     }
     
-    /// Retrieve only the event header (index, timestamp, event_type, submitter) (issue #53).
-    pub fn get_event_header(env: Env, id: BytesN<32>) -> Event {
+    /// Retrieve only the event header (index, timestamp, event_type, submitter) — no metadata (issue #56).
+    pub fn get_event_header(env: Env, id: BytesN<32>) -> EventHeader {
         env.storage()
             .instance()
-            .get(&DataKey::EventMeta(id))
+            .get(&DataKey::EventHeaderKey(id))
             .unwrap_or_else(|| {
                 panic_with_error!(&env, ContractError::EventDoesNotExist);
             })
@@ -345,18 +391,15 @@ impl AuditLedger {
         if Self::effective_low_cost_mode(&env) {
             panic_with_error!(&env, ContractError::EventTypeIndexOutOfBounds);
         }
-        
-        let indices: Vec<BytesN<32>> = env
+
+        let global_order = Self::get_type_index(&env, event_type, type_index);
+        let event_id: BytesN<32> = env
             .storage()
             .instance()
-            .get(&DataKey::EventTypeIndices(event_type.clone()))
+            .get(&DataKey::EventOrder(global_order))
             .unwrap_or_else(|| {
                 panic_with_error!(&env, ContractError::EventTypeIndexOutOfBounds);
             });
-
-        let event_id = indices.get(type_index).unwrap_or_else(|| {
-            panic_with_error!(&env, ContractError::EventTypeIndexOutOfBounds);
-        });
 
         env.storage()
             .instance()
@@ -562,6 +605,74 @@ impl AuditLedger {
             .get(&DataKey::LowCostMode)
             .unwrap_or(false)
     }
+
+    // ── issue #62: rate limiting ──────────────────────────────────────────────
+
+    /// Set a per-submitter rate limit (owner-only).
+    /// `max_per_timestamp` = max events allowed per ledger timestamp.
+    /// 0 = completely block that submitter.
+    pub fn set_submitter_rate_limit(
+        env: Env,
+        caller: Address,
+        submitter: Address,
+        max_per_timestamp: u32,
+    ) {
+        caller.require_auth();
+        Self::require_owner(&env, &caller);
+        env.storage()
+            .instance()
+            .set(&DataKey::SubmitterRateLimit(submitter), &max_per_timestamp);
+    }
+
+    // ── issue #59: on-demand storage compaction ───────────────────────────────
+
+    /// Remove stale governance keys for the given event types.
+    /// "Stale" means EventCapSet/EventMaxLogs entries whose cap was removed but
+    /// whose EventTypeIndices packed-bytes still lingers, or orphaned entries.
+    /// Emits a `storage_compacted` event with the count of removed entries.
+    /// Owner-only.
+    pub fn compact_storage(env: Env, caller: Address, stale_types: Vec<Symbol>) -> u32 {
+        caller.require_auth();
+        Self::require_owner(&env, &caller);
+
+        let mut removed: u32 = 0;
+        for i in 0..stale_types.len() {
+            let et = stale_types.get(i).unwrap();
+            // Only compact if the cap is no longer set (i.e., was removed).
+            if !env
+                .storage()
+                .instance()
+                .has(&DataKey::EventCapSet(et.clone()))
+            {
+                if env
+                    .storage()
+                    .instance()
+                    .has(&DataKey::EventTypeIndices(et.clone()))
+                {
+                    env.storage()
+                        .instance()
+                        .remove(&DataKey::EventTypeIndices(et.clone()));
+                    removed += 1;
+                }
+                if env
+                    .storage()
+                    .instance()
+                    .has(&DataKey::EventTypeCount(et.clone()))
+                {
+                    env.storage()
+                        .instance()
+                        .remove(&DataKey::EventTypeCount(et.clone()));
+                    removed += 1;
+                }
+            }
+        }
+
+        env.events().publish(
+            (Symbol::new(&env, "storage_compacted"),),
+            (removed,),
+        );
+        removed
+    }
     
     fn effective_low_cost_mode(env: &Env) -> bool {
         env.storage()
@@ -632,6 +743,39 @@ impl AuditLedger {
     }
 
     // ── Private helpers ─────────────────────────────────────────────────────
+
+    // ── issue #54: packed-Bytes index storage helpers ────────────────────────
+
+    /// Append a global order index (u32, 4 bytes LE) to the packed Bytes for `event_type`.
+    fn push_type_index(env: &Env, event_type: Symbol, global_index: u32) {
+        let mut packed: Bytes = env
+            .storage()
+            .instance()
+            .get(&DataKey::EventTypeIndices(event_type.clone()))
+            .unwrap_or(Bytes::new(env));
+        packed.append(&Self::u32_to_bytes(env, global_index));
+        env.storage()
+            .instance()
+            .set(&DataKey::EventTypeIndices(event_type), &packed);
+    }
+
+    /// Read the `type_index`-th global order index from the packed Bytes for `event_type`.
+    fn get_type_index(env: &Env, event_type: Symbol, type_index: u32) -> u32 {
+        let packed: Bytes = env
+            .storage()
+            .instance()
+            .get(&DataKey::EventTypeIndices(event_type))
+            .unwrap_or_else(|| panic_with_error!(env, ContractError::EventTypeIndexOutOfBounds));
+        let byte_offset = type_index * 4;
+        if byte_offset + 4 > packed.len() {
+            panic_with_error!(env, ContractError::EventTypeIndexOutOfBounds);
+        }
+        let b0 = packed.get(byte_offset).unwrap() as u32;
+        let b1 = packed.get(byte_offset + 1).unwrap() as u32;
+        let b2 = packed.get(byte_offset + 2).unwrap() as u32;
+        let b3 = packed.get(byte_offset + 3).unwrap() as u32;
+        b0 | (b1 << 8) | (b2 << 16) | (b3 << 24)
+    }
 
     fn require_owner(env: &Env, addr: &Address) {
         let owner: Address = env.storage().instance().get(&DataKey::Owner).unwrap();

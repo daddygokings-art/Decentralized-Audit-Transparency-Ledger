@@ -660,7 +660,7 @@ fn test_low_cost_mode_emission() {
     let events = contract_events.events();
     assert!(!events.is_empty());
     
-    // With low-cost mode and index-only emission, event was emitted
+    // With low-cost mode and index-only emission, events are emitted
 }
 
 // ── Event emission optimization tests ────────────────────────────────────────
@@ -708,7 +708,7 @@ fn test_event_emission_index_only() {
     let events = contract_events.events();
     assert!(!events.is_empty());
     
-    // With index-only mode, event was emitted
+    // With index-only mode, events are emitted (data format verified by contract logic)
 }
 
 // ── Optimized storage tests ────────────────────────────────────────────────
@@ -739,9 +739,176 @@ fn test_get_event_header() {
     let id = client.log_event(&submitter, &payment, &meta);
     
     let header = client.get_event_header(&id);
+    // EventHeader contains only index/timestamp/event_type/submitter — no metadata (issue #56)
     assert_eq!(header.index, 0);
     assert_eq!(header.event_type, payment);
     assert_eq!(header.submitter, submitter);
-    assert_eq!(header.metadata, meta);
     assert_eq!(header.timestamp, 1000);
+}
+
+// ── issue #56: lazy loading / EventHeader ────────────────────────────────────
+
+#[test]
+fn test_get_event_header_has_no_metadata_field() {
+    // EventHeader is a separate lighter struct; get_event() still returns full Event.
+    let (env, _owner, client) = create_ledger();
+    let submitter = Address::generate(&env);
+    let payment = symbol_short!("payment");
+    let meta = Bytes::from_slice(&env, b"lazy-test");
+
+    env.mock_all_auths();
+    let id = client.log_event(&submitter, &payment, &meta);
+
+    // Full event has metadata
+    let evt = client.get_event(&id);
+    assert_eq!(evt.metadata, meta);
+
+    // Header omits metadata; fields match
+    let header = client.get_event_header(&id);
+    assert_eq!(header.index, evt.index);
+    assert_eq!(header.timestamp, evt.timestamp);
+    assert_eq!(header.event_type, payment);
+    assert_eq!(header.submitter, submitter);
+}
+
+// ── issue #54: packed-Bytes index storage ────────────────────────────────────
+
+#[test]
+fn test_packed_index_storage_get_event_by_type() {
+    let (env, owner, client) = create_ledger();
+    let submitter = Address::generate(&env);
+    let payment = symbol_short!("payment");
+    let refund = symbol_short!("refund");
+
+    env.mock_all_auths();
+    let id0 = client.log_event(&submitter, &payment, &Bytes::from_slice(&env, b"p1"));
+    let _rid = client.log_event(&submitter, &refund, &Bytes::from_slice(&env, b"r1"));
+    let id1 = client.log_event(&submitter, &payment, &Bytes::from_slice(&env, b"p2"));
+
+    assert_eq!(client.event_count(&payment), 2);
+    assert_eq!(client.event_count(&refund), 1);
+
+    let e0 = client.get_event_by_type(&payment, &0);
+    assert_eq!(e0.metadata, Bytes::from_slice(&env, b"p1"));
+
+    let e1 = client.get_event_by_type(&payment, &1);
+    assert_eq!(e1.metadata, Bytes::from_slice(&env, b"p2"));
+}
+
+// ── issue #62: rate limiting ──────────────────────────────────────────────────
+
+#[test]
+fn test_rate_limit_blocks_excess_events() {
+    let (env, owner, client) = create_ledger();
+    let submitter = Address::generate(&env);
+    let payment = symbol_short!("payment");
+
+    env.ledger().set_timestamp(1000);
+    env.mock_all_auths();
+
+    // Allow 1 event per timestamp
+    client.set_submitter_rate_limit(&owner, &submitter, &1);
+
+    // First event passes
+    client.log_event(&submitter, &payment, &Bytes::from_slice(&env, b"a"));
+
+    // Second event at same timestamp is rejected
+    let result = client.try_log_event(&submitter, &payment, &Bytes::from_slice(&env, b"b"));
+    assert!(result.is_err());
+}
+
+#[test]
+fn test_rate_limit_resets_on_new_timestamp() {
+    let (env, owner, client) = create_ledger();
+    let submitter = Address::generate(&env);
+    let payment = symbol_short!("payment");
+
+    env.ledger().set_timestamp(1000);
+    env.mock_all_auths();
+    client.set_submitter_rate_limit(&owner, &submitter, &1);
+
+    client.log_event(&submitter, &payment, &Bytes::from_slice(&env, b"a"));
+
+    // Advance timestamp — count resets
+    env.ledger().set_timestamp(1001);
+    client.log_event(&submitter, &payment, &Bytes::from_slice(&env, b"b"));
+    assert_eq!(client.total_events(), 2);
+}
+
+#[test]
+fn test_rate_limit_zero_blocks_completely() {
+    let (env, owner, client) = create_ledger();
+    let submitter = Address::generate(&env);
+    let payment = symbol_short!("payment");
+
+    env.ledger().set_timestamp(1000);
+    env.mock_all_auths();
+    client.set_submitter_rate_limit(&owner, &submitter, &0);
+
+    let result = client.try_log_event(&submitter, &payment, &Bytes::from_slice(&env, b"blocked"));
+    assert!(result.is_err());
+}
+
+#[test]
+fn test_rate_limit_does_not_affect_other_submitters() {
+    let (env, owner, client) = create_ledger();
+    let s1 = Address::generate(&env);
+    let s2 = Address::generate(&env);
+    let payment = symbol_short!("payment");
+
+    env.ledger().set_timestamp(1000);
+    env.mock_all_auths();
+    client.set_submitter_rate_limit(&owner, &s1, &0);
+
+    // s1 is blocked
+    let r1 = client.try_log_event(&s1, &payment, &Bytes::from_slice(&env, b"x"));
+    assert!(r1.is_err());
+
+    // s2 is unaffected
+    client.log_event(&s2, &payment, &Bytes::from_slice(&env, b"y"));
+    assert_eq!(client.total_events(), 1);
+}
+
+// ── issue #59: storage compaction ────────────────────────────────────────────
+
+#[test]
+fn test_compact_storage_removes_stale_indices() {
+    let (env, owner, client) = create_ledger();
+    let submitter = Address::generate(&env);
+    let payment = symbol_short!("payment");
+
+    env.mock_all_auths();
+    client.set_event_max_logs(&owner, &payment, &5);
+    client.log_event(&submitter, &payment, &Bytes::from_slice(&env, b"tx1"));
+
+    // Remove cap — leaves stale EventTypeIndices / EventTypeCount
+    client.remove_event_cap(&owner, &payment);
+
+    // Compact should clean up stale entries and return removed count > 0
+    let removed = client.compact_storage(&owner, &soroban_sdk::vec![&env, payment]);
+    assert!(removed > 0);
+}
+
+#[test]
+fn test_compact_storage_does_not_touch_active_caps() {
+    let (env, owner, client) = create_ledger();
+    let submitter = Address::generate(&env);
+    let payment = symbol_short!("payment");
+    let refund = symbol_short!("refund");
+
+    env.mock_all_auths();
+    client.set_event_max_logs(&owner, &payment, &5);
+    client.set_event_max_logs(&owner, &refund, &5);
+    client.log_event(&submitter, &payment, &Bytes::from_slice(&env, b"p1"));
+    client.log_event(&submitter, &refund, &Bytes::from_slice(&env, b"r1"));
+
+    // Remove only refund cap
+    client.remove_event_cap(&owner, &refund);
+
+    // Compact only refund
+    client.compact_storage(&owner, &soroban_sdk::vec![&env, refund]);
+
+    // payment cap still works
+    client.log_event(&submitter, &payment, &Bytes::from_slice(&env, b"p2"));
+    assert_eq!(client.event_count(&payment), 2);
 }
