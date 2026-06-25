@@ -66,6 +66,7 @@ pub enum DataKey {
     TotalEvents,
     EventCapSet(Symbol),
     EventMaxLogs(Symbol),
+    EventCapRemoved(Symbol),
     /// Stores packed Bytes of u32 global-order indices (4 bytes each, LE) for a type (issue #54).
     EventTypeIndices(Symbol),
     /// Primary storage: event ID → Event.
@@ -108,6 +109,10 @@ pub enum ContractError {
     InvalidSignature = 12,
     ContractPaused = 13,
     RateLimitExceeded = 14,
+    SameOwner = 15,
+    MaxLogsBelowCurrentCount = 16,
+    CapAlreadyRemoved = 17,
+    CapNeverSet = 18,
 }
 
 const NULL_ACCOUNT: &str = "GAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAWHF";
@@ -350,7 +355,8 @@ impl AuditLedger {
     /// Retrieve only the event metadata (optimized for low-fee environments, issue #57).
     pub fn get_event_metadata(env: Env, id: BytesN<32>) -> Bytes {
         Self::require_initialized(&env);
-        env.storage()
+        let evt: Event = env
+            .storage()
             .instance()
             .get(&DataKey::EventData(id))
             .unwrap_or_else(|| {
@@ -362,7 +368,8 @@ impl AuditLedger {
     /// Retrieve only the event header (index, timestamp, event_type, submitter) — no metadata (issue #56).
     pub fn get_event_header(env: Env, id: BytesN<32>) -> EventHeader {
         Self::require_initialized(&env);
-        env.storage()
+        let evt: Event = env
+            .storage()
             .instance()
             .get(&DataKey::EventData(id))
             .unwrap_or_else(|| {
@@ -455,6 +462,10 @@ impl AuditLedger {
             panic_with_error!(&env, ContractError::ContractPaused);
         }
         Self::require_owner(&env, &caller);
+        let total_events: u32 = env.storage().instance().get(&DataKey::TotalEvents).unwrap_or(0);
+        if new_max < total_events {
+            panic_with_error!(&env, ContractError::MaxLogsBelowCurrentCount);
+        }
         env.storage()
             .instance()
             .set(&DataKey::GlobalMaxLogs, &new_max);
@@ -473,6 +484,9 @@ impl AuditLedger {
         env.storage()
             .instance()
             .set(&DataKey::EventMaxLogs(event_type.clone()), &new_max);
+        env.storage()
+            .instance()
+            .remove(&DataKey::EventCapRemoved(event_type.clone()));
         
         if !Self::effective_low_cost_mode(&env) {
             if !env
@@ -499,7 +513,14 @@ impl AuditLedger {
             .instance()
             .has(&DataKey::EventCapSet(event_type.clone()))
         {
-            panic_with_error!(&env, ContractError::CapNotSet);
+            if env
+                .storage()
+                .instance()
+                .has(&DataKey::EventCapRemoved(event_type.clone()))
+            {
+                panic_with_error!(&env, ContractError::CapAlreadyRemoved);
+            }
+            panic_with_error!(&env, ContractError::CapNeverSet);
         }
         env.storage()
             .instance()
@@ -507,6 +528,16 @@ impl AuditLedger {
         env.storage()
             .instance()
             .remove(&DataKey::EventMaxLogs(event_type.clone()));
+        env.storage()
+            .instance()
+            .set(&DataKey::EventCapRemoved(event_type), &true);
+    }
+
+    pub fn has_cap(env: Env, event_type: Symbol) -> bool {
+        Self::require_initialized(&env);
+        env.storage()
+            .instance()
+            .has(&DataKey::EventCapSet(event_type))
     }
 
     pub fn transfer_ownership(env: Env, caller: Address, new_owner: Address) {
@@ -516,8 +547,12 @@ impl AuditLedger {
             panic_with_error!(&env, ContractError::ContractPaused);
         }
         Self::require_owner(&env, &caller);
+        let current_owner: Address = env.storage().instance().get(&DataKey::Owner).unwrap();
         if new_owner == Address::from_str(&env, NULL_ACCOUNT) {
             panic_with_error!(&env, ContractError::NewOwnerIsZero);
+        }
+        if new_owner == current_owner {
+            panic_with_error!(&env, ContractError::SameOwner);
         }
         env.storage().instance().set(&DataKey::Owner, &new_owner);
     }

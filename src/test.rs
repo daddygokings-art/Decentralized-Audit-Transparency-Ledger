@@ -259,6 +259,74 @@ fn test_owner_can_set_global_max_logs() {
 }
 
 #[test]
+fn test_set_global_max_logs_below_current_count_panics() {
+    let (env, owner, client) = create_ledger();
+    let submitter = Address::generate(&env);
+
+    env.mock_all_auths();
+    client.log_event(&submitter, &symbol_short!("p"), &Bytes::from_slice(&env, b"tx1"));
+    let result = client.try_set_global_max_logs(&owner, &0);
+    assert!(result.is_err());
+}
+
+#[test]
+fn test_set_global_max_logs_equal_current_count_freezes_logging() {
+    let (env, owner, client) = create_ledger();
+    let submitter = Address::generate(&env);
+
+    env.mock_all_auths();
+    client.log_event(&submitter, &symbol_short!("p"), &Bytes::from_slice(&env, b"tx1"));
+    client.set_global_max_logs(&owner, &1);
+
+    let result = client.try_log_event(&submitter, &symbol_short!("p"), &Bytes::from_slice(&env, b"tx2"));
+    assert!(result.is_err());
+}
+
+#[test]
+fn test_transfer_ownership_same_owner_panics() {
+    let (env, owner, client) = create_ledger();
+
+    env.mock_all_auths();
+    let result = client.try_transfer_ownership(&owner, &owner);
+    assert!(result.is_err());
+}
+
+#[test]
+fn test_remove_event_cap_never_set_panics() {
+    let (env, owner, client) = create_ledger();
+    let payment = symbol_short!("payment");
+
+    env.mock_all_auths();
+    let result = client.try_remove_event_cap(&owner, &payment);
+    assert!(result.is_err());
+}
+
+#[test]
+fn test_remove_event_cap_already_removed_panics() {
+    let (env, owner, client) = create_ledger();
+    let payment = symbol_short!("payment");
+
+    env.mock_all_auths();
+    client.set_event_max_logs(&owner, &payment, &5);
+    client.remove_event_cap(&owner, &payment);
+    let result = client.try_remove_event_cap(&owner, &payment);
+    assert!(result.is_err());
+}
+
+#[test]
+fn test_has_cap_detects_cap_state() {
+    let (env, owner, client) = create_ledger();
+    let payment = symbol_short!("payment");
+
+    env.mock_all_auths();
+    assert!(!client.has_cap(&payment));
+    client.set_event_max_logs(&owner, &payment, &5);
+    assert!(client.has_cap(&payment));
+    client.remove_event_cap(&owner, &payment);
+    assert!(!client.has_cap(&payment));
+}
+
+#[test]
 fn test_non_owner_cannot_set_global_max() {
     let (env, _owner, client) = create_ledger();
     let attacker = Address::generate(&env);
