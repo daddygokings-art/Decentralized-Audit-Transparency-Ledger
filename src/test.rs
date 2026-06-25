@@ -470,7 +470,7 @@ fn test_metadata_size_cap_default_allows_1kb() {
     env.mock_all_auths();
     // Default max is 1024; 100 bytes should pass.
     let meta = Bytes::from_slice(&env, &[0u8; 100]);
-    let id = client.log_event(&submitter, &symbol_short!("p"), &meta);
+    let _id = client.log_event(&submitter, &symbol_short!("p"), &meta);
     assert_eq!(client.total_events(), 1);
 }
 
@@ -494,7 +494,7 @@ fn test_metadata_size_cap_owner_can_set_global() {
     env.mock_all_auths();
     client.set_metadata_max_size(&owner, &50);
     // 50 bytes → passes
-    let id = client.log_event(&submitter, &symbol_short!("t"), &Bytes::from_slice(&env, &[0u8; 50]));
+    let _id = client.log_event(&submitter, &symbol_short!("t"), &Bytes::from_slice(&env, &[0u8; 50]));
     assert_eq!(client.total_events(), 1);
     // 51 bytes → rejected
     let r2 = client.try_log_event(&submitter, &symbol_short!("t"), &Bytes::from_slice(&env, &[0u8; 51]));
@@ -521,7 +521,7 @@ fn test_metadata_size_cap_per_type_overrides_global() {
     client.set_metadata_max_size(&owner, &10);
     client.set_event_metadata_max_size(&owner, &lett, &100);
     // type "lett" allows 100 → 50 passes
-    let id = client.log_event(&submitter, &lett, &Bytes::from_slice(&env, &[0u8; 50]));
+    let _id = client.log_event(&submitter, &lett, &Bytes::from_slice(&env, &[0u8; 50]));
     assert_eq!(client.total_events(), 1);
     // type "z" uses global cap of 10 → 11 fails
     let r2 = client.try_log_event(&submitter, &symbol_short!("z"), &Bytes::from_slice(&env, &[0u8; 11]));
@@ -582,6 +582,154 @@ fn test_get_event_signature_returns_none_for_unsigned() {
     let id = client.log_event(&submitter, &symbol_short!("p"), &Bytes::from_slice(&env, b"x"));
     let stored = client.get_event_signature(&id);
     assert!(stored.is_none());
+}
+
+// ── issue #343: additional boundary and regression tests ─────────────────
+
+#[test]
+fn test_transfer_ownership_to_zero_panics() {
+    let (env, owner, client) = create_ledger();
+    let zero = Address::from_str(
+        &env,
+        "GAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAWHF",
+    );
+
+    env.mock_all_auths();
+    let result = client.try_transfer_ownership(&owner, &zero);
+    assert!(result.is_err());
+}
+
+#[test]
+fn test_verify_integrity_empty_range() {
+    let (env, _owner, client) = create_ledger();
+    let submitter = Address::generate(&env);
+
+    env.mock_all_auths();
+    client.log_event(&submitter, &symbol_short!("a"), &Bytes::from_slice(&env, b"x"));
+    client.log_event(&submitter, &symbol_short!("b"), &Bytes::from_slice(&env, b"y"));
+
+    assert!(client.verify_integrity_range(&0, &0));
+    assert!(client.verify_integrity_range(&1, &1));
+    assert!(client.verify_integrity_range(&2, &2));
+}
+
+#[test]
+fn test_metadata_size_cap_u32_max_disables_limit() {
+    let (env, owner, client) = create_ledger();
+    let submitter = Address::generate(&env);
+
+    env.mock_all_auths();
+    client.set_metadata_max_size(&owner, &u32::MAX);
+
+    let large_meta = Bytes::from_slice(&env, &[0u8; 2000]);
+    let _id = client.log_event(&submitter, &symbol_short!("p"), &large_meta);
+    assert_eq!(client.total_events(), 1);
+}
+
+#[test]
+fn test_event_order_preserved_across_multiple_types() {
+    let (env, _owner, client) = create_ledger();
+    let submitter = Address::generate(&env);
+
+    env.mock_all_auths();
+    for i in 0u8..10 {
+        let t = if i % 2 == 0 {
+            symbol_short!("even")
+        } else {
+            symbol_short!("odd")
+        };
+        client.log_event(&submitter, &t, &Bytes::from_slice(&env, &[i]));
+    }
+
+    assert_eq!(client.total_events(), 10);
+
+    for i in 0u8..10 {
+        let evt = client.get_event_by_order(&(i as u32));
+        assert_eq!(evt.index, i as u32);
+    }
+}
+
+#[test]
+fn test_get_event_by_order_returns_correct_id() {
+    let (env, _owner, client) = create_ledger();
+    let submitter = Address::generate(&env);
+
+    env.mock_all_auths();
+    let id0 = client.log_event(&submitter, &symbol_short!("a"), &Bytes::from_slice(&env, b"first"));
+    let id1 = client.log_event(&submitter, &symbol_short!("b"), &Bytes::from_slice(&env, b"second"));
+
+    let evt0 = client.get_event_by_order(&0);
+    assert_eq!(client.get_event(&id0), evt0);
+
+    let evt1 = client.get_event_by_order(&1);
+    assert_eq!(client.get_event(&id1), evt1);
+}
+
+#[test]
+fn test_get_event_by_type_multiple_indices() {
+    let (env, _owner, client) = create_ledger();
+    let submitter = Address::generate(&env);
+    let payments = symbol_short!("pay");
+
+    env.mock_all_auths();
+    let _id0 = client.log_event(&submitter, &payments, &Bytes::from_slice(&env, b"a"));
+    let _id1 = client.log_event(&submitter, &payments, &Bytes::from_slice(&env, b"b"));
+    let _id2 = client.log_event(&submitter, &payments, &Bytes::from_slice(&env, b"c"));
+
+    assert_eq!(client.get_event_by_type(&payments, &0).metadata, Bytes::from_slice(&env, b"a"));
+    assert_eq!(client.get_event_by_type(&payments, &1).metadata, Bytes::from_slice(&env, b"b"));
+    assert_eq!(client.get_event_by_type(&payments, &2).metadata, Bytes::from_slice(&env, b"c"));
+}
+
+#[test]
+fn test_protocol_version_header() {
+    let (env, _owner, client) = create_ledger();
+    let submitter = Address::generate(&env);
+
+    env.mock_all_auths();
+    let meta = Bytes::from_slice(&env, b"proto-check");
+    let id = client.log_event(&submitter, &symbol_short!("p"), &meta);
+
+    let evt = client.get_event(&id);
+    assert_eq!(evt.event_hash.len(), 32);
+    assert_eq!(evt.prev_hash.len(), 32);
+}
+
+// ── issue #341: performance / boundary tests ──────────────────────────
+
+#[test]
+fn test_log_many_events_per_type() {
+    let (env, _owner, client) = create_ledger();
+    let submitter = Address::generate(&env);
+    let t = symbol_short!("bulk");
+
+    env.mock_all_auths();
+    for i in 0u8..50 {
+        client.log_event(&submitter, &t, &Bytes::from_slice(&env, &[i]));
+    }
+
+    assert_eq!(client.total_events(), 50);
+    assert_eq!(client.event_count(&t), 50);
+    assert!(client.verify_integrity());
+}
+
+#[test]
+fn test_multiple_event_types_large_counts() {
+    let (env, _owner, client) = create_ledger();
+    let submitter = Address::generate(&env);
+    let type_a = symbol_short!("TypeA");
+    let type_b = symbol_short!("TypeB");
+
+    env.mock_all_auths();
+    for i in 0u8..25 {
+        client.log_event(&submitter, &type_a, &Bytes::from_slice(&env, &[i]));
+        client.log_event(&submitter, &type_b, &Bytes::from_slice(&env, &[i + 100]));
+    }
+
+    assert_eq!(client.total_events(), 50);
+    assert_eq!(client.event_count(&type_a), 25);
+    assert_eq!(client.event_count(&type_b), 25);
+    assert!(client.verify_integrity());
 }
 
 #[test]

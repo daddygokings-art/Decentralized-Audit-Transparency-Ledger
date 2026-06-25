@@ -34,3 +34,54 @@ jobs:
 
       - name: Run tests
         run: cargo test
+
+  shellcheck:
+    name: Shell syntax validation
+    runs-on: ubuntu-latest
+    permissions:
+      contents: read
+    steps:
+      - uses: actions/checkout@v6
+        with:
+          persist-credentials: false
+
+      - name: Run ShellCheck
+        uses: ludeeus/action-shellcheck@master
+        with:
+          scandir: ./scripts
+
+  wasm-size:
+    name: WASM size regression check
+    runs-on: ubuntu-latest
+    permissions:
+      contents: read
+    steps:
+      - uses: actions/checkout@v6
+        with:
+          persist-credentials: false
+
+      - name: Install Rust toolchain
+        uses: dtolnay/rust-toolchain@stable
+
+      - name: Add WASM target
+        run: rustup target add wasm32-unknown-unknown
+
+      - name: Build WASM
+        run: cargo build --target wasm32-unknown-unknown --release
+
+      - name: Check WASM size
+        run: |
+          WASM_FILE="target/wasm32-unknown-unknown/release/audit_ledger.wasm"
+          if [ ! -f "$WASM_FILE" ]; then
+            echo "ERROR: WASM binary not found!"
+            exit 1
+          fi
+          SIZE=$(stat --format=%s "$WASM_FILE")
+          MAX_SIZE=$(( 128 * 1024 ))  # 128 KB
+          echo "WASM size: $SIZE bytes"
+          echo "Max allowed: $MAX_SIZE bytes (128 KB)"
+          if [ "$SIZE" -gt "$MAX_SIZE" ]; then
+            echo "ERROR: WASM binary exceeds maximum allowed size of 128 KB"
+            exit 1
+          fi
+          echo "WASM size check passed."
