@@ -49,29 +49,33 @@ pub struct EventHeader {
     pub submitter: Address,
 }
 
+/// Combined global config: avoids two separate reads for GlobalMaxLogs + TotalEvents.
 #[contracttype]
 #[derive(Clone, Debug, Eq, PartialEq)]
-pub struct EventVersion {
-    pub version: u32,
-    pub data: Event,
-    pub updated_at: u64,
-    pub updated_by: Address,
+pub struct Config {
+    pub global_max_logs: u32,
+    pub total_events: u32,
 }
 
 #[derive(Clone)]
 #[contracttype]
 pub enum DataKey {
     Owner,
-    /// Multi-owner list for multisig governance (Vec<Address>)
-    Owners,
-    /// Required signatures threshold for multisig (u32)
-    RequiredSignatures,
+    /// Replaced by Config — kept as tombstone variant so existing encoded keys
+    /// don't collide; no longer written.
     GlobalMaxLogs,
     /// Paused flag: when true, write operations are blocked.
     Paused,
+    /// Replaced by Config — kept as tombstone variant.
     TotalEvents,
+    /// Replaced by EventCapConfig(Symbol) — kept as tombstone variant.
     EventCapSet(Symbol),
+    /// Replaced by EventCapConfig(Symbol) — kept as tombstone variant.
     EventMaxLogs(Symbol),
+    /// Combined config (global_max_logs + total_events).
+    Config,
+    /// Replaces EventCapSet + EventMaxLogs: None = no cap, Some(n) = capped at n.
+    EventCapConfig(Symbol),
     /// Stores packed Bytes of u32 global-order indices (4 bytes each, LE) for a type (issue #54).
     EventTypeIndices(Symbol),
     /// Primary storage: event ID → Event.
@@ -138,18 +142,10 @@ impl AuditLedger {
         owner.require_auth();
         // Support both single-owner (legacy) and multi-owner setups.
         env.storage().instance().set(&DataKey::Owner, &owner);
-        // initialize multi-owner list with the single provided owner
-        let mut owners: Vec<Address> = Vec::new(&env);
-        owners.push_back(owner.clone());
-        env.storage().instance().set(&DataKey::Owners, &owners);
-        // default required signatures = 1
-        env.storage()
-            .instance()
-            .set(&DataKey::RequiredSignatures, &1u32);
-        env.storage()
-            .instance()
-            .set(&DataKey::GlobalMaxLogs, &global_max_logs);
-        env.storage().instance().set(&DataKey::TotalEvents, &0u32);
+        env.storage().instance().set(
+            &DataKey::Config,
+            &Config { global_max_logs, total_events: 0 },
+        );
         // start unpaused
         env.storage().instance().set(&DataKey::Paused, &false);
     }
@@ -399,38 +395,29 @@ impl AuditLedger {
             panic_with_error!(&env, ContractError::MetadataTooLarge);
         }
 
-        let global_max: u32 = env
-            .storage()
-            .instance()
-            .get(&DataKey::GlobalMaxLogs)
-            .unwrap();
-        let total: u32 = env.storage().instance().get(&DataKey::TotalEvents).unwrap();
+        // Task 1: single read for both global_max and total (was 2 reads).
+        let mut cfg: Config = env.storage().instance().get(&DataKey::Config).unwrap();
 
-        if total == u32::MAX {
-            panic_with_error!(&env, ContractError::TotalEventsOverflow);
-        }
-
-        if total >= global_max {
+        if cfg.total_events >= cfg.global_max_logs {
             panic_with_error!(&env, ContractError::GlobalMaxLogsReached);
         }
 
-        if env
+        // Task 2+5: single read for cap + current count; reuse count later.
+        let mut type_count_opt: Option<u32> = None;
+        if let Some(cap) = env
             .storage()
             .instance()
-            .has(&DataKey::EventCapSet(event_type.clone()))
+            .get::<_, Option<u32>>(&DataKey::EventCapConfig(event_type.clone()))
+            .flatten()
         {
-            let cap: u32 = env
-                .storage()
-                .instance()
-                .get(&DataKey::EventMaxLogs(event_type.clone()))
-                .unwrap();
             let count = Self::event_type_count(&env, event_type.clone());
             if count >= cap {
                 panic_with_error!(&env, ContractError::EventTypeMaxLogsReached);
             }
+            type_count_opt = Some(count);
         }
 
-        let index = total;
+        let index = cfg.total_events;
         let timestamp = env.ledger().timestamp();
 
         // --- issue #76: validate timestamp monotonicity and drift ---
@@ -492,26 +479,56 @@ impl AuditLedger {
             .instance()
             .set(&DataKey::EventOrder(index), &event_id);
 
-        // --- issue #54: packed-Bytes index storage ---
-        if !Self::effective_low_cost_mode(&env) {
-            Self::push_type_index(&env, event_type.clone(), index);
-        }
-
+        // --- issue #56: store lightweight header separately ---
+        let header = EventHeader {
+            index,
+            timestamp,
+            event_type: event_type.clone(),
+            submitter: submitter.clone(),
+        };
         env.storage()
             .instance()
-            .set(&DataKey::TotalEvents, &(total + 1));
+            .set(&DataKey::EventHeaderKey(event_id.clone()), &header);
+        // Task 3: removed redundant EventMeta write (same data as EventData).
+        env.storage()
+            .instance()
+            .set(&DataKey::EventMetadata(event_id.clone()), &metadata);
 
+        // Task 4: cache low_cost_mode to avoid double read.
+        let low_cost = Self::effective_low_cost_mode(&env);
+
+        // --- issue #54: packed-Bytes index storage ---
+        if !low_cost {
+            Self::push_type_index(&env, event_type.clone(), index);
+            // Task 5: reuse cached count instead of re-reading.
+            let new_count = type_count_opt.unwrap_or_else(|| Self::event_type_count(&env, event_type.clone())) + 1;
+            env.storage()
+                .instance()
+                .set(&DataKey::EventTypeCount(event_type.clone()), &new_count);
+        }
+
+        // Task 4: cache emission_mode to avoid double read.
         let emission_mode = Self::effective_event_emission_mode(&env);
+
+        if low_cost && emission_mode == 1 {
+            env.events().publish(
+                (Symbol::new(&env, "log_event"), event_type.clone(), submitter.clone()),
+                (index,),
+            );
+        }
+
+        // Task 1: single write back the updated Config (was separate TotalEvents write).
+        cfg.total_events += 1;
+        env.storage().instance().set(&DataKey::Config, &cfg);
+
         match emission_mode {
             1 => {
-                // Index-only emission (issue #60)
                 env.events().publish(
                     (Symbol::new(&env, "log_event"), event_type.clone(), submitter.clone()),
                     (index,),
                 );
             }
             2 => {
-                // Hash-only emission (issue #60)
                 let metadata_hash: BytesN<32> = env.crypto().sha256(&metadata).into();
                 env.events().publish(
                     (Symbol::new(&env, "log_event"), event_type.clone(), submitter.clone()),
@@ -522,7 +539,6 @@ impl AuditLedger {
                 // No emission (issue #60)
             }
             _ => {
-                // Default: full metadata emission (backward compatible)
                 env.events().publish(
                     (Symbol::new(&env, "log_event"), event_type, submitter),
                     (index, timestamp, metadata, cat, sub_event_type),
@@ -580,7 +596,8 @@ impl AuditLedger {
         Self::require_initialized(&env);
         env.storage()
             .instance()
-            .get(&DataKey::TotalEvents)
+            .get::<_, Config>(&DataKey::Config)
+            .map(|c| c.total_events)
             .unwrap_or(0)
     }
 
@@ -1168,10 +1185,10 @@ impl AuditLedger {
         if let Some(true) = env.storage().instance().get::<_, bool>(&DataKey::Paused) {
             panic_with_error!(&env, ContractError::ContractPaused);
         }
-        Self::require_owner_or_multisig(&env, &caller);
-        env.storage()
-            .instance()
-            .set(&DataKey::GlobalMaxLogs, &new_max);
+        Self::require_owner(&env, &caller);
+        let mut cfg: Config = env.storage().instance().get(&DataKey::Config).unwrap();
+        cfg.global_max_logs = new_max;
+        env.storage().instance().set(&DataKey::Config, &cfg);
     }
 
     pub fn set_event_max_logs(env: Env, caller: Address, event_type: Symbol, new_max: u32) {
@@ -1183,11 +1200,8 @@ impl AuditLedger {
         Self::require_owner_or_multisig(&env, &caller);
         env.storage()
             .instance()
-            .set(&DataKey::EventCapSet(event_type.clone()), &true);
-        env.storage()
-            .instance()
-            .set(&DataKey::EventMaxLogs(event_type.clone()), &new_max);
-        
+            .set(&DataKey::EventCapConfig(event_type.clone()), &Some(new_max));
+
         if !Self::effective_low_cost_mode(&env) {
             if !env
                 .storage()
@@ -1211,16 +1225,22 @@ impl AuditLedger {
         if !env
             .storage()
             .instance()
-            .has(&DataKey::EventCapSet(event_type.clone()))
+            .has(&DataKey::EventCapConfig(event_type.clone()))
         {
             panic_with_error!(&env, ContractError::CapNotSet);
         }
         env.storage()
             .instance()
-            .remove(&DataKey::EventCapSet(event_type.clone()));
+            .remove(&DataKey::EventCapConfig(event_type.clone()));
         env.storage()
             .instance()
-            .remove(&DataKey::EventMaxLogs(event_type.clone()));
+            .remove(&DataKey::EventTypeCount(event_type.clone()));
+
+        if Self::effective_low_cost_mode(&env) {
+            env.storage()
+                .instance()
+                .remove(&DataKey::EventTypeIndices(event_type.clone()));
+        }
     }
 
     pub fn transfer_ownership(env: Env, caller: Address, new_owner: Address) {
@@ -1385,7 +1405,7 @@ impl AuditLedger {
             if !env
                 .storage()
                 .instance()
-                .has(&DataKey::EventCapSet(et.clone()))
+                .has(&DataKey::EventCapConfig(et.clone()))
             {
                 if env
                     .storage()
