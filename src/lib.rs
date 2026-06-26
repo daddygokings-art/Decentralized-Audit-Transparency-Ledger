@@ -2006,3 +2006,6 @@ mod boundary_tests;
 
 #[cfg(test)]
 mod cross_contract_tests;
+
+#[cfg(test)]
+mod fee_tests;
