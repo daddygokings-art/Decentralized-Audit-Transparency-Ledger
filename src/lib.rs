@@ -88,6 +88,9 @@ pub enum DataKey {
     SubmitterRateLimit(Address),
     /// Rate-limit state (last_timestamp, count) per submitter (issue #62).
     SubmitterRateState(Address),
+    /// Per-submitter nonce for replay-attack prevention (issue #64).
+    /// Stores the last accepted nonce; absent means no event submitted yet (treat as 0).
+    SubmitterNonce(Address),
 }
 
 #[contracterror]
@@ -102,12 +105,11 @@ pub enum ContractError {
     NewOwnerIsZero = 6,
     CapNotSet = 7,
     MetadataTooLarge = 8,
-    ContractNotInitialized = 9,
-    TotalEventsOverflow = 10,
-    TimestampOutOfRange = 11,
-    InvalidSignature = 12,
-    ContractPaused = 13,
-    RateLimitExceeded = 14,
+    InvalidSignature = 9,
+    ContractPaused = 10,
+    RateLimitExceeded = 11,
+    NonceTooLow = 12,
+    NonceTooHigh = 13,
 }
 
 const NULL_ACCOUNT: &str = "GAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAWHF";
@@ -326,6 +328,49 @@ impl AuditLedger {
         }
 
         event_id
+    }
+
+    /// Log an event with an explicit nonce to prevent replay attacks (issue #64).
+    ///
+    /// Rules:
+    /// - `nonce` must equal `stored_nonce + 1` (strict sequential) or be any value
+    ///   greater than `stored_nonce` (gaps accepted, stored nonce jumps to `nonce`).
+    /// - If `nonce <= stored_nonce`, rejects with `NonceTooLow`.
+    /// - If `nonce == 0`, rejects with `NonceTooLow` (nonces are 1-based).
+    ///
+    /// `log_event()` remains available for backward compatibility (no nonce enforcement).
+    pub fn log_event_with_nonce(
+        env: Env,
+        submitter: Address,
+        event_type: Symbol,
+        metadata: Bytes,
+        nonce: u32,
+    ) -> BytesN<32> {
+        let stored: u32 = env
+            .storage()
+            .instance()
+            .get(&DataKey::SubmitterNonce(submitter.clone()))
+            .unwrap_or(0);
+
+        if nonce == 0 || nonce <= stored {
+            panic_with_error!(&env, ContractError::NonceTooLow);
+        }
+
+        let event_id = Self::log_event(env.clone(), submitter.clone(), event_type, metadata);
+
+        env.storage()
+            .instance()
+            .set(&DataKey::SubmitterNonce(submitter), &nonce);
+
+        event_id
+    }
+
+    /// Return the last accepted nonce for `submitter`. Returns 0 if no nonce has been used yet.
+    pub fn get_submitter_nonce(env: Env, submitter: Address) -> u32 {
+        env.storage()
+            .instance()
+            .get(&DataKey::SubmitterNonce(submitter))
+            .unwrap_or(0)
     }
 
     pub fn total_events(env: Env) -> u32 {

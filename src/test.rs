@@ -1032,3 +1032,142 @@ fn test_compact_storage_does_not_touch_active_caps() {
     client.log_event(&submitter, &payment, &Bytes::from_slice(&env, b"p2"));
     assert_eq!(client.event_count(&payment), 2);
 }
+
+// ── issue #64: nonce-based replay prevention ─────────────────────────────────
+
+#[test]
+fn test_nonce_correct_increments() {
+    let (env, _owner, client) = create_ledger();
+    let submitter = Address::generate(&env);
+    let payment = symbol_short!("payment");
+
+    env.mock_all_auths();
+    // nonce starts at 0 (absent); first accepted nonce is 1
+    client.log_event_with_nonce(&submitter, &payment, &Bytes::from_slice(&env, b"tx1"), &1);
+    assert_eq!(client.get_submitter_nonce(&submitter), 1);
+
+    client.log_event_with_nonce(&submitter, &payment, &Bytes::from_slice(&env, b"tx2"), &2);
+    assert_eq!(client.get_submitter_nonce(&submitter), 2);
+}
+
+#[test]
+fn test_nonce_replay_rejected_with_nonce_too_low() {
+    let (env, _owner, client) = create_ledger();
+    let submitter = Address::generate(&env);
+    let payment = symbol_short!("payment");
+
+    env.mock_all_auths();
+    client.log_event_with_nonce(&submitter, &payment, &Bytes::from_slice(&env, b"tx1"), &1);
+
+    // Re-submitting the same nonce must fail with NonceTooLow (#12)
+    let result = client.try_log_event_with_nonce(
+        &submitter,
+        &payment,
+        &Bytes::from_slice(&env, b"tx1"),
+        &1,
+    );
+    assert!(result.is_err());
+}
+
+#[test]
+#[should_panic(expected = "HostError: Error(Contract, #12)")]
+fn test_nonce_too_low_error_code() {
+    let (env, _owner, client) = create_ledger();
+    let submitter = Address::generate(&env);
+    let payment = symbol_short!("payment");
+
+    env.mock_all_auths();
+    client.log_event_with_nonce(&submitter, &payment, &Bytes::from_slice(&env, b"tx1"), &5);
+    // nonce 3 < 5 → NonceTooLow
+    client.log_event_with_nonce(&submitter, &payment, &Bytes::from_slice(&env, b"tx2"), &3);
+}
+
+#[test]
+fn test_nonce_gap_accepted() {
+    let (env, _owner, client) = create_ledger();
+    let submitter = Address::generate(&env);
+    let payment = symbol_short!("payment");
+
+    env.mock_all_auths();
+    // Jump from 0 → 5 directly (gap is accepted)
+    client.log_event_with_nonce(&submitter, &payment, &Bytes::from_slice(&env, b"tx1"), &5);
+    assert_eq!(client.get_submitter_nonce(&submitter), 5);
+
+    // Next must be > 5
+    client.log_event_with_nonce(&submitter, &payment, &Bytes::from_slice(&env, b"tx2"), &10);
+    assert_eq!(client.get_submitter_nonce(&submitter), 10);
+}
+
+#[test]
+fn test_nonce_zero_rejected() {
+    let (env, _owner, client) = create_ledger();
+    let submitter = Address::generate(&env);
+    let payment = symbol_short!("payment");
+
+    env.mock_all_auths();
+    // nonce 0 is never valid
+    let result = client.try_log_event_with_nonce(
+        &submitter,
+        &payment,
+        &Bytes::from_slice(&env, b"tx"),
+        &0,
+    );
+    assert!(result.is_err());
+}
+
+#[test]
+fn test_nonce_multiple_submitters_independent() {
+    let (env, _owner, client) = create_ledger();
+    let s1 = Address::generate(&env);
+    let s2 = Address::generate(&env);
+    let payment = symbol_short!("payment");
+
+    env.mock_all_auths();
+    // s1 uses nonce 1, s2 independently uses nonce 1
+    client.log_event_with_nonce(&s1, &payment, &Bytes::from_slice(&env, b"a"), &1);
+    client.log_event_with_nonce(&s2, &payment, &Bytes::from_slice(&env, b"b"), &1);
+
+    assert_eq!(client.get_submitter_nonce(&s1), 1);
+    assert_eq!(client.get_submitter_nonce(&s2), 1);
+
+    // s1 advances to 2; s2 stays at 1 until it submits
+    client.log_event_with_nonce(&s1, &payment, &Bytes::from_slice(&env, b"c"), &2);
+    assert_eq!(client.get_submitter_nonce(&s1), 2);
+    assert_eq!(client.get_submitter_nonce(&s2), 1);
+
+    // s1 replay attempt fails
+    let result = client.try_log_event_with_nonce(
+        &s1,
+        &payment,
+        &Bytes::from_slice(&env, b"c"),
+        &2,
+    );
+    assert!(result.is_err());
+
+    // s2 is unaffected and can advance
+    client.log_event_with_nonce(&s2, &payment, &Bytes::from_slice(&env, b"d"), &2);
+    assert_eq!(client.get_submitter_nonce(&s2), 2);
+}
+
+#[test]
+fn test_get_submitter_nonce_default_zero() {
+    let (env, _owner, client) = create_ledger();
+    let submitter = Address::generate(&env);
+    assert_eq!(client.get_submitter_nonce(&submitter), 0);
+}
+
+#[test]
+fn test_log_event_without_nonce_unaffected() {
+    // log_event (no nonce) does not touch the nonce counter
+    let (env, _owner, client) = create_ledger();
+    let submitter = Address::generate(&env);
+    let payment = symbol_short!("payment");
+
+    env.mock_all_auths();
+    client.log_event(&submitter, &payment, &Bytes::from_slice(&env, b"legacy"));
+    // nonce counter remains 0
+    assert_eq!(client.get_submitter_nonce(&submitter), 0);
+    // log_event_with_nonce still works independently
+    client.log_event_with_nonce(&submitter, &payment, &Bytes::from_slice(&env, b"nonce"), &1);
+    assert_eq!(client.get_submitter_nonce(&submitter), 1);
+}
