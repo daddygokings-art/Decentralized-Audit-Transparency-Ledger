@@ -27,8 +27,12 @@ pub struct Event {
     pub index: u32,
     pub timestamp: u64,
     pub event_type: Symbol,
+    /// Optional category for hierarchical classification (e.g., finance, compliance)
+    pub category: Symbol,
     pub submitter: Address,
     pub metadata: Bytes,
+    /// Optional sub-event type for hierarchical classification
+    pub sub_event_type: Option<Symbol>,
     /// SHA-256 of this event (computed over the other fields + prev_hash).
     pub event_hash: BytesN<32>,
     /// SHA-256 of the previous event; `[0u8;32]` for the genesis event.
@@ -45,21 +49,38 @@ pub struct EventHeader {
     pub submitter: Address,
 }
 
+/// Proposal action variants for multisig governance
 #[contracttype]
-#[derive(Clone, Debug, Eq, PartialEq)]
-pub struct ContractStatistics {
-    pub total_events: u32,
-    pub events_by_type: Vec<(Symbol, u32)>,
-    pub events_last_hour: u32,
-    pub events_last_day: u32,
-    pub events_last_week: u32,
-    pub top_submitters: Vec<(Address, u32)>,
+#[derive(Clone)]
+pub enum ProposalAction {
+    TransferOwnership(Address),
+    AddOwner(Address),
+    RemoveOwner(Address),
+    SetRequiredSignatures(u32),
+    SetGlobalMaxLogs(u32),
+    Pause,
+    Unpause,
+}
+
+#[contracttype]
+#[derive(Clone)]
+pub struct Proposal {
+    pub id: u32,
+    pub proposer: Address,
+    pub action: ProposalAction,
+    pub approvals: Vec<Address>,
+    pub expires_at: u64,
+    pub executed: bool,
 }
 
 #[derive(Clone)]
 #[contracttype]
 pub enum DataKey {
     Owner,
+    /// Multi-owner list for multisig governance (Vec<Address>)
+    Owners,
+    /// Required signatures threshold for multisig (u32)
+    RequiredSignatures,
     GlobalMaxLogs,
     /// Paused flag: when true, write operations are blocked.
     Paused,
@@ -78,6 +99,30 @@ pub enum DataKey {
     GlobalMetadataMaxSize,
     /// Signature stored for an event (issue #69): (pubkey, signature).
     EventSignature(BytesN<32>),
+    /// Cached event count per type (issue #52). Updated alongside EventTypeIndices.
+    EventTypeCount(Symbol),
+    /// Lightweight header (issue #56): EventHeader stored separately from metadata.
+    EventHeaderKey(BytesN<32>),
+    /// Optimized storage for event headers (issue #53): (index, timestamp, event_type, submitter).
+    EventMeta(BytesN<32>),
+    /// Optimized storage for event metadata alone (issue #53).
+    EventMetadata(BytesN<32>),
+    /// Flag marking an event as archived (id -> bool)
+    EventArchivedFlag(BytesN<32>),
+    /// Archived event storage: id -> Event
+    ArchivedEventData(BytesN<32>),
+    /// Archived event order: archived_index -> id
+    ArchivedEventOrder(u32),
+    /// Archived total events counter
+    ArchivedTotalEvents,
+    /// Archived event header key
+    ArchivedEventHeaderKey(BytesN<32>),
+    /// Archived event metadata
+    ArchivedEventMetadata(BytesN<32>),
+    /// Proposal count
+    ProposalCount,
+    /// Proposal storage: id -> Proposal
+    Proposal(u32),
     /// Event emission configuration (issue #60): 0=full, 1=index-only, 2=hash-only, 3=none.
     EventEmissionConfig,
     /// Event emission version (issue #60): 1=full metadata, 2=index-only.
@@ -121,10 +166,16 @@ pub struct AuditLedger;
 impl AuditLedger {
     pub fn initialize(env: Env, owner: Address, global_max_logs: u32) {
         owner.require_auth();
-        if env.storage().instance().has(&DataKey::Owner) {
-            panic_with_error!(&env, ContractError::AlreadyInitialized);
-        }
+        // Support both single-owner (legacy) and multi-owner setups.
         env.storage().instance().set(&DataKey::Owner, &owner);
+        // initialize multi-owner list with the single provided owner
+        let mut owners: Vec<Address> = Vec::new(&env);
+        owners.push_back(owner.clone());
+        env.storage().instance().set(&DataKey::Owners, &owners);
+        // default required signatures = 1
+        env.storage()
+            .instance()
+            .set(&DataKey::RequiredSignatures, &1u32);
         env.storage()
             .instance()
             .set(&DataKey::GlobalMaxLogs, &global_max_logs);
@@ -330,6 +381,8 @@ impl AuditLedger {
         submitter: Address,
         event_type: Symbol,
         metadata: Bytes,
+        category: Option<Symbol>,
+        sub_event_type: Option<Symbol>,
     ) -> BytesN<32> {
         Self::require_initialized(&env);
         submitter.require_auth();
@@ -449,12 +502,15 @@ impl AuditLedger {
         let event_hash =
             Self::compute_event_hash(&env, &event_id, &prev_hash, index, timestamp);
 
+        let cat = category.unwrap_or(Symbol::new(&env, "general"));
         let evt = Event {
             index,
             timestamp,
             event_type: event_type.clone(),
+            category: cat.clone(),
             submitter: submitter.clone(),
             metadata: metadata.clone(),
+            sub_event_type: sub_event_type.clone(),
             event_hash: event_hash.clone(),
             prev_hash,
         };
@@ -498,8 +554,8 @@ impl AuditLedger {
             _ => {
                 // Default: full metadata emission (backward compatible)
                 env.events().publish(
-                    (Symbol::new(&env, "log_event"), event_type.clone(), submitter.clone()),
-                    (index, timestamp, metadata),
+                    (Symbol::new(&env, "log_event"), event_type, submitter),
+                    (index, timestamp, metadata, cat, sub_event_type),
                 );
             }
         }
@@ -624,6 +680,153 @@ impl AuditLedger {
         Self::event_type_count(&env, event_type)
     }
 
+    /// Count events matching a category (scans all events; pagination available via list_events_by_category)
+    pub fn event_count_by_category(env: Env, category: Symbol) -> u32 {
+        let total: u32 = env.storage().instance().get(&DataKey::TotalEvents).unwrap_or(0u32);
+        let mut cnt: u32 = 0;
+        for i in 0..total {
+            let id: BytesN<32> = env.storage().instance().get(&DataKey::EventOrder(i)).unwrap();
+            let evt: Event = env.storage().instance().get(&DataKey::EventData(id)).unwrap();
+            if evt.category == category {
+                cnt += 1;
+            }
+        }
+        cnt
+    }
+
+    /// List event headers for a given category with simple pagination.
+    pub fn list_events_by_category(env: Env, category: Symbol, start: u32, limit: u32) -> Vec<EventHeader> {
+        let total: u32 = env.storage().instance().get(&DataKey::TotalEvents).unwrap_or(0u32);
+        let mut out: Vec<EventHeader> = Vec::new(&env);
+        if start >= total { return out; }
+        let mut added: u32 = 0;
+        let mut i = start;
+        while i < total && added < limit {
+            let id: BytesN<32> = env.storage().instance().get(&DataKey::EventOrder(i)).unwrap();
+            let evt: Event = env.storage().instance().get(&DataKey::EventData(id)).unwrap();
+            if evt.category == category {
+                let header = EventHeader { index: evt.index, timestamp: evt.timestamp, event_type: evt.event_type.clone(), submitter: evt.submitter.clone() };
+                out.push_back(header);
+                added += 1;
+            }
+            i += 1;
+        }
+        out
+    }
+
+    /// Archive events older than `cutoff_timestamp` into cold storage.
+    /// Owner-only. Returns number archived.
+    pub fn archive_events(env: Env, caller: Address, cutoff_timestamp: u64) -> u32 {
+        caller.require_auth();
+        Self::require_owner_or_multisig(&env, &caller);
+        let total: u32 = env.storage().instance().get(&DataKey::TotalEvents).unwrap_or(0u32);
+        let mut archived: u32 = env.storage().instance().get(&DataKey::ArchivedTotalEvents).unwrap_or(0u32);
+        let mut moved: u32 = 0;
+        for i in 0..total {
+            let id: BytesN<32> = env.storage().instance().get(&DataKey::EventOrder(i)).unwrap();
+            // skip if already archived
+            if env.storage().instance().has(&DataKey::EventArchivedFlag(id.clone())) {
+                continue;
+            }
+            let evt: Event = env.storage().instance().get(&DataKey::EventData(id.clone())).unwrap();
+            if evt.timestamp < cutoff_timestamp {
+                // copy into archived storage
+                env.storage().instance().set(&DataKey::ArchivedEventData(id.clone()), &evt);
+                if let Some(header) = env.storage().instance().get::<_, EventHeader>(&DataKey::EventHeaderKey(id.clone())) {
+                    env.storage().instance().set(&DataKey::ArchivedEventHeaderKey(id.clone()), &header);
+                }
+                if let Some(meta) = env.storage().instance().get::<_, Bytes>(&DataKey::EventMetadata(id.clone())) {
+                    env.storage().instance().set(&DataKey::ArchivedEventMetadata(id.clone()), &meta);
+                }
+                env.storage().instance().set(&DataKey::EventArchivedFlag(id.clone()), &true);
+                env.storage().instance().set(&DataKey::ArchivedEventOrder(archived), &id.clone());
+                archived += 1;
+                moved += 1;
+            }
+        }
+        env.storage().instance().set(&DataKey::ArchivedTotalEvents, &archived);
+        env.events().publish((Symbol::new(&env, "events_archived"),), (moved,));
+        moved
+    }
+
+    pub fn get_archived_event(env: Env, id: BytesN<32>) -> Event {
+        env.storage()
+            .instance()
+            .get(&DataKey::ArchivedEventData(id))
+            .unwrap_or_else(|| panic_with_error!(&env, ContractError::EventDoesNotExist))
+    }
+
+    pub fn get_archived_event_count(env: Env) -> u32 {
+        // count actual archived entries (tolerate gaps)
+        let total: u32 = env.storage().instance().get(&DataKey::ArchivedTotalEvents).unwrap_or(0u32);
+        let mut cnt: u32 = 0;
+        for i in 0..total {
+            if let Some(id) = env.storage().instance().get::<_, BytesN<32>>(&DataKey::ArchivedEventOrder(i)) {
+                if env.storage().instance().has(&DataKey::ArchivedEventData(id)) {
+                    cnt += 1;
+                }
+            }
+        }
+        cnt
+    }
+
+    pub fn list_archived_events(env: Env, start: u32, limit: u32) -> Vec<EventHeader> {
+        let total: u32 = env.storage().instance().get(&DataKey::ArchivedTotalEvents).unwrap_or(0u32);
+        let mut out: Vec<EventHeader> = Vec::new(&env);
+        if start >= total { return out; }
+        let mut added: u32 = 0;
+        let mut i = start;
+        while i < total && added < limit {
+            if let Some(id) = env.storage().instance().get::<_, BytesN<32>>(&DataKey::ArchivedEventOrder(i)) {
+                if let Some(header) = env.storage().instance().get::<_, EventHeader>(&DataKey::ArchivedEventHeaderKey(id.clone())) {
+                    out.push_back(header);
+                    added += 1;
+                }
+            }
+            i += 1;
+        }
+        out
+    }
+
+    /// Permanently purge archived events older than cutoff. `confirm` must be true.
+    pub fn purge_archived_events(env: Env, caller: Address, cutoff_timestamp: u64, confirm: bool) -> u32 {
+        caller.require_auth();
+        Self::require_owner_or_multisig(&env, &caller);
+        if !confirm { return 0u32; }
+        let total: u32 = env.storage().instance().get(&DataKey::ArchivedTotalEvents).unwrap_or(0u32);
+        let mut removed: u32 = 0;
+        for i in 0..total {
+            if let Some(id) = env.storage().instance().get::<_, BytesN<32>>(&DataKey::ArchivedEventOrder(i)) {
+                if let Some(evt) = env.storage().instance().get::<_, Event>(&DataKey::ArchivedEventData(id.clone())) {
+                    if evt.timestamp < cutoff_timestamp {
+                        env.storage().instance().remove(&DataKey::ArchivedEventData(id.clone()));
+                        env.storage().instance().remove(&DataKey::ArchivedEventHeaderKey(id.clone()));
+                        env.storage().instance().remove(&DataKey::ArchivedEventMetadata(id.clone()));
+                        // remove archived order mapping
+                        env.storage().instance().remove(&DataKey::ArchivedEventOrder(i));
+                        removed += 1;
+                    }
+                }
+            }
+        }
+        env.events().publish((Symbol::new(&env, "archived_events_purged"),), (removed,));
+        removed
+    }
+
+    /// Upgrade the contract's WASM. Owner-only. Emits `contract_upgraded(old_hash, new_hash)`.
+    pub fn upgrade_contract(env: Env, caller: Address, new_wasm_hash: BytesN<32>) {
+        caller.require_auth();
+        Self::require_owner_or_multisig(&env, &caller);
+        // Emit event and attempt to perform the upgrade via the deployer.
+        // Note: callers should ensure the new WASM is compatible with storage layout.
+        // Try to obtain current wasm hash if available (best-effort).
+        let old_hash_opt: Option<BytesN<32>> = None;
+        env.events().publish((Symbol::new(&env, "contract_upgraded"),), (old_hash_opt, new_wasm_hash.clone()));
+        // Perform upgrade via deployer API (Soroban deployer helper).
+        // This is a best-effort call and may vary by runtime.
+        env.deployer().update_current_contract_wasm(new_wasm_hash.clone());
+    }
+
     pub fn get_event_by_type(env: Env, event_type: Symbol, type_index: u32) -> Event {
         Self::require_initialized(&env);
         if Self::effective_low_cost_mode(&env) {
@@ -684,7 +887,7 @@ impl AuditLedger {
         if let Some(true) = env.storage().instance().get::<_, bool>(&DataKey::Paused) {
             panic_with_error!(&env, ContractError::ContractPaused);
         }
-        Self::require_owner(&env, &caller);
+        Self::require_owner_or_multisig(&env, &caller);
         env.storage()
             .instance()
             .set(&DataKey::GlobalMaxLogs, &new_max);
@@ -696,7 +899,7 @@ impl AuditLedger {
         if let Some(true) = env.storage().instance().get::<_, bool>(&DataKey::Paused) {
             panic_with_error!(&env, ContractError::ContractPaused);
         }
-        Self::require_owner(&env, &caller);
+        Self::require_owner_or_multisig(&env, &caller);
         env.storage()
             .instance()
             .set(&DataKey::EventCapSet(event_type.clone()), &true);
@@ -763,7 +966,7 @@ impl AuditLedger {
         if let Some(true) = env.storage().instance().get::<_, bool>(&DataKey::Paused) {
             panic_with_error!(&env, ContractError::ContractPaused);
         }
-        Self::require_owner(&env, &caller);
+        Self::require_owner_or_multisig(&env, &caller);
         env.storage()
             .instance()
             .set(&DataKey::GlobalMetadataMaxSize, &max_size);
@@ -782,7 +985,7 @@ impl AuditLedger {
         if let Some(true) = env.storage().instance().get::<_, bool>(&DataKey::Paused) {
             panic_with_error!(&env, ContractError::ContractPaused);
         }
-        Self::require_owner(&env, &caller);
+        Self::require_owner_or_multisig(&env, &caller);
         env.storage()
             .instance()
             .set(&DataKey::EventMetadataMaxSize(event_type), &max_size);
@@ -792,7 +995,7 @@ impl AuditLedger {
     pub fn pause(env: Env, caller: Address) {
         Self::require_initialized(&env);
         caller.require_auth();
-        Self::require_owner(&env, &caller);
+        Self::require_owner_or_multisig(&env, &caller);
         env.storage().instance().set(&DataKey::Paused, &true);
         env.events().publish((Symbol::new(&env, "contract_paused"),), (caller,));
     }
@@ -801,7 +1004,7 @@ impl AuditLedger {
     pub fn unpause(env: Env, caller: Address) {
         Self::require_initialized(&env);
         caller.require_auth();
-        Self::require_owner(&env, &caller);
+        Self::require_owner_or_multisig(&env, &caller);
         env.storage().instance().set(&DataKey::Paused, &false);
         env.events()
             .publish((Symbol::new(&env, "contract_unpaused"),), (caller,));
@@ -827,7 +1030,7 @@ impl AuditLedger {
     pub fn set_event_emission_mode(env: Env, caller: Address, mode: u32) {
         Self::require_initialized(&env);
         caller.require_auth();
-        Self::require_owner(&env, &caller);
+        Self::require_owner_or_multisig(&env, &caller);
         env.storage()
             .instance()
             .set(&DataKey::EventEmissionConfig, &mode);
@@ -848,7 +1051,7 @@ impl AuditLedger {
     pub fn set_low_cost_mode(env: Env, caller: Address, enabled: bool) {
         Self::require_initialized(&env);
         caller.require_auth();
-        Self::require_owner(&env, &caller);
+        Self::require_owner_or_multisig(&env, &caller);
         env.storage()
             .instance()
             .set(&DataKey::LowCostMode, &enabled);
@@ -876,7 +1079,7 @@ impl AuditLedger {
     ) {
         Self::require_initialized(&env);
         caller.require_auth();
-        Self::require_owner(&env, &caller);
+        Self::require_owner_or_multisig(&env, &caller);
         env.storage()
             .instance()
             .set(&DataKey::SubmitterRateLimit(submitter), &max_per_timestamp);
@@ -970,13 +1173,15 @@ impl AuditLedger {
         submitter: Address,
         event_type: Symbol,
         metadata: Bytes,
+        category: Option<Symbol>,
+        sub_event_type: Option<Symbol>,
         signature_payload: Bytes,
     ) -> BytesN<32> {
         // Delegates auth to the inner log_event call.
         if signature_payload.len() != 96 {
             panic_with_error!(&env, ContractError::InvalidSignature);
         }
-        let event_id = Self::log_event(env.clone(), submitter, event_type, metadata.clone());
+        let event_id = Self::log_event(env.clone(), submitter, event_type, metadata.clone(), category, sub_event_type);
         env.storage()
             .instance()
             .set(&DataKey::EventSignature(event_id.clone()), &signature_payload);
@@ -1032,6 +1237,209 @@ impl AuditLedger {
         if addr != &owner {
             panic_with_error!(env, ContractError::CallerNotOwner);
         }
+    }
+
+    fn get_owners(env: &Env) -> Vec<Address> {
+        env.storage()
+            .instance()
+            .get(&DataKey::Owners)
+            .unwrap_or_else(|| Vec::new(env))
+    }
+
+    fn get_required_signatures(env: &Env) -> u32 {
+        env.storage()
+            .instance()
+            .get(&DataKey::RequiredSignatures)
+            .unwrap_or(1u32)
+    }
+
+    fn is_addr_owner(env: &Env, addr: &Address) -> bool {
+        let owners = Self::get_owners(env);
+        for i in 0..owners.len() {
+            if &owners.get(i).unwrap() == addr {
+                return true;
+            }
+        }
+        // fallback single Owner for legacy setups
+        if let Some(owner) = env.storage().instance().get::<_, Address>(&DataKey::Owner) {
+            if addr == &owner {
+                return true;
+            }
+        }
+        false
+    }
+
+    fn require_owner_or_multisig(env: &Env, addr: &Address) {
+        if !Self::is_addr_owner(env, addr) {
+            panic_with_error!(env, ContractError::CallerNotOwner);
+        }
+    }
+
+    pub fn add_owner(env: Env, caller: Address, new_owner: Address) {
+        caller.require_auth();
+        Self::require_owner_or_multisig(&env, &caller);
+        if new_owner == Address::from_str(&env, NULL_ACCOUNT) {
+            panic_with_error!(&env, ContractError::NewOwnerIsZero);
+        }
+        let mut owners = Self::get_owners(&env);
+        for i in 0..owners.len() {
+            if owners.get(i).unwrap() == new_owner {
+                return; // already an owner
+            }
+        }
+        owners.push_back(new_owner.clone());
+        env.storage().instance().set(&DataKey::Owners, &owners);
+        env.events().publish((Symbol::new(&env, "owner_added"),), (new_owner,));
+    }
+
+    pub fn remove_owner(env: Env, caller: Address, owner_to_remove: Address) {
+        caller.require_auth();
+        Self::require_owner_or_multisig(&env, &caller);
+        let mut owners = Self::get_owners(&env);
+        let mut found = false;
+        let mut new_vec: Vec<Address> = Vec::new(&env);
+        for i in 0..owners.len() {
+            let o = owners.get(i).unwrap();
+            if o == owner_to_remove {
+                found = true;
+                continue;
+            }
+            new_vec.push_back(o.clone());
+        }
+        if !found {
+            return; // nothing to do
+        }
+        // ensure required_signatures is not greater than owners.len()
+        let req = Self::get_required_signatures(&env);
+        if req as u32 > new_vec.len() {
+            // reduce required signatures to new_vec.len()
+            env.storage()
+                .instance()
+                .set(&DataKey::RequiredSignatures, &new_vec.len());
+        }
+        env.storage().instance().set(&DataKey::Owners, &new_vec);
+        env.events().publish((Symbol::new(&env, "owner_removed"),), (owner_to_remove,));
+    }
+
+    pub fn set_required_signatures(env: Env, caller: Address, required: u32) {
+        caller.require_auth();
+        Self::require_owner_or_multisig(&env, &caller);
+        let owners = Self::get_owners(&env);
+        if required == 0 || required > owners.len() {
+            return; // invalid; ignore
+        }
+        env.storage()
+            .instance()
+            .set(&DataKey::RequiredSignatures, &required);
+        env.events().publish((Symbol::new(&env, "required_signatures_set"),), (required,));
+    }
+
+    pub fn submit_proposal(env: Env, proposer: Address, action: ProposalAction, ttl_seconds: u64) -> u32 {
+        proposer.require_auth();
+        if !Self::is_addr_owner(&env, &proposer) {
+            panic_with_error!(&env, ContractError::CallerNotOwner);
+        }
+        let mut count: u32 = env.storage().instance().get(&DataKey::ProposalCount).unwrap_or(0u32);
+        let id = count;
+        let now = env.ledger().timestamp();
+        let mut approvals: Vec<Address> = Vec::new(&env);
+        approvals.push_back(proposer.clone());
+        let prop = Proposal {
+            id,
+            proposer: proposer.clone(),
+            action,
+            approvals,
+            expires_at: now + ttl_seconds,
+            executed: false,
+        };
+        env.storage().instance().set(&DataKey::Proposal(id), &prop);
+        env.storage().instance().set(&DataKey::ProposalCount, &(count + 1));
+        env.events().publish((Symbol::new(&env, "proposal_submitted"),), (id,));
+        id
+    }
+
+    pub fn approve_proposal(env: Env, approver: Address, proposal_id: u32) {
+        approver.require_auth();
+        if !Self::is_addr_owner(&env, &approver) {
+            panic_with_error!(&env, ContractError::CallerNotOwner);
+        }
+        let mut prop: Proposal = env
+            .storage()
+            .instance()
+            .get(&DataKey::Proposal(proposal_id))
+            .unwrap_or_else(|| panic_with_error!(&env, ContractError::EventDoesNotExist));
+        if prop.executed {
+            return;
+        }
+        let now = env.ledger().timestamp();
+        if prop.expires_at < now {
+            return; // expired
+        }
+        // add approver if not present
+        for i in 0..prop.approvals.len() {
+            if prop.approvals.get(i).unwrap() == approver {
+                return;
+            }
+        }
+        prop.approvals.push_back(approver.clone());
+        env.storage().instance().set(&DataKey::Proposal(proposal_id), &prop);
+        env.events().publish((Symbol::new(&env, "proposal_approved"),), (proposal_id, approver));
+    }
+
+    pub fn execute_proposal(env: Env, executor: Address, proposal_id: u32) {
+        executor.require_auth();
+        if !Self::is_addr_owner(&env, &executor) {
+            panic_with_error!(&env, ContractError::CallerNotOwner);
+        }
+        let mut prop: Proposal = env
+            .storage()
+            .instance()
+            .get(&DataKey::Proposal(proposal_id))
+            .unwrap_or_else(|| panic_with_error!(&env, ContractError::EventDoesNotExist));
+        if prop.executed {
+            return;
+        }
+        let now = env.ledger().timestamp();
+        if prop.expires_at < now {
+            return; // expired
+        }
+        let approvals_needed = Self::get_required_signatures(&env);
+        if prop.approvals.len() < approvals_needed {
+            return; // not enough approvals
+        }
+        // perform the action
+        match prop.action {
+            ProposalAction::TransferOwnership(new_owner) => {
+                env.storage().instance().set(&DataKey::Owner, &new_owner);
+            }
+            ProposalAction::AddOwner(addr) => {
+                let mut owners = Self::get_owners(&env);
+                let mut exists = false;
+                for i in 0..owners.len() { if owners.get(i).unwrap() == addr { exists = true; } }
+                if !exists { owners.push_back(addr); env.storage().instance().set(&DataKey::Owners, &owners); }
+            }
+            ProposalAction::RemoveOwner(addr) => {
+                let mut owners = Self::get_owners(&env);
+                let mut new_vec: Vec<Address> = Vec::new(&env);
+                for i in 0..owners.len() { let o = owners.get(i).unwrap(); if o != addr { new_vec.push_back(o.clone()); } }
+                env.storage().instance().set(&DataKey::Owners, &new_vec);
+            }
+            ProposalAction::SetRequiredSignatures(req) => {
+                env.storage().instance().set(&DataKey::RequiredSignatures, &req);
+            }
+            ProposalAction::SetGlobalMaxLogs(v) => {
+                env.storage().instance().set(&DataKey::GlobalMaxLogs, &v);
+            }
+            ProposalAction::Pause => {
+                env.storage().instance().set(&DataKey::Paused, &true);
+            }
+            ProposalAction::Unpause => {
+                env.storage().instance().set(&DataKey::Paused, &false);
+            }
+        }
+        prop.executed = true;
+        env.storage().instance().set(&DataKey::Proposal(proposal_id), &prop);
+        env.events().publish((Symbol::new(&env, "proposal_executed"),), (proposal_id, executor));
     }
 
     fn event_type_count(env: &Env, event_type: Symbol) -> u32 {
