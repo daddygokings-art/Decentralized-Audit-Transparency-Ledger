@@ -39,6 +39,9 @@ print(f"First event: {event.event_type} by {event.submitter}")
 ```python
 # Write
 client.log_event(submitter, "payment", b'{"amount": "100"}')
+client.log_events([
+    {"submitter": submitter, "event_type": "payment", "metadata": b'{"amount": "100"}'},
+])
 
 # Read
 client.get_event_by_order(0)

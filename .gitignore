@@ -17,5 +17,11 @@ Cargo.lock
 .DS_Store
 Thumbs.db
 
+# Python
+__pycache__/
+*.py[cod]
+*.pycache
+.pytest_cache/
+
 # Soroban specific
 test_snapshots/

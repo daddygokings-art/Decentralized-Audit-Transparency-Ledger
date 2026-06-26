@@ -43,6 +43,10 @@ class ContractError(AuditLedgerError):
         7: "CapNotSet",
         8: "MetadataTooLarge",
         9: "InvalidSignature",
+        10: "ContractPaused",
+        11: "RateLimitExceeded",
+        14: "NoEventsForType",
+        15: "AlreadyInitialized",
     }
 
     def __init__(self, code: int):

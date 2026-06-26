@@ -1,0 +1,46 @@
+version: '3.8'
+services:
+  stellar:
+    image: stellar/quickstart:latest
+    ports:
+      - "8000:8000"
+    healthcheck:
+      test: ["CMD", "curl", "-f", "http://localhost:8000/health"]
+      interval: 10s
+      retries: 5
+
+  redis:
+    image: redis:7-alpine
+    ports:
+      - "6379:6379"
+
+  contract-deploy:
+    build:
+      context: ..
+      dockerfile: docker/Dockerfile.contract
+    depends_on:
+      - stellar
+    command: ["/bin/sh", "-c", "echo deploy placeholder; sleep infinity"]
+
+  api:
+    build:
+      context: ..
+      dockerfile: docker/Dockerfile.api
+    ports:
+      - "4000:4000"
+    depends_on:
+      - redis
+      - contract-deploy
+
+  ui:
+    build:
+      context: ..
+      dockerfile: docker/Dockerfile.ui
+    ports:
+      - "3000:3000"
+    depends_on:
+      - api
+
+networks:
+  default:
+    name: auditledger_local
