@@ -5,7 +5,7 @@ from __future__ import annotations
 import base64
 import hashlib
 import struct
-from typing import Optional
+from typing import Any, Optional
 
 from .models import Event, ContractError, RPCError
 
@@ -103,6 +103,22 @@ class AuditLedgerClient:
         if isinstance(result, dict):
             return bytes.fromhex(list(result.values())[0])
         return bytes.fromhex(result)
+
+    def log_events(self, events: list[dict[str, Any]]) -> list[int]:
+        """Log a batch of events and return their sequential indices."""
+        payload = []
+        for event in events:
+            payload.append({
+                "submitter": event["submitter"],
+                "event_type": event["event_type"],
+                "metadata": base64.b64encode(event["metadata"]).decode(),
+            })
+        result = self._invoke("log_events", {"events": payload})
+        if isinstance(result, list):
+            return [self._parse_u32(item) for item in result]
+        if isinstance(result, dict):
+            return [self._parse_u32(value) for value in result.values()]
+        return [self._parse_u32(result)]
 
     def log_event_signed(
         self,

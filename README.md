@@ -41,13 +41,14 @@ pub struct Event {
 ```rust
 fn initialize(env: Env, owner: Address, global_max_logs: u32);
 fn log_event(env: Env, submitter: Address, event_type: Symbol, metadata: Bytes) -> u32;
+fn log_events(env: Env, events: Vec<(Address, Symbol, Bytes)>) -> Vec<u32>;
 ```
 
 ### Read
 
 ```rust
 fn total_events(env: Env) -> u32;
-fn get_event(env: Env, index: u32) -> Event;
+fn get_event(env: Env, id: BytesN<32>) -> Event;
 fn event_count(env: Env, event_type: Symbol) -> u32;
 fn get_event_by_type(env: Env, event_type: Symbol, type_index: u32) -> Event;
 ```
@@ -100,6 +101,8 @@ soroban contract deploy \
 ```
 
 ### Initialize
+
+The contract must only be initialized once. Repeated calls to `initialize()` will revert with `AlreadyInitialized`.
 
 ```bash
 soroban contract invoke \

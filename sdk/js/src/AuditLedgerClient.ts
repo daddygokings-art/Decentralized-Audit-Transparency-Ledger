@@ -39,6 +39,10 @@ export class AuditLedgerClient {
     return this.transport('log_event', [submitter, eventType, metadata]);
   }
 
+  async logEvents(events: { submitter: string; type: string; metadata: string }[]): Promise<number[]> {
+    return this.transport('log_events', [events]);
+  }
+
   async getEvent(id: string): Promise<Event> {
     return this.transport('get_event', [id]);
   }
@@ -53,6 +57,10 @@ export class AuditLedgerClient {
 
   async getEventByType(type: string, index: number): Promise<Event> {
     return this.transport('get_event_by_type', [type, index]);
+  }
+
+  async getStatistics(): Promise<ContractStatistics> {
+    return this.transport('get_statistics', []);
   }
 
   // Governance helpers (examples)
