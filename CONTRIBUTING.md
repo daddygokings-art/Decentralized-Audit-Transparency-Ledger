@@ -1,77 +1,152 @@
 # Contributing to AuditLedger
 
-## Quick Start for Local Development
+Thank you for helping improve the Decentralized Audit Transparency Ledger. These guidelines explain how to set up the project, keep contributions consistent, and move changes through review.
+
+## Code of Conduct
+
+All contributors are expected to follow the [Contributor Covenant Code of Conduct](https://www.contributor-covenant.org/version/2/1/code_of_conduct/). Be respectful, inclusive, and constructive in issues, pull requests, reviews, and community discussions.
+
+## Getting Started
 
 ### Prerequisites
 
-- Rust toolchain (install via [rustup](https://rustup.rs/))
-- WASM target: `rustup target add wasm32-unknown-unknown`
-- Soroban CLI: `cargo install soroban-cli --features opt`
-- (Optional) Node.js 20+ for the UI and metrics exporter
+- Rust toolchain, installed with [rustup](https://rustup.rs/)
+- WASM target for contract builds:
+  ```bash
+  rustup target add wasm32-unknown-unknown
+  ```
+- Soroban CLI:
+  ```bash
+  cargo install soroban-cli --features opt
+  ```
+- Optional: Node.js 20+ for the UI and metrics exporter
+- Optional: Docker and Docker Compose for the local stack
 
-### Local Contract Iteration
+### Fork, Clone, and Set Up
 
-```bash
-# 1. Clone and build
-git clone <your-fork>
-cd Decentralized-Audit-Transparency-Ledger
-cargo build
-
-# 2. Run the full test suite
-cargo test
-
-# 3. Check formatting and lint
-cargo fmt --check
-cargo clippy -- -D warnings
-
-# 4. Build WASM for deployment
-cargo build --target wasm32-unknown-unknown --release
-
-# 5. Check WASM size
-ls -lh target/wasm32-unknown-unknown/release/audit_ledger.wasm
-```
-
-### Running Tests
-
-```bash
-# All tests
-cargo test
-
-# Single test
-cargo test test_log_event
-
-# With output
-cargo test -- --nocapture
-```
+1. Fork the repository on GitHub.
+2. Clone your fork and enter the project directory:
+   ```bash
+   git clone https://github.com/<your-username>/Decentralized-Audit-Transparency-Ledger.git
+   cd Decentralized-Audit-Transparency-Ledger
+   ```
+3. Add the upstream remote:
+   ```bash
+   git remote add upstream https://github.com/daddygokings-art/Decentralized-Audit-Transparency-Ledger.git
+   ```
+4. Build the project:
+   ```bash
+   cargo build
+   ```
+5. Run the baseline checks before making changes:
+   ```bash
+   cargo fmt --check
+   cargo clippy -- -D warnings
+   cargo test
+   ```
 
 ### Local Docker Stack
 
-```bash
-# Start all services (metrics exporter, Prometheus, Grafana, UI)
-docker compose up --build
+To run the metrics exporter, Prometheus, Grafana, and UI locally:
 
-# The UI will be available at http://localhost:3001
-# Grafana at http://localhost:3000 (admin:password from GRAFANA_PASSWORD)
+```bash
+docker compose up --build
 ```
 
-### Deploy to Testnet
+The UI is available at `http://localhost:3001`, and Grafana is available at `http://localhost:3000`.
 
-See `scripts/deploy_testnet.sh` and the deployment section in `README.md`.
+### Deploying to Testnet
 
-## Code Style
+See `scripts/deploy_testnet.sh` and the deployment section in `README.md` for testnet deployment details.
 
-- Follow existing patterns in `src/lib.rs` and `src/test.rs`.
-- All public functions must have doc comments.
-- Tests are required for new features and should be added to `src/test.rs`.
+## Coding Standards
 
-## Pull Request Process
+- Run `cargo fmt` before committing Rust changes. Pull requests should pass `cargo fmt --check`.
+- Run `cargo clippy -- -D warnings`; clippy warnings should be fixed rather than allowed.
+- Follow existing module organization and patterns in `src/`, `services/`, `api/`, and related workspaces.
+- Use clear Rust naming conventions:
+  - `snake_case` for functions, methods, variables, and modules.
+  - `PascalCase` for structs, enums, traits, and type aliases.
+  - `SCREAMING_SNAKE_CASE` for constants and statics.
+- Keep functions focused and prefer explicit error handling over panics in production code.
+- Add doc comments (`///`) for public functions, structs, enums, traits, modules, and non-obvious behavior.
+- Use inline comments sparingly to explain intent, invariants, security assumptions, or complex logic. Avoid comments that simply restate the code.
+- Do not commit generated build artifacts, local secrets, private keys, or environment-specific configuration.
 
-1. Fork the repository and create a feature branch.
-2. Make your changes and ensure all tests pass (`cargo test`).
-3. Run `cargo fmt --check` and `cargo clippy -- -D warnings`.
-4. Build the WASM binary and verify the size is reasonable.
-5. Open a pull request with a clear description of the changes.
+## Testing Requirements
 
-## Bounty Program
+- Add or update tests for every new function, feature, bug fix, and edge case where behavior changes.
+- Run the full Rust test suite before submitting:
+  ```bash
+  cargo test
+  ```
+- Useful test commands:
+  ```bash
+  cargo test test_log_event
+  cargo test -- --nocapture
+  ```
+- The project targets at least 90% test coverage for new and modified code. If coverage cannot be added for a change, explain why in the pull request.
+- For contract-facing changes, include tests for success paths, authorization or permission failures, validation failures, and boundary conditions.
 
-See `README.md` for details on the bounty point system.
+## Pull Request Workflow
+
+### Branch Naming
+
+Create a branch from the latest upstream default branch. Use one of these prefixes:
+
+- `feature/<short-description>` for new features.
+- `bugfix/<short-description>` for bug fixes.
+- `docs/<short-description>` for documentation-only changes.
+
+Example:
+
+```bash
+git fetch upstream
+git checkout master
+git merge upstream/master
+git checkout -b docs/contribution-guidelines
+```
+
+### Before Opening a PR
+
+Make sure the following checklist is complete:
+
+- [ ] The branch is up to date with the upstream default branch.
+- [ ] Code is formatted with `cargo fmt`.
+- [ ] `cargo clippy -- -D warnings` passes with zero warnings.
+- [ ] `cargo test` passes.
+- [ ] New or changed behavior has tests.
+- [ ] Public APIs and non-obvious logic are documented.
+- [ ] The PR description links the related issue or bounty, if applicable.
+
+### PR Description Template
+
+Use a clear pull request description that includes:
+
+```markdown
+## Summary
+- What changed?
+
+## Testing
+- What commands did you run?
+
+## Related Issues
+- Closes #<issue-number>
+```
+
+### Review Process
+
+- At least one maintainer approval is required before merge.
+- Address review feedback with additional commits or a small follow-up commit series.
+- Keep discussions constructive and explain trade-offs when accepting or declining suggestions.
+- Maintainers may request additional tests, documentation, or security notes before approving.
+- Prefer squash merging unless maintainers request a different merge strategy.
+
+## Issue Tracking and Bounties
+
+- Search existing issues before opening a new one.
+- Use clear titles and include reproduction steps, expected behavior, actual behavior, logs, and environment details for bugs.
+- To work on an issue, comment that you would like to claim it and wait for maintainer confirmation when the issue requires assignment.
+- For bounty issues, follow the bounty provider's instructions and include the issue number in your branch, commits, and pull request.
+- Bounty points are awarded based on the issue requirements, implementation quality, tests, documentation, review responsiveness, and maintainer acceptance.
+- If you can no longer work on a claimed issue, comment promptly so another contributor can pick it up.
