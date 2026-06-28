@@ -1794,3 +1794,78 @@ fn test_blocklist_takes_precedence() {
     }));
     assert!(result.is_err());
 }
+
+// ── Governance events (#116) ─────────────────────────────────────────────────
+
+#[test]
+fn test_set_global_max_logs_emits_event() {
+    let (env, owner, client) = create_ledger();
+    env.mock_all_auths();
+    client.set_global_max_logs(&owner, &200);
+    // Verify the event was published by checking total (non-zero events list)
+    let evts = env.events().all();
+    // At least one event should exist after governance call
+    assert!(!evts.is_empty());
+}
+
+#[test]
+fn test_transfer_ownership_emits_event() {
+    let (env, owner, client) = create_ledger();
+    let new_owner = Address::generate(&env);
+    env.mock_all_auths();
+    client.transfer_ownership(&owner, &new_owner);
+    let evts = env.events().all();
+    assert!(!evts.is_empty());
+}
+
+#[test]
+fn test_remove_event_cap_emits_event() {
+    let (env, owner, client) = create_ledger();
+    let payment = symbol_short!("payment");
+    env.mock_all_auths();
+    client.set_event_max_logs(&owner, &payment, &50);
+    let before = env.events().all().len();
+    client.remove_event_cap(&owner, &payment);
+    let after = env.events().all().len();
+    // A new event should have been published
+    assert!(after > before);
+}
+
+// ── TTL storage (#121) ───────────────────────────────────────────────────────
+
+#[test]
+fn test_set_event_ttl_and_get() {
+    let (env, owner, client) = create_ledger();
+    env.mock_all_auths();
+    assert_eq!(client.get_event_ttl(), 0);
+    client.set_event_ttl(&owner, &1000);
+    assert_eq!(client.get_event_ttl(), 1000);
+}
+
+#[test]
+fn test_set_event_ttl_emits_governance_event() {
+    let (env, owner, client) = create_ledger();
+    env.mock_all_auths();
+    let before = env.events().all().len();
+    client.set_event_ttl(&owner, &500);
+    let after = env.events().all().len();
+    assert!(after > before, "set_event_ttl should emit a governance event");
+}
+
+#[test]
+fn test_log_event_with_ttl_enabled() {
+    let (env, owner, client) = create_ledger();
+    let submitter = Address::generate(&env);
+    env.mock_all_auths();
+    client.set_event_ttl(&owner, &1000);
+    // Logging should succeed with TTL enabled; event stored in both instance + persistent
+    let id = client.log_event(
+        &submitter,
+        &symbol_short!("payment"),
+        &Bytes::from_slice(&env, b"ttl_test"),
+        &None,
+        &None,
+    );
+    let evt = client.get_event(&id);
+    assert_eq!(evt.metadata, Bytes::from_slice(&env, b"ttl_test"));
+}

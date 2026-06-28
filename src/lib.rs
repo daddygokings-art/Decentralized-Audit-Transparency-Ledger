@@ -121,6 +121,15 @@ pub enum DataKey {
     RequiredSignatures,
     ProposalCount,
     Proposal(u32),
+    /// TTL configuration (#121): number of ledgers after which persistent events are eligible for expiry.
+    /// Absent = TTL disabled (instance storage, no expiry).
+    EventTtl,
+    /// Submitter blocklist (#141): Address → bool.
+    SubmitterBlocklist(Address),
+    /// Allowlist mode flag (#141).
+    AllowlistMode,
+    /// Submitter allowlist (#141): Address → bool.
+    SubmitterAllowlist(Address),
 }
 
 #[contracterror]
@@ -149,6 +158,7 @@ pub enum ContractError {
     NoEventsForType = 20,
     InvalidPaginationParams = 21,
     InvalidWasmHash = 22,
+    SubmitterBlocked = 23,
 }
 
 #[contracttype]
@@ -580,6 +590,21 @@ impl AuditLedger {
         env.storage()
             .instance()
             .set(&DataKey::EventMetadata(event_id.clone()), &metadata);
+
+        // --- issue #121: write to persistent storage when TTL is configured ---
+        let ttl: u32 = env
+            .storage()
+            .instance()
+            .get(&DataKey::EventTtl)
+            .unwrap_or(0);
+        if ttl > 0 {
+            env.storage()
+                .persistent()
+                .set(&DataKey::EventData(event_id.clone()), &evt);
+            env.storage()
+                .persistent()
+                .extend_ttl(&DataKey::EventData(event_id.clone()), ttl, ttl);
+        }
 
         // Task 4: cache low_cost_mode to avoid double read.
         let low_cost = Self::effective_low_cost_mode(&env);
@@ -1292,9 +1317,14 @@ impl AuditLedger {
             panic_with_error!(&env, ContractError::MaxLogsBelowCurrentCount);
         }
         let mut cfg: Config = env.storage().instance().get(&DataKey::Config).unwrap();
+        let old_max = cfg.global_max_logs;
         cfg.global_max_logs = new_max;
         env.storage().instance().set(&DataKey::Config, &cfg);
         env.storage().instance().set(&DataKey::GlobalMaxLogs, &new_max);
+        env.events().publish(
+            (Symbol::new(&env, "governance"), Symbol::new(&env, "set_global_max")),
+            (caller, old_max, new_max),
+        );
     }
 
     pub fn set_event_max_logs(env: Env, caller: Address, event_type: Symbol, new_max: u32) {
@@ -1359,7 +1389,11 @@ impl AuditLedger {
             .remove(&DataKey::EventMaxLogs(event_type.clone()));
         env.storage()
             .instance()
-            .set(&DataKey::EventCapRemoved(event_type), &true);
+            .set(&DataKey::EventCapRemoved(event_type.clone()), &true);
+        env.events().publish(
+            (Symbol::new(&env, "governance"), Symbol::new(&env, "remove_event_cap")),
+            (caller, event_type),
+        );
     }
 
     pub fn has_cap(env: Env, event_type: Symbol) -> bool {
@@ -1384,6 +1418,10 @@ impl AuditLedger {
             panic_with_error!(&env, ContractError::SameOwner);
         }
         env.storage().instance().set(&DataKey::Owner, &new_owner);
+        env.events().publish(
+            (Symbol::new(&env, "governance"), Symbol::new(&env, "transfer_ownership")),
+            (caller, current_owner, new_owner),
+        );
     }
 
     // ── issue #67: metadata size governance ──────────────────────────────────
@@ -1420,6 +1458,38 @@ impl AuditLedger {
         env.storage()
             .instance()
             .set(&DataKey::EventMetadataMaxSize(event_type), &max_size);
+    }
+
+    /// Set the TTL for events written to persistent storage (#121).
+    ///
+    /// When `ttl_ledgers > 0`, subsequent `log_event` calls store each event in
+    /// `env.storage().persistent()` and extend its TTL to `ttl_ledgers` ledgers
+    /// from the current ledger sequence.  When `ttl_ledgers == 0`, TTL is
+    /// disabled and events continue to be stored in instance storage (no expiry).
+    ///
+    /// **Cost tradeoffs** — see docs/fees.md#ttl-storage.
+    pub fn set_event_ttl(env: Env, caller: Address, ttl_ledgers: u32) {
+        Self::require_initialized(&env);
+        caller.require_auth();
+        if let Some(true) = env.storage().instance().get::<_, bool>(&DataKey::Paused) {
+            panic_with_error!(&env, ContractError::ContractPaused);
+        }
+        Self::require_owner_or_multisig(&env, &caller);
+        let old_ttl: u32 = env
+            .storage()
+            .instance()
+            .get(&DataKey::EventTtl)
+            .unwrap_or(0);
+        env.storage().instance().set(&DataKey::EventTtl, &ttl_ledgers);
+        env.events().publish(
+            (Symbol::new(&env, "governance"), Symbol::new(&env, "set_event_ttl")),
+            (caller, old_ttl, ttl_ledgers),
+        );
+    }
+
+    /// Return the currently configured TTL in ledgers, or 0 if disabled.
+    pub fn get_event_ttl(env: Env) -> u32 {
+        env.storage().instance().get(&DataKey::EventTtl).unwrap_or(0)
     }
 
     /// Pause write operations. Owner-only. Works even if contract already paused.

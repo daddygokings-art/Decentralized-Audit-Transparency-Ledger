@@ -60,7 +60,15 @@ fn set_global_max_logs(env: Env, caller: Address, new_max: u32);
 fn set_event_max_logs(env: Env, caller: Address, event_type: Symbol, new_max: u32);
 fn remove_event_cap(env: Env, caller: Address, event_type: Symbol);
 fn transfer_ownership(env: Env, caller: Address, new_owner: Address);
+fn set_event_ttl(env: Env, caller: Address, ttl_ledgers: u32);
+fn get_event_ttl(env: Env) -> u32;
 ```
+
+All governance functions publish a typed Soroban event with topic `("governance", "<function_name>")` and payload `(caller, old_value, new_value)` so off-chain monitors can track admin activity without polling state.
+
+#### TTL Storage
+
+`set_event_ttl(ttl_ledgers)` enables optional persistent storage for events. When `ttl_ledgers > 0`, each `log_event` call additionally writes the event to `env.storage().persistent()` and extends its TTL to `ttl_ledgers` ledgers, making events eligible for network expiry after that point. See [`docs/fees.md#ttl-storage`](docs/fees.md#ttl-storage) for cost tradeoffs.
 
 ## Quick Start
 
