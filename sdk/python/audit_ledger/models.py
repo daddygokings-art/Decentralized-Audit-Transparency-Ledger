@@ -1,5 +1,16 @@
 from dataclasses import dataclass
-from typing import Optional
+from typing import Generic, List, Optional, TypeVar
+
+T = TypeVar("T")
+
+
+@dataclass
+class Page(Generic[T]):
+    """A paginated result set."""
+    items: List[T]
+    total: int
+    offset: int
+    limit: int
 
 
 @dataclass

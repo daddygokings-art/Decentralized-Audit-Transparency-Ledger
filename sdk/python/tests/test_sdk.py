@@ -174,3 +174,68 @@ class TestAuditLedgerClientOffline:
         client.server.invoke_contract = MagicMock(side_effect=Exception("network timeout"))
         with pytest.raises(RPCError):
             client._invoke("total_events")
+
+
+# ── Pagination tests (#128) ───────────────────────────────────────────────────
+
+class TestGetEvents:
+    """Tests for AuditLedgerClient.get_events() pagination."""
+
+    def _make_client_with_events(self, n: int):
+        _stub_stellar_sdk()
+        if "audit_ledger.client" in sys.modules:
+            del sys.modules["audit_ledger.client"]
+        from audit_ledger.client import AuditLedgerClient
+        from audit_ledger.models import Event
+
+        def _make_event(i):
+            return Event(
+                index=i, timestamp=1_700_000_000 + i,
+                event_type="TX", submitter="GABC",
+                metadata=b"", event_hash=bytes(32), prev_hash=bytes(32),
+            )
+
+        client = AuditLedgerClient.__new__(AuditLedgerClient)
+        client.contract_id = "CTEST"
+        client.server = MagicMock()
+        client.source = None
+        client.total_events = MagicMock(return_value=n)
+        client.get_event_by_order = MagicMock(side_effect=_make_event)
+        return client
+
+    def test_default_limit(self):
+        client = self._make_client_with_events(100)
+        page = client.get_events()
+        assert page.offset == 0
+        assert page.limit == 50
+        assert page.total == 100
+        assert len(page.items) == 50
+        assert page.items[0].index == 0
+        assert page.items[49].index == 49
+
+    def test_custom_offset_and_limit(self):
+        client = self._make_client_with_events(100)
+        page = client.get_events(offset=10, limit=20)
+        assert page.offset == 10
+        assert page.limit == 20
+        assert len(page.items) == 20
+        assert page.items[0].index == 10
+
+    def test_boundary_offset_at_end(self):
+        client = self._make_client_with_events(10)
+        page = client.get_events(offset=10, limit=50)
+        assert page.total == 10
+        assert page.items == []
+
+    def test_partial_last_page(self):
+        client = self._make_client_with_events(7)
+        page = client.get_events(offset=5, limit=50)
+        assert len(page.items) == 2
+        assert page.items[0].index == 5
+        assert page.items[1].index == 6
+
+    def test_page_dataclass_fields(self):
+        from audit_ledger.models import Page
+        p = Page(items=[], total=0, offset=0, limit=50)
+        assert p.items == []
+        assert p.total == 0

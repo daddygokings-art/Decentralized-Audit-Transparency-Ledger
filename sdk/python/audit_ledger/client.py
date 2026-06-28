@@ -7,7 +7,7 @@ import hashlib
 import struct
 from typing import Any, Optional
 
-from .models import Event, ContractError, RPCError
+from .models import Event, ContractError, RPCError, Page
 
 try:
     import stellar_sdk
@@ -167,6 +167,23 @@ class AuditLedgerClient:
             "type_index": type_index,
         })
         return Event.from_dict(result) if isinstance(result, dict) else result
+
+    def get_events(self, offset: int = 0, limit: int = 50) -> "Page[Event]":
+        """Return a paginated slice of all events.
+
+        Args:
+            offset: Zero-based index of the first event to return.
+            limit: Maximum number of events to return.
+
+        Returns:
+            Page[Event] with items, total, offset, and limit fields.
+        """
+        total = self.total_events()
+        items: list[Event] = []
+        end = min(offset + limit, total)
+        for i in range(offset, end):
+            items.append(self.get_event_by_order(i))
+        return Page(items=items, total=total, offset=offset, limit=limit)
 
     # ── Governance ────────────────────────────────────────────────────────
 
