@@ -1,0 +1,35 @@
+name: Dependency Review
+
+permissions:
+  contents: read
+  pull-requests: read
+
+on:
+  pull_request:
+    branches:
+      - main
+
+jobs:
+  dependency-review:
+    name: Dependency security scan
+    runs-on: ubuntu-latest
+    permissions:
+      contents: read
+      pull-requests: write
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@v6
+        with:
+          persist-credentials: false
+
+      - name: Dependency Review
+        uses: actions/dependency-review-action@v4
+        with:
+          fail-on-severity: high
+          allow-licenses: |
+            MIT
+            Apache-2.0
+            BSD-2-Clause
+            BSD-3-Clause
+            ISC
+            MPL-2.0
