@@ -1464,3 +1464,333 @@ fn test_update_event_nonexistent_panics() {
     env.mock_all_auths();
     client.update_event(&owner, &0, &Bytes::from_slice(&env, b"updated"));
 }
+
+
+// ── Hash Chain Integrity Verification (Issue #144) ───────────────────────────
+
+#[test]
+fn test_verify_chain_empty() {
+    let (_env, _owner, client) = create_ledger();
+    assert!(client.verify_integrity_range(&0, &0));
+}
+
+#[test]
+fn test_verify_chain_single_event() {
+    let (env, _owner, client) = create_ledger();
+    let submitter = Address::generate(&env);
+    env.mock_all_auths();
+    client.log_event(&submitter, &symbol_short!("test"), &Bytes::from_slice(&env, b"data"));
+    
+    assert!(client.verify_integrity_range(&0, &1));
+}
+
+#[test]
+fn test_verify_chain_multiple_events_sequential() {
+    let (env, _owner, client) = create_ledger();
+    let submitter = Address::generate(&env);
+    env.mock_all_auths();
+    
+    for i in 0u8..10 {
+        client.log_event(&submitter, &symbol_short!("evt"), &Bytes::from_slice(&env, &[i]));
+    }
+    
+    assert!(client.verify_integrity_range(&0, &10));
+}
+
+#[test]
+fn test_verify_chain_partial_ranges() {
+    let (env, _owner, client) = create_ledger();
+    let submitter = Address::generate(&env);
+    env.mock_all_auths();
+    
+    for i in 0u8..5 {
+        client.log_event(&submitter, &symbol_short!("evt"), &Bytes::from_slice(&env, &[i]));
+    }
+    
+    // Verify subranges
+    assert!(client.verify_integrity_range(&1, &3));
+    assert!(client.verify_integrity_range(&0, &5));
+    assert!(client.verify_integrity_range(&2, &4));
+}
+
+#[test]
+fn test_verify_chain_full_integrity() {
+    let (env, _owner, client) = create_ledger();
+    let submitter = Address::generate(&env);
+    env.mock_all_auths();
+    
+    for i in 0u8..15 {
+        client.log_event(&submitter, &symbol_short!("evt"), &Bytes::from_slice(&env, &[i]));
+    }
+    
+    // Full chain must be valid
+    assert!(client.verify_integrity());
+}
+
+#[test]
+fn test_verify_chain_prev_hash_consistency() {
+    let (env, _owner, client) = create_ledger();
+    let submitter = Address::generate(&env);
+    env.mock_all_auths();
+    
+    let id0 = client.log_event(&submitter, &symbol_short!("evt"), &Bytes::from_slice(&env, b"e0"));
+    let id1 = client.log_event(&submitter, &symbol_short!("evt"), &Bytes::from_slice(&env, b"e1"));
+    let id2 = client.log_event(&submitter, &symbol_short!("evt"), &Bytes::from_slice(&env, b"e2"));
+    
+    let evt0 = client.get_event(&id0);
+    let evt1 = client.get_event(&id1);
+    let evt2 = client.get_event(&id2);
+    
+    // Chain linkage must be intact
+    assert_eq!(evt0.prev_hash, BytesN::from_array(&env, &[0u8; 32]));
+    assert_eq!(evt1.prev_hash, evt0.event_hash);
+    assert_eq!(evt2.prev_hash, evt1.event_hash);
+    
+    // Verification must pass
+    assert!(client.verify_integrity_range(&0, &3));
+}
+
+#[test]
+fn test_verify_chain_different_event_types() {
+    let (env, _owner, client) = create_ledger();
+    let submitter = Address::generate(&env);
+    env.mock_all_auths();
+    
+    client.log_event(&submitter, &symbol_short!("pay"), &Bytes::from_slice(&env, b"1"));
+    client.log_event(&submitter, &symbol_short!("ref"), &Bytes::from_slice(&env, b"2"));
+    client.log_event(&submitter, &symbol_short!("pay"), &Bytes::from_slice(&env, b"3"));
+    client.log_event(&submitter, &symbol_short!("del"), &Bytes::from_slice(&env, b"4"));
+    
+    assert!(client.verify_integrity());
+}
+
+
+// ── Submitter Allowlist / Blocklist (Issue #141) ──────────────────────────────
+
+#[test]
+fn test_block_submitter() {
+    let (env, owner, client) = create_ledger();
+    let submitter = Address::generate(&env);
+    
+    env.mock_all_auths();
+    
+    // Submit event before blocking
+    let id = client.log_event(
+        &submitter,
+        &symbol_short!("test"),
+        &Bytes::from_slice(&env, b"data"),
+        &None,
+        &None,
+    );
+    assert_eq!(client.total_events(), 1);
+    
+    // Block the submitter
+    client.block_submitter(&owner, &submitter);
+    
+    // Attempt to submit after blocking should fail
+    let result = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+        client.log_event(
+            &submitter,
+            &symbol_short!("test"),
+            &Bytes::from_slice(&env, b"blocked"),
+            &None,
+            &None,
+        )
+    }));
+    assert!(result.is_err());
+}
+
+#[test]
+fn test_unblock_submitter() {
+    let (env, owner, client) = create_ledger();
+    let submitter = Address::generate(&env);
+    
+    env.mock_all_auths();
+    
+    // Block the submitter
+    client.block_submitter(&owner, &submitter);
+    
+    // Verify blocked
+    let result = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+        client.log_event(
+            &submitter,
+            &symbol_short!("test"),
+            &Bytes::from_slice(&env, b"blocked"),
+            &None,
+            &None,
+        )
+    }));
+    assert!(result.is_err());
+    
+    // Unblock the submitter
+    client.unblock_submitter(&owner, &submitter);
+    
+    // Now submission should work
+    let id = client.log_event(
+        &submitter,
+        &symbol_short!("test"),
+        &Bytes::from_slice(&env, b"allowed"),
+        &None,
+        &None,
+    );
+    assert_eq!(client.total_events(), 1);
+}
+
+#[test]
+fn test_allowlist_mode_enabled() {
+    let (env, owner, client) = create_ledger();
+    let whitelisted = Address::generate(&env);
+    let non_whitelisted = Address::generate(&env);
+    
+    env.mock_all_auths();
+    
+    // Enable allowlist mode
+    client.enable_allowlist_mode(&owner);
+    
+    // Whitelisted submitter not yet allowed - should fail
+    let result = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+        client.log_event(
+            &whitelisted,
+            &symbol_short!("test"),
+            &Bytes::from_slice(&env, b"data"),
+            &None,
+            &None,
+        )
+    }));
+    assert!(result.is_err());
+    
+    // Allow submitter
+    client.allow_submitter(&owner, &whitelisted);
+    
+    // Now it should work
+    let id = client.log_event(
+        &whitelisted,
+        &symbol_short!("test"),
+        &Bytes::from_slice(&env, b"allowed"),
+        &None,
+        &None,
+    );
+    assert_eq!(client.total_events(), 1);
+    
+    // Non-whitelisted should still fail
+    let result = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+        client.log_event(
+            &non_whitelisted,
+            &symbol_short!("test"),
+            &Bytes::from_slice(&env, b"not_allowed"),
+            &None,
+            &None,
+        )
+    }));
+    assert!(result.is_err());
+}
+
+#[test]
+fn test_remove_from_allowlist() {
+    let (env, owner, client) = create_ledger();
+    let submitter = Address::generate(&env);
+    
+    env.mock_all_auths();
+    
+    // Enable allowlist mode and allow submitter
+    client.enable_allowlist_mode(&owner);
+    client.allow_submitter(&owner, &submitter);
+    
+    // Should work
+    let id = client.log_event(
+        &submitter,
+        &symbol_short!("test"),
+        &Bytes::from_slice(&env, b"allowed"),
+        &None,
+        &None,
+    );
+    assert_eq!(client.total_events(), 1);
+    
+    // Remove from allowlist
+    client.remove_submitter_from_allowlist(&owner, &submitter);
+    
+    // Should fail now
+    let result = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+        client.log_event(
+            &submitter,
+            &symbol_short!("test"),
+            &Bytes::from_slice(&env, b"removed"),
+            &None,
+            &None,
+        )
+    }));
+    assert!(result.is_err());
+}
+
+#[test]
+fn test_disable_allowlist_mode() {
+    let (env, owner, client) = create_ledger();
+    let submitter = Address::generate(&env);
+    
+    env.mock_all_auths();
+    
+    // Enable allowlist mode
+    client.enable_allowlist_mode(&owner);
+    
+    // Submitter not whitelisted - should fail
+    let result = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+        client.log_event(
+            &submitter,
+            &symbol_short!("test"),
+            &Bytes::from_slice(&env, b"data"),
+            &None,
+            &None,
+        )
+    }));
+    assert!(result.is_err());
+    
+    // Disable allowlist mode
+    client.disable_allowlist_mode(&owner);
+    
+    // Should work now
+    let id = client.log_event(
+        &submitter,
+        &symbol_short!("test"),
+        &Bytes::from_slice(&env, b"allowed"),
+        &None,
+        &None,
+    );
+    assert_eq!(client.total_events(), 1);
+}
+
+#[test]
+fn test_blocklist_takes_precedence() {
+    let (env, owner, client) = create_ledger();
+    let submitter = Address::generate(&env);
+    
+    env.mock_all_auths();
+    
+    // Enable allowlist and allow submitter
+    client.enable_allowlist_mode(&owner);
+    client.allow_submitter(&owner, &submitter);
+    
+    // Should work
+    let id = client.log_event(
+        &submitter,
+        &symbol_short!("test"),
+        &Bytes::from_slice(&env, b"allowed"),
+        &None,
+        &None,
+    );
+    assert_eq!(client.total_events(), 1);
+    
+    // Block the submitter (blocklist takes precedence over allowlist)
+    client.block_submitter(&owner, &submitter);
+    
+    // Should fail now
+    let result = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+        client.log_event(
+            &submitter,
+            &symbol_short!("test"),
+            &Bytes::from_slice(&env, b"blocked"),
+            &None,
+            &None,
+        )
+    }));
+    assert!(result.is_err());
+}

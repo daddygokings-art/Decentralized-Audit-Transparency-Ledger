@@ -38,6 +38,66 @@ const EVM_RPC = process.env.EVM_RPC ?? "http://localhost:8545";
 const VERIFIER_ADDRESS = process.env.VERIFIER_ADDRESS ?? "";
 const RELAY_PRIVATE_KEY_HEX = process.env.RELAY_PRIVATE_KEY ?? "";
 const POLL_INTERVAL_MS = parseInt(process.env.POLL_INTERVAL ?? "5000", 10);
+const PROOF_CACHE_MAX_SIZE = parseInt(process.env.PROOF_CACHE_MAX_SIZE ?? "1000", 10);
+const PROOF_CACHE_TTL_MS = parseInt(process.env.PROOF_CACHE_TTL_MS ?? "3600000", 10); // 1 hour default
+
+// ── LRU Proof Cache (Issue #142) ──────────────────────────────────────────────
+
+interface CachedProof {
+  proof: EventProof;
+  timestamp: number;
+}
+
+class ProofCache {
+  private cache: Map<string, CachedProof> = new Map();
+  private maxSize: number;
+  private ttlMs: number;
+
+  constructor(maxSize: number, ttlMs: number) {
+    this.maxSize = maxSize;
+    this.ttlMs = ttlMs;
+  }
+
+  get(eventHash: string): EventProof | null {
+    const cached = this.cache.get(eventHash);
+    if (!cached) return null;
+
+    // Check TTL
+    if (Date.now() - cached.timestamp > this.ttlMs) {
+      this.cache.delete(eventHash);
+      return null;
+    }
+
+    // Move to end (most recently used)
+    this.cache.delete(eventHash);
+    this.cache.set(eventHash, cached);
+    return cached.proof;
+  }
+
+  set(eventHash: string, proof: EventProof): void {
+    // Remove if exists (to update LRU order)
+    if (this.cache.has(eventHash)) {
+      this.cache.delete(eventHash);
+    }
+
+    // Add to end (most recently used)
+    this.cache.set(eventHash, { proof, timestamp: Date.now() });
+
+    // Evict least recently used if over capacity
+    if (this.cache.size > this.maxSize) {
+      const firstKey = this.cache.keys().next().value;
+      this.cache.delete(firstKey);
+    }
+  }
+
+  clear(): void {
+    this.cache.clear();
+  }
+
+  size(): number {
+    return this.cache.size;
+  }
+}
 
 // ── HTTP helper ───────────────────────────────────────────────────────────────
 
@@ -164,9 +224,11 @@ async function fetchLatestEvents(afterIndex: number): Promise<AuditEvent[]> {
 async function run(): Promise<void> {
   let lastIndex = 0;
   const relayKey = RELAY_PRIVATE_KEY_HEX ? Buffer.from(RELAY_PRIVATE_KEY_HEX, "hex") : Buffer.alloc(32);
+  const proofCache = new ProofCache(PROOF_CACHE_MAX_SIZE, PROOF_CACHE_TTL_MS);
 
   console.log(`[relayer] starting — Stellar RPC: ${STELLAR_RPC}`);
   console.log(`[relayer] EVM target: ${VERIFIER_ADDRESS} @ ${EVM_RPC}`);
+  console.log(`[relayer] proof cache: max ${PROOF_CACHE_MAX_SIZE} entries, TTL ${PROOF_CACHE_TTL_MS}ms`);
 
   while (true) {
     try {
@@ -174,7 +236,17 @@ async function run(): Promise<void> {
 
       for (const event of events) {
         console.log(`[relayer] processing event #${event.index} type=${event.event_type}`);
-        const proof = buildProof(event, relayKey);
+        
+        // Issue #142: Check proof cache before rebuilding
+        let proof = proofCache.get(event.event_hash);
+        if (proof) {
+          console.log(`[relayer] proof cache hit for event #${event.index}`);
+        } else {
+          console.log(`[relayer] proof cache miss for event #${event.index}, building proof`);
+          proof = buildProof(event, relayKey);
+          proofCache.set(event.event_hash, proof);
+        }
+        
         const eventData = Buffer.from(JSON.stringify({ index: event.index, event_type: event.event_type, submitter: event.submitter, metadata: event.metadata }));
         const result = await submitToEvm(proof, eventData);
         console.log(`[relayer] submitted proof for event #${event.index} → EVM result: ${result}`);
@@ -192,4 +264,4 @@ if (require.main === module) {
   run().catch((err) => { console.error(err); process.exit(1); });
 }
 
-export { buildProof, fetchLatestEvents, EventProof, AuditEvent };
+export { buildProof, fetchLatestEvents, EventProof, AuditEvent, ProofCache };
