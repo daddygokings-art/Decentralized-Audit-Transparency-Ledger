@@ -428,6 +428,23 @@ impl AuditLedger {
             panic_with_error!(&env, ContractError::ContractPaused);
         }
 
+        // --- issue #141: enforce submitter blocklist/allowlist ---
+        // Check if submitter is blocked
+        if let Some(true) = env.storage().instance().get::<_, bool>(&DataKey::SubmitterBlocklist(submitter.clone())) {
+            panic_with_error!(&env, ContractError::SubmitterBlocked);
+        }
+
+        // Check allowlist mode
+        if let Some(true) = env.storage().instance().get::<_, bool>(&DataKey::AllowlistMode) {
+            if let Some(false) = env.storage().instance().get::<_, bool>(&DataKey::SubmitterAllowlist(submitter.clone())) {
+                panic_with_error!(&env, ContractError::SubmitterBlocked);
+            }
+            // If allowlist key doesn't exist, reject by default
+            if env.storage().instance().get::<_, bool>(&DataKey::SubmitterAllowlist(submitter.clone())).is_none() {
+                panic_with_error!(&env, ContractError::SubmitterBlocked);
+            }
+        }
+
         // --- issue #62: enforce per-submitter rate limit ---
         if let Some(limit) = env
             .storage()
@@ -1422,6 +1439,83 @@ impl AuditLedger {
         env.storage().instance().set(&DataKey::Paused, &false);
         env.events()
             .publish((Symbol::new(&env, "contract_unpaused"),), (caller,));
+    }
+
+    /// Block a submitter (owner-only). Issue #141: governance.
+    /// Blocked submitters cannot submit events and will receive SubmitterBlocked error.
+    pub fn block_submitter(env: Env, caller: Address, submitter: Address) {
+        Self::require_initialized(&env);
+        caller.require_auth();
+        Self::require_owner_or_multisig(&env, &caller);
+        env.storage()
+            .instance()
+            .set(&DataKey::SubmitterBlocklist(submitter.clone()), &true);
+        env.events().publish(
+            (Symbol::new(&env, "submitter_blocked"),),
+            (submitter, caller),
+        );
+    }
+
+    /// Unblock a submitter (owner-only). Issue #141: governance.
+    pub fn unblock_submitter(env: Env, caller: Address, submitter: Address) {
+        Self::require_initialized(&env);
+        caller.require_auth();
+        Self::require_owner_or_multisig(&env, &caller);
+        env.storage()
+            .instance()
+            .remove(&DataKey::SubmitterBlocklist(submitter.clone()));
+        env.events().publish(
+            (Symbol::new(&env, "submitter_unblocked"),),
+            (submitter, caller),
+        );
+    }
+
+    /// Enable allowlist mode (owner-only). Issue #141: governance.
+    /// When enabled, only whitelisted submitters can submit events.
+    pub fn enable_allowlist_mode(env: Env, caller: Address) {
+        Self::require_initialized(&env);
+        caller.require_auth();
+        Self::require_owner_or_multisig(&env, &caller);
+        env.storage().instance().set(&DataKey::AllowlistMode, &true);
+        env.events()
+            .publish((Symbol::new(&env, "allowlist_enabled"),), (caller,));
+    }
+
+    /// Disable allowlist mode (owner-only). Issue #141: governance.
+    pub fn disable_allowlist_mode(env: Env, caller: Address) {
+        Self::require_initialized(&env);
+        caller.require_auth();
+        Self::require_owner_or_multisig(&env, &caller);
+        env.storage().instance().set(&DataKey::AllowlistMode, &false);
+        env.events()
+            .publish((Symbol::new(&env, "allowlist_disabled"),), (caller,));
+    }
+
+    /// Allow a submitter (owner-only). Issue #141: governance.
+    /// When allowlist mode is enabled, only whitelisted submitters can submit.
+    pub fn allow_submitter(env: Env, caller: Address, submitter: Address) {
+        Self::require_initialized(&env);
+        caller.require_auth();
+        Self::require_owner_or_multisig(&env, &caller);
+        env.storage()
+            .instance()
+            .set(&DataKey::SubmitterAllowlist(submitter.clone()), &true);
+        env.events()
+            .publish((Symbol::new(&env, "submitter_allowed"),), (submitter, caller));
+    }
+
+    /// Remove a submitter from the allowlist (owner-only). Issue #141: governance.
+    pub fn remove_submitter_from_allowlist(env: Env, caller: Address, submitter: Address) {
+        Self::require_initialized(&env);
+        caller.require_auth();
+        Self::require_owner_or_multisig(&env, &caller);
+        env.storage()
+            .instance()
+            .remove(&DataKey::SubmitterAllowlist(submitter.clone()));
+        env.events().publish(
+            (Symbol::new(&env, "submitter_removed_from_allowlist"),),
+            (submitter, caller),
+        );
     }
 
     /// Get the effective metadata size limit for the given event type.
