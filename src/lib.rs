@@ -121,6 +121,14 @@ pub enum DataKey {
     RequiredSignatures,
     ProposalCount,
     Proposal(u32),
+    /// Blocklist flag for a submitter (issue #141).
+    SubmitterBlocklist(Address),
+    /// Global allowlist mode flag (issue #141).
+    AllowlistMode,
+    /// Allowlist entry for a submitter (issue #141).
+    SubmitterAllowlist(Address),
+    /// Content-addressed deduplication: hash(event_type||submitter||metadata) -> event index.
+    EventContentHash(BytesN<32>),
 }
 
 #[contracterror]
@@ -149,6 +157,7 @@ pub enum ContractError {
     NoEventsForType = 20,
     InvalidPaginationParams = 21,
     InvalidWasmHash = 22,
+    SubmitterBlocked = 23,
 }
 
 #[contracttype]
@@ -402,7 +411,7 @@ impl AuditLedger {
 
         env.storage()
             .instance()
-            .set(&DataKey::Config, &Config { global_max_logs, total_events: current_total });
+            .set(&DataKey::Config, &Config { global_max_logs: global_max, total_events: current_total });
         env.storage()
             .instance()
             .set(&DataKey::TotalEvents, &current_total);
@@ -411,6 +420,11 @@ impl AuditLedger {
     }
 
     /// Log an event and return its content-addressed `BytesN<32>` ID.
+    ///
+    /// When `force` is `false` (the default), identical events (same `event_type`,
+    /// `submitter`, and `metadata`) are deduplicated: the second call returns the
+    /// existing event's ID without storing a new event.
+    /// Set `force = true` to bypass deduplication and always store a new event.
     #[allow(deprecated)]
     pub fn log_event(
         env: Env,
@@ -419,6 +433,7 @@ impl AuditLedger {
         metadata: Bytes,
         category: Option<Symbol>,
         sub_event_type: Option<Symbol>,
+        force: bool,
     ) -> BytesN<32> {
         Self::require_initialized(&env);
         submitter.require_auth();
@@ -504,6 +519,25 @@ impl AuditLedger {
             type_count_opt = Some(count);
         }
 
+        // --- Content-addressed deduplication ---
+        // Compute hash(event_type || submitter || metadata) for dedup.
+        let content_hash =
+            Self::compute_content_hash(&env, &event_type, &submitter, &metadata);
+        if !force {
+            if let Some(existing_index) = env
+                .storage()
+                .instance()
+                .get::<_, u32>(&DataKey::EventContentHash(content_hash.clone()))
+            {
+                let existing_id: BytesN<32> = env
+                    .storage()
+                    .instance()
+                    .get(&DataKey::EventOrder(existing_index))
+                    .unwrap();
+                return existing_id;
+            }
+        }
+
         let index = cfg.total_events;
         let timestamp = env.ledger().timestamp();
 
@@ -580,6 +614,11 @@ impl AuditLedger {
         env.storage()
             .instance()
             .set(&DataKey::EventMetadata(event_id.clone()), &metadata);
+
+        // Record content hash → event index for deduplication.
+        env.storage()
+            .instance()
+            .set(&DataKey::EventContentHash(content_hash), &index);
 
         // Task 4: cache low_cost_mode to avoid double read.
         let low_cost = Self::effective_low_cost_mode(&env);
@@ -665,7 +704,7 @@ impl AuditLedger {
             panic_with_error!(&env, ContractError::NonceTooLow);
         }
 
-        let event_id = Self::log_event(env.clone(), submitter.clone(), event_type, metadata, None, None);
+        let event_id = Self::log_event(env.clone(), submitter.clone(), event_type, metadata, None, None, false);
 
         env.storage()
             .instance()
@@ -956,7 +995,7 @@ impl AuditLedger {
             panic_with_error!(&env, ContractError::InvalidPaginationParams);
         }
 
-        let total = Self::total_events(&env);
+        let total = Self::total_events(env.clone());
         if offset >= total {
             return Vec::new(&env);
         }
@@ -982,7 +1021,7 @@ impl AuditLedger {
             panic_with_error!(&env, ContractError::InvalidPaginationParams);
         }
 
-        let total = Self::event_count(&env, event_type.clone());
+        let total = Self::event_type_count(&env, event_type.clone());
         if offset >= total {
             return Vec::new(&env);
         }
@@ -1012,7 +1051,7 @@ impl AuditLedger {
             return Vec::new(&env);
         }
 
-        let total = Self::total_events(&env);
+        let total = Self::total_events(env.clone());
         let mut matches = Vec::new(&env);
         for i in 0..total {
             let evt = Self::get_event_by_order(env.clone(), i);
@@ -1042,7 +1081,7 @@ impl AuditLedger {
             panic_with_error!(&env, ContractError::InvalidPaginationParams);
         }
 
-        let total = Self::total_events(&env);
+        let total = Self::total_events(env.clone());
         let mut matches = Vec::new(&env);
         for i in 0..total {
             let evt = Self::get_event_by_order(env.clone(), i);
@@ -1073,7 +1112,7 @@ impl AuditLedger {
         caller.require_auth();
         Self::require_owner(&env, &caller);
 
-        let total = Self::total_events(&env);
+        let total = Self::total_events(env.clone());
         if index >= total {
             panic_with_error!(&env, ContractError::EventDoesNotExist);
         }
@@ -1689,7 +1728,7 @@ impl AuditLedger {
         if signature_payload.len() != 96 {
             panic_with_error!(&env, ContractError::InvalidSignature);
         }
-        let event_id = Self::log_event(env.clone(), submitter, event_type, metadata.clone(), category, sub_event_type);
+        let event_id = Self::log_event(env.clone(), submitter, event_type, metadata.clone(), category, sub_event_type, false);
         env.storage()
             .instance()
             .set(&DataKey::EventSignature(event_id.clone()), &signature_payload);
@@ -1703,6 +1742,37 @@ impl AuditLedger {
         env.storage()
             .instance()
             .get(&DataKey::EventSignature(event_id))
+    }
+
+    /// Look up an event by its content (event_type, submitter, metadata).
+    ///
+    /// Returns `Some(Event)` if an event with that exact content was previously
+    /// stored (and deduplication recorded its position), `None` otherwise.
+    pub fn find_event_by_content(
+        env: Env,
+        event_type: Symbol,
+        submitter: Address,
+        metadata: Bytes,
+    ) -> Option<Event> {
+        Self::require_initialized(&env);
+        let content_hash =
+            Self::compute_content_hash(&env, &event_type, &submitter, &metadata);
+        if let Some(index) = env
+            .storage()
+            .instance()
+            .get::<_, u32>(&DataKey::EventContentHash(content_hash))
+        {
+            let id: BytesN<32> = env
+                .storage()
+                .instance()
+                .get(&DataKey::EventOrder(index))
+                .unwrap();
+            env.storage()
+                .instance()
+                .get(&DataKey::EventData(id))
+        } else {
+            None
+        }
     }
 
     // ── Private helpers ─────────────────────────────────────────────────────
@@ -1924,7 +1994,7 @@ impl AuditLedger {
             return; // not enough approvals
         }
         // perform the action
-        match prop.action {
+        match prop.action.clone() {
             ProposalAction::TransferOwnership(new_owner) => {
                 env.storage().instance().set(&DataKey::Owner, &new_owner);
             }
@@ -2008,6 +2078,21 @@ impl AuditLedger {
         preimage.append(&prev_hash.clone().into());
         preimage.append(&Self::u32_to_bytes(env, index));
         preimage.append(&Self::u64_to_bytes(env, timestamp));
+        env.crypto().sha256(&preimage).into()
+    }
+
+    /// Compute a content hash for deduplication: sha256(event_type_payload_le || submitter_strkey || metadata).
+    /// This hash is independent of timestamp and index, making it stable across retries.
+    fn compute_content_hash(
+        env: &Env,
+        event_type: &Symbol,
+        submitter: &Address,
+        metadata: &Bytes,
+    ) -> BytesN<32> {
+        let mut preimage = Bytes::new(env);
+        preimage.append(&Self::u64_to_bytes(env, event_type.to_val().get_payload()));
+        preimage.append(&submitter.to_string().to_bytes());
+        preimage.append(metadata);
         env.crypto().sha256(&preimage).into()
     }
 
