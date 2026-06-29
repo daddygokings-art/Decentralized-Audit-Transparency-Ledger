@@ -122,6 +122,20 @@ function scValToU32(val) {
   return val.u32();
 }
 
+// ── Retry state (Issue 3) ───────────────────────────────────────────────────
+
+let consecutiveFailures = 0;
+const MAX_FAILURES_BEFORE_ERROR_GAUGE = 10;
+const BACKOFF_BASE_MS = 1000;
+const BACKOFF_MAX_MS = 60000;
+
+/**
+ * Sleep for `ms` milliseconds.
+ */
+function sleep(ms) {
+  return new Promise((resolve) => setTimeout(resolve, ms));
+}
+
 // ── Scrape loop ─────────────────────────────────────────────────────────────
 
 async function scrape() {
@@ -131,12 +145,8 @@ async function scrape() {
     const total = scValToU32(totalVal);
     totalEvents.set(total);
 
-    // global_max_logs – read from ledger storage directly or via a helper
-    // We approximate by fetching from contract storage key if not exposed via API.
-    // For now, track what we can derive.
+    // global_max_logs
     try {
-      // Try to call a hypothetical get_global_max (not in contract) –
-      // gracefully skip if unavailable.
       const maxVal = await callContract("get_global_max_logs");
       const max = scValToU32(maxVal);
       globalMaxLogs.set(max);
@@ -145,9 +155,7 @@ async function scrape() {
       // Contract doesn't expose this endpoint; skip global max metrics
     }
 
-    // events_by_type – requires knowing all types; scrape is best-effort
-    // In a production setup, maintain a list of known types in config or
-    // discover them from ledger state via get_ledger_entries.
+    // events_by_type
     const knownTypes = (process.env.EVENT_TYPES || "")
       .split(",")
       .map((t) => t.trim())
@@ -195,6 +203,22 @@ async function scrape() {
   } catch (err) {
     console.error("Scrape error:", err.message);
     errorCount.inc();
+
+    consecutiveFailures += 1;
+    if (consecutiveFailures >= MAX_FAILURES_BEFORE_ERROR_GAUGE) {
+      scrapeErrorGauge.set({ contract_id: CONTRACT_ID }, 1);
+      console.error(`${consecutiveFailures} consecutive failures; audit_ledger_scrape_error set to 1`);
+    }
+
+    // Issue 3: exponential backoff retry (1s, 2s, 4s… capped at 60s)
+    const backoffMs = Math.min(
+      BACKOFF_BASE_MS * Math.pow(2, consecutiveFailures - 1),
+      BACKOFF_MAX_MS
+    );
+    console.error(`Retrying in ${backoffMs}ms…`);
+    await sleep(backoffMs);
+    // Recurse once after backoff (single retry attempt per interval cycle)
+    return scrape();
   }
 }
 

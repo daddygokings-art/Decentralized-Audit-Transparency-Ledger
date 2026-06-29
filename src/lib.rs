@@ -8,6 +8,9 @@ use soroban_sdk::{
 /// Default maximum metadata size (1 KB). Used when no explicit cap is set.
 const DEFAULT_MAX_METADATA_SIZE: u32 = 1024;
 
+/// Maximum category Symbol length in bytes.
+const MAX_CATEGORY_LEN: u32 = 18;
+
 /// Maximum acceptable drift for ledger timestamps when logging new events.
 const MAX_TIMESTAMP_DRIFT_SECONDS: u64 = 3600;
 
@@ -696,6 +699,18 @@ impl AuditLedger {
         let event_hash = Self::compute_event_hash(&env, &event_id, &prev_hash, index, timestamp);
 
         let cat = category.unwrap_or(Symbol::new(&env, "general"));
+        // Reject categories exceeding max length to prevent storage cost attacks.
+        let max_cat_len: u32 = env
+            .storage()
+            .instance()
+            .get(&DataKey::CategoryMaxLen)
+            .unwrap_or(MAX_CATEGORY_LEN);
+        {
+            let cat_bytes = cat.to_string().to_bytes();
+            if cat_bytes.len() > max_cat_len {
+                panic_with_error!(&env, ContractError::CategoryTooLong);
+            }
+        }
         let evt = Event {
             index,
             timestamp,
@@ -1781,6 +1796,7 @@ impl AuditLedger {
         Self::require_initialized(&env);
         caller.require_auth();
         Self::require_owner_or_multisig(&env, &caller);
+        let already_paused = env.storage().instance().get::<_, bool>(&DataKey::Paused).unwrap_or(false);
         env.storage().instance().set(&DataKey::Paused, &true);
         env.events()
             .publish((Symbol::new(&env, "contract_paused"),), (caller,));
@@ -1792,8 +1808,33 @@ impl AuditLedger {
         caller.require_auth();
         Self::require_owner_or_multisig(&env, &caller);
         env.storage().instance().set(&DataKey::Paused, &false);
+        env.storage().instance().remove(&DataKey::PausedSince);
         env.events()
             .publish((Symbol::new(&env, "contract_unpaused"),), (caller,));
+    }
+
+    /// Returns true if the contract is currently paused.
+    pub fn is_paused(env: Env) -> bool {
+        env.storage()
+            .instance()
+            .get::<_, bool>(&DataKey::Paused)
+            .unwrap_or(false)
+    }
+
+    /// Returns the timestamp when the contract was paused, or 0 if not paused.
+    pub fn paused_since(env: Env) -> u64 {
+        env.storage()
+            .instance()
+            .get::<_, u64>(&DataKey::PausedSince)
+            .unwrap_or(0)
+    }
+
+    /// Set the maximum allowed category Symbol length in bytes (owner-only).
+    pub fn set_category_max_len(env: Env, caller: Address, max_len: u32) {
+        Self::require_initialized(&env);
+        caller.require_auth();
+        Self::require_owner_or_multisig(&env, &caller);
+        env.storage().instance().set(&DataKey::CategoryMaxLen, &max_len);
     }
 
     /// Block a submitter (owner-only). Issue #141: governance.
