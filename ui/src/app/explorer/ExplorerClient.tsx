@@ -289,7 +289,6 @@ export default function ExplorerClient() {
                 [
                   ["Index", String(selected.index)],
                   ["Type", selected.event_type],
-                  ["Submitter", selected.submitter],
                   ["Timestamp", new Date(selected.timestamp * 1000).toISOString()],
                   ["Metadata (hex)", selected.metadata],
                   ["Metadata (UTF-8)", tryDecodeMetadata(selected.metadata)],
@@ -306,6 +305,26 @@ export default function ExplorerClient() {
                   </dd>
                 </>
               ))}
+              <dt className="text-muted text-sm" style={{ alignSelf: "center" }}>Submitter</dt>
+              <dd className="mono" style={{ wordBreak: "break-all", display: "flex", alignItems: "center" }}>
+                {selected.submitter}
+                <CopyButton value={selected.submitter} />
+              </dd>
+              {selected.tx_hash && (
+                <>
+                  <dt className="text-muted text-sm" style={{ alignSelf: "center" }}>Stellar Tx</dt>
+                  <dd>
+                    <a
+                      href={`https://stellar.expert/explorer/testnet/tx/${selected.tx_hash}`}
+                      target="_blank"
+                      rel="noopener noreferrer"
+                      style={{ wordBreak: "break-all" }}
+                    >
+                      {selected.tx_hash}
+                    </a>
+                  </dd>
+                </>
+              )}
             </dl>
           </div>
         </div>

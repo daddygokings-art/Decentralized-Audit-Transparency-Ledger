@@ -292,13 +292,17 @@ pub struct AuditLedger;
 
 #[contractimpl]
 impl AuditLedger {
-    pub fn initialize(env: Env, owner: Address, global_max_logs: u32) {
-        owner.require_auth();
+    pub fn initialize(env: Env, owners: Vec<Address>, global_max_logs: u32) {
         if env.storage().instance().has(&DataKey::Owner) {
             panic_with_error!(&env, ContractError::SameOwner);
         }
-        // Support both single-owner (legacy) and multi-owner setups.
-        env.storage().instance().set(&DataKey::Owner, &owner);
+        if owners.is_empty() {
+            panic_with_error!(&env, ContractError::NewOwnerIsZero);
+        }
+        let primary = owners.get(0).unwrap();
+        primary.require_auth();
+        env.storage().instance().set(&DataKey::Owner, &primary);
+        env.storage().instance().set(&DataKey::Owners, &owners);
         env.storage().instance().set(
             &DataKey::Config,
             &Config {
@@ -310,7 +314,6 @@ impl AuditLedger {
             .instance()
             .set(&DataKey::GlobalMaxLogs, &global_max_logs);
         env.storage().instance().set(&DataKey::TotalEvents, &0u32);
-        // start unpaused
         env.storage().instance().set(&DataKey::Paused, &false);
         
         // Set version to 1 (marks contract as initialized, immutable)
@@ -1412,7 +1415,7 @@ impl AuditLedger {
 
     pub fn update_event(env: Env, caller: Address, index: u32, new_metadata: Bytes) -> BytesN<32> {
         caller.require_auth();
-        Self::require_owner(&env, &caller);
+        Self::require_owner_or_multisig(&env, &caller);
 
         let total = Self::total_events(env.clone());
         if index >= total {
@@ -1633,7 +1636,7 @@ impl AuditLedger {
         if let Some(true) = env.storage().instance().get::<_, bool>(&DataKey::Paused) {
             panic_with_error!(&env, ContractError::ContractPaused);
         }
-        Self::require_owner(&env, &caller);
+        Self::require_owner_or_multisig(&env, &caller);
         let total_events = Self::total_events(env.clone());
         if new_max < total_events {
             panic_with_error!(&env, ContractError::MaxLogsBelowCurrentCount);
@@ -1691,7 +1694,7 @@ impl AuditLedger {
         if let Some(true) = env.storage().instance().get::<_, bool>(&DataKey::Paused) {
             panic_with_error!(&env, ContractError::ContractPaused);
         }
-        Self::require_owner(&env, &caller);
+        Self::require_owner_or_multisig(&env, &caller);
         if !env
             .storage()
             .instance()
@@ -1734,7 +1737,7 @@ impl AuditLedger {
         if let Some(true) = env.storage().instance().get::<_, bool>(&DataKey::Paused) {
             panic_with_error!(&env, ContractError::ContractPaused);
         }
-        Self::require_owner(&env, &caller);
+        Self::require_owner_or_multisig(&env, &caller);
         let current_owner: Address = env.storage().instance().get(&DataKey::Owner).unwrap();
         if new_owner == Address::from_str(&env, NULL_ACCOUNT) {
             panic_with_error!(&env, ContractError::NewOwnerIsZero);
@@ -2029,7 +2032,7 @@ impl AuditLedger {
     pub fn compact_storage(env: Env, caller: Address, stale_types: Vec<Symbol>) -> u32 {
         Self::require_initialized(&env);
         caller.require_auth();
-        Self::require_owner(&env, &caller);
+        Self::require_owner_or_multisig(&env, &caller);
 
         let mut removed: u32 = 0;
         for i in 0..stale_types.len() {

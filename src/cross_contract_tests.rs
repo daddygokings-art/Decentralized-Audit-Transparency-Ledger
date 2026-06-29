@@ -1,6 +1,6 @@
 use super::*;
 use soroban_sdk::testutils::Address as _;
-use soroban_sdk::{contract, contractimpl, symbol_short, Address, Bytes, Env, Symbol};
+use soroban_sdk::{contract, contractimpl, symbol_short, Address, Bytes, Env, Symbol, Vec};
 
 // ── Mock Caller Contract for Cross-Contract Tests ─────────────────────────────────
 
@@ -63,7 +63,9 @@ fn create_ledger() -> (Env, Address, AuditLedgerClient<'static>) {
     let client = AuditLedgerClient::new(&env, &contract_id);
 
     env.mock_all_auths();
-    client.initialize(&owner, &100);
+    let mut owners = Vec::new(&env);
+    owners.push_back(owner.clone());
+    client.initialize(&owners, &100);
     (env, owner, client)
 }
 
@@ -83,7 +85,9 @@ fn cross_contract_log_event_with_correct_submitter() {
     let caller_client = CallerContractClient::new(&env, &caller_contract_id);
 
     env.mock_all_auths();
-    audit_client.initialize(&owner, &100);
+    let mut owners = Vec::new(&env);
+    owners.push_back(owner.clone());
+    audit_client.initialize(&owners, &100);
 
     // Caller contract logs on behalf of user
     // The user must authorize
@@ -117,7 +121,9 @@ fn cross_contract_multiple_logs_different_users() {
     let caller_client = CallerContractClient::new(&env, &caller_contract_id);
 
     env.mock_all_auths();
-    audit_client.initialize(&owner, &100);
+    let mut owners = Vec::new(&env);
+    owners.push_back(owner.clone());
+    audit_client.initialize(&owners, &100);
 
     // Log for user1
     caller_client.log_on_behalf(
@@ -159,7 +165,9 @@ fn cross_contract_governance_requires_owner() {
     let caller_client = CallerContractClient::new(&env, &caller_contract_id);
 
     env.mock_all_auths();
-    audit_client.initialize(&owner, &100);
+    let mut owners = Vec::new(&env);
+    owners.push_back(owner.clone());
+    audit_client.initialize(&owners, &100);
 
     // Try to call governance from caller contract with non-owner
     let result = caller_client.try_try_governance_call(&audit_ledger_id, &attacker);
@@ -180,7 +188,9 @@ fn cross_contract_governance_with_owner_succeeds() {
     let caller_client = CallerContractClient::new(&env, &caller_contract_id);
 
     env.mock_all_auths();
-    audit_client.initialize(&owner, &100);
+    let mut owners = Vec::new(&env);
+    owners.push_back(owner.clone());
+    audit_client.initialize(&owners, &100);
 
     // Call governance from caller contract with owner
     caller_client.try_governance_call(&audit_ledger_id, &owner);
@@ -199,7 +209,9 @@ fn cross_contract_transfer_ownership_across_contracts() {
     let audit_client = AuditLedgerClient::new(&env, &audit_ledger_id);
 
     env.mock_all_auths();
-    audit_client.initialize(&owner, &100);
+    let mut owners = Vec::new(&env);
+    owners.push_back(owner.clone());
+    audit_client.initialize(&owners, &100);
 
     // Transfer ownership
     audit_client.transfer_ownership(&owner, &new_owner);
@@ -223,7 +235,9 @@ fn cross_contract_global_max_logs_error_propagates() {
     let caller_client = CallerContractClient::new(&env, &caller_contract_id);
 
     env.mock_all_auths();
-    audit_client.initialize(&owner, &1); // Max 1 event
+    let mut owners = Vec::new(&env);
+    owners.push_back(owner.clone());
+    audit_client.initialize(&owners, &1); // Max 1 event
 
     // Log one event to reach capacity
     audit_client.log_event(
@@ -252,7 +266,9 @@ fn cross_contract_event_type_max_logs_error_propagates() {
     let caller_client = CallerContractClient::new(&env, &caller_contract_id);
 
     env.mock_all_auths();
-    audit_client.initialize(&owner, &100);
+    let mut owners = Vec::new(&env);
+    owners.push_back(owner.clone());
+    audit_client.initialize(&owners, &100);
     audit_client.set_event_max_logs(&owner, &symbol_short!("payment"), &1);
 
     // Log one event of type payment
@@ -287,7 +303,9 @@ fn cross_contract_metadata_too_large_error_propagates() {
     let caller_client = CallerContractClient::new(&env, &caller_contract_id);
 
     env.mock_all_auths();
-    audit_client.initialize(&owner, &100);
+    let mut owners = Vec::new(&env);
+    owners.push_back(owner.clone());
+    audit_client.initialize(&owners, &100);
     audit_client.set_metadata_max_size(&owner, &10);
 
     // Try to log event with oversized metadata via caller contract
@@ -315,7 +333,9 @@ fn cross_contract_contract_paused_error_propagates() {
     let caller_client = CallerContractClient::new(&env, &caller_contract_id);
 
     env.mock_all_auths();
-    audit_client.initialize(&owner, &100);
+    let mut owners = Vec::new(&env);
+    owners.push_back(owner.clone());
+    audit_client.initialize(&owners, &100);
     audit_client.pause(&owner);
 
     // Try to log event while paused via caller contract
@@ -345,7 +365,9 @@ fn cross_contract_sequential_calls_work() {
     let caller_client = CallerContractClient::new(&env, &caller_contract_id);
 
     env.mock_all_auths();
-    audit_client.initialize(&owner, &100);
+    let mut owners = Vec::new(&env);
+    owners.push_back(owner.clone());
+    audit_client.initialize(&owners, &100);
 
     // Make sequential calls (not true reentrancy, but multiple calls)
     caller_client.attempt_reentrancy(
@@ -372,7 +394,9 @@ fn cross_contract_caller_cannot_impersonate_user() {
     let caller_client = CallerContractClient::new(&env, &caller_contract_id);
 
     env.mock_all_auths();
-    audit_client.initialize(&owner, &100);
+    let mut owners = Vec::new(&env);
+    owners.push_back(owner.clone());
+    audit_client.initialize(&owners, &100);
 
     // Try to log without user authorization
     // This should fail because the user hasn't authorized
@@ -400,7 +424,9 @@ fn cross_contract_event_integrity_preserved() {
     let caller_client = CallerContractClient::new(&env, &caller_contract_id);
 
     env.mock_all_auths();
-    audit_client.initialize(&owner, &100);
+    let mut owners = Vec::new(&env);
+    owners.push_back(owner.clone());
+    audit_client.initialize(&owners, &100);
 
     // Log event via caller contract
     caller_client.log_on_behalf(
@@ -429,7 +455,9 @@ fn cross_contract_multiple_caller_contracts() {
     let caller2_client = CallerContractClient::new(&env, &caller2_id);
 
     env.mock_all_auths();
-    audit_client.initialize(&owner, &100);
+    let mut owners = Vec::new(&env);
+    owners.push_back(owner.clone());
+    audit_client.initialize(&owners, &100);
 
     // Log via caller1
     caller1_client.log_on_behalf(
