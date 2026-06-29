@@ -8,13 +8,13 @@ const PAGE_SIZE = 20;
 type SortKey = keyof Pick<AuditEvent, "index" | "timestamp" | "event_type" | "submitter">;
 
 function exportAs(events: AuditEvent[], format: "csv" | "json") {
+  const timestamp = Date.now();
   let content: string;
   let mime: string;
-  let filename: string;
+  const filename = `audit-ledger-export-${timestamp}.${format}`;
   if (format === "json") {
     content = JSON.stringify(events, null, 2);
     mime = "application/json";
-    filename = "events.json";
   } else {
     const header = "index,timestamp,event_type,submitter,metadata,event_hash\n";
     const rows = events
@@ -25,7 +25,6 @@ function exportAs(events: AuditEvent[], format: "csv" | "json") {
       .join("\n");
     content = header + rows;
     mime = "text/csv";
-    filename = "events.csv";
   }
   const blob = new Blob([content], { type: mime });
   const url = URL.createObjectURL(blob);
@@ -44,6 +43,28 @@ function tryDecodeMetadata(hex: string): string {
   }
 }
 
+function applyFilters(
+  events: AuditEvent[],
+  typeFilter: string,
+  submitterFilter: string,
+  dateFrom: string,
+  dateTo: string
+): AuditEvent[] {
+  return events.filter((e) => {
+    if (typeFilter && !e.event_type.toLowerCase().includes(typeFilter.toLowerCase())) return false;
+    if (submitterFilter && !e.submitter.toLowerCase().includes(submitterFilter.toLowerCase())) return false;
+    if (dateFrom) {
+      const fromTs = Math.floor(new Date(dateFrom).getTime() / 1000);
+      if (e.timestamp < fromTs) return false;
+    }
+    if (dateTo) {
+      const toTs = Math.floor(new Date(dateTo).getTime() / 1000);
+      if (e.timestamp > toTs) return false;
+    }
+    return true;
+  });
+}
+
 export default function ExplorerClient() {
   const [events, setEvents] = useState<AuditEvent[]>([]);
   const [total, setTotal] = useState(0);
@@ -53,6 +74,12 @@ export default function ExplorerClient() {
   const [selected, setSelected] = useState<AuditEvent | null>(null);
   const [loading, setLoading] = useState(true);
   const [error, setError] = useState<string | null>(null);
+
+  // Filters
+  const [typeFilter, setTypeFilter] = useState("");
+  const [submitterFilter, setSubmitterFilter] = useState("");
+  const [dateFrom, setDateFrom] = useState("");
+  const [dateTo, setDateTo] = useState("");
 
   const load = useCallback(async () => {
     setLoading(true);
@@ -70,7 +97,9 @@ export default function ExplorerClient() {
 
   useEffect(() => { load(); }, [load]);
 
-  const sorted = [...events].sort((a, b) => {
+  const filtered = applyFilters(events, typeFilter, submitterFilter, dateFrom, dateTo);
+
+  const sorted = [...filtered].sort((a, b) => {
     const av = a[sortKey];
     const bv = b[sortKey];
     const cmp = av < bv ? -1 : av > bv ? 1 : 0;
@@ -89,6 +118,8 @@ export default function ExplorerClient() {
     return <span>{sortAsc ? " ↑" : " ↓"}</span>;
   }
 
+  const hasFilters = typeFilter || submitterFilter || dateFrom || dateTo;
+
   if (error)
     return (
       <p style={{ color: "var(--error)" }}>Error loading events: {error}</p>
@@ -96,16 +127,59 @@ export default function ExplorerClient() {
 
   return (
     <div>
+      {/* Filters */}
+      <div className="card mb-4" style={{ padding: 16 }}>
+        <div style={{ display: "grid", gridTemplateColumns: "repeat(auto-fit, minmax(180px, 1fr))", gap: 12 }}>
+          <input
+            type="text"
+            placeholder="Filter by type…"
+            value={typeFilter}
+            onChange={(e) => setTypeFilter(e.target.value)}
+            style={{ padding: "6px 10px", borderRadius: 6, border: "1px solid var(--border)" }}
+          />
+          <input
+            type="text"
+            placeholder="Filter by submitter…"
+            value={submitterFilter}
+            onChange={(e) => setSubmitterFilter(e.target.value)}
+            style={{ padding: "6px 10px", borderRadius: 6, border: "1px solid var(--border)" }}
+          />
+          <input
+            type="datetime-local"
+            title="From date"
+            value={dateFrom}
+            onChange={(e) => setDateFrom(e.target.value)}
+            style={{ padding: "6px 10px", borderRadius: 6, border: "1px solid var(--border)" }}
+          />
+          <input
+            type="datetime-local"
+            title="To date"
+            value={dateTo}
+            onChange={(e) => setDateTo(e.target.value)}
+            style={{ padding: "6px 10px", borderRadius: 6, border: "1px solid var(--border)" }}
+          />
+        </div>
+        {hasFilters && (
+          <button
+            className="secondary"
+            style={{ marginTop: 8 }}
+            onClick={() => { setTypeFilter(""); setSubmitterFilter(""); setDateFrom(""); setDateTo(""); }}
+          >
+            Clear filters
+          </button>
+        )}
+      </div>
+
       {/* Toolbar */}
       <div className="flex-between mb-4">
         <p className="text-muted">
-          {total} total events · Page {page + 1} of {Math.max(totalPages, 1)}
+          {hasFilters ? `${sorted.length} matching` : `${total} total`} events · Page {page + 1} of {Math.max(totalPages, 1)}
         </p>
         <div className="flex gap-2">
-          <button className="secondary" onClick={() => exportAs(events, "csv")}>
+          <button className="secondary" onClick={() => exportAs(sorted, "csv")}>
             Export CSV
           </button>
-          <button className="secondary" onClick={() => exportAs(events, "json")}>
+          <button className="secondary" onClick={() => exportAs(sorted, "json")}>
             Export JSON
           </button>
         </div>

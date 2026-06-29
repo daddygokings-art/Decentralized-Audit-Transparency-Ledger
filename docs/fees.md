@@ -96,3 +96,29 @@ The `--simulate-only` flag returns the simulated fee without submitting. Typical
 - **`strip = "symbols"`** removes debug info, saving ~20–30% on binary size.
 - **Low-cost mode** (`LowCostMode` DataKey) is available for high-frequency logging scenarios where hash chain verification is not needed.
 - **Hash chain computation** (SHA-256 over event fields + prev_hash) is the dominant CPU cost in `log_event`. If cost is a concern, consider low-cost mode which skips per-event hashing.
+
+---
+
+## TTL Storage (#121)
+
+By default all contract data is stored in **instance storage**, which has no expiry and grows indefinitely with the contract's `extend_instance_ttl` calls.
+
+The `set_event_ttl(ttl_ledgers)` governance function enables an optional **persistent storage** path for each logged event:
+
+| Mode | Storage type | Expiry | Cost model |
+|------|-------------|--------|-----------|
+| `ttl_ledgers == 0` (default) | Instance storage | No expiry | Rent bundled with contract instance; one ledger entry for all data |
+| `ttl_ledgers > 0` | Instance + Persistent | Expires after N ledgers | One additional ledger entry per event; cheaper long-term but adds per-event rent |
+
+### Cost tradeoffs
+
+**Persistent storage advantages:**
+- Events older than `ttl_ledgers` become eligible for automatic expiry by the network, reducing the rent you must pay to keep the contract live.
+- Compliance-driven retention: set TTL to the minimum required by your audit policy (e.g., 7 years ≈ 42,048,000 ledgers at 5-second ledger times) to avoid paying for older records.
+
+**Persistent storage disadvantages:**
+- Each `log_event` call writes an additional persistent ledger entry (~200 bytes), incurring an extra rent fee of roughly **0.00001–0.0001 XLM per event per year** depending on network prices.
+- High-frequency logging (e.g., 1,000 events/day) accumulates a meaningful rent liability over time. Evaluate whether the storage savings outweigh the per-event write overhead.
+- On-chain reads may need to check both instance and persistent storage if mixing modes over time.
+
+**Recommendation:** Enable TTL (`set_event_ttl`) only when your regulatory or cost requirements make event expiry desirable. For short-lived audit trails (< 6 months), TTL = 2,592,000 ledgers (~150 days) is a reasonable starting point.
