@@ -20,7 +20,7 @@ impl CallerContract {
         // The caller contract invokes log_event with the user as submitter
         // The user must authorize this call
         let client = AuditLedgerClient::new(&env, &audit_ledger);
-        client.log_event(&user, &event_type, &metadata);, &None, &None, &false
+        client.log_event(&user, &event_type, &metadata);
     }
 
     /// Calls AuditLedger's governance functions
@@ -34,7 +34,7 @@ impl CallerContract {
     pub fn trigger_global_max_error(env: Env, audit_ledger: Address, submitter: Address) {
         let client = AuditLedgerClient::new(&env, &audit_ledger);
         // Try to log when at capacity
-        client.log_event(&submitter, &symbol_short!("test"), &Bytes::new(&env));, &None, &None, &false
+        client.log_event(&submitter, &symbol_short!("test"), &Bytes::new(&env));
     }
 
     /// Attempts reentrancy by calling back into AuditLedger
@@ -47,12 +47,12 @@ impl CallerContract {
     ) {
         let client = AuditLedgerClient::new(&env, &audit_ledger);
         // First call
-        client.log_event(&submitter, &event_type, &metadata);, &None, &None, &false
+        client.log_event(&submitter, &event_type, &metadata);
 
         // Attempt second call (reentrancy)
         // In a real scenario, this would be called from within a callback
         // For testing, we just make a second call
-        client.log_event(&submitter, &event_type, &metadata);, &None, &None, &false
+        client.log_event(&submitter, &event_type, &metadata);
     }
 }
 
@@ -243,7 +243,7 @@ fn cross_contract_global_max_logs_error_propagates() {
     audit_client.log_event(
         &submitter,
         &symbol_short!("test"),
-        &Bytes::from_slice(&env, b"first"), &None, &None, &false
+        &Bytes::from_slice(&env, b"first"),
     );
 
     // Try to log another event via caller contract
@@ -275,7 +275,7 @@ fn cross_contract_event_type_max_logs_error_propagates() {
     audit_client.log_event(
         &submitter,
         &symbol_short!("payment"),
-        &Bytes::from_slice(&env, b"first"), &None, &None, &false
+        &Bytes::from_slice(&env, b"first"),
     );
 
     // Try to log another payment event via caller contract
