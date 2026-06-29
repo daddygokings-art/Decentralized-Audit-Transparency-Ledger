@@ -70,6 +70,20 @@ const avgGasCost = new client.Gauge({
   registers: [registry],
 });
 
+const pausedGauge = new client.Gauge({
+  name: "audit_ledger_paused",
+  help: "1 if the AuditLedger contract is paused, 0 if active",
+  labelNames: ["contract_id"],
+  registers: [registry],
+});
+
+const pausedSinceGauge = new client.Gauge({
+  name: "audit_ledger_paused_since",
+  help: "Unix timestamp when the contract was paused (0 if not paused)",
+  labelNames: ["contract_id"],
+  registers: [registry],
+});
+
 // ── Soroban RPC helpers ─────────────────────────────────────────────────────
 
 const networkPassphrase =
@@ -154,6 +168,22 @@ async function scrape() {
       } catch {
         // type not yet logged; ignore
       }
+    }
+
+    // Paused status
+    try {
+      const pausedVal = await callContract("is_paused");
+      const isPaused = pausedVal && pausedVal.b?.() === true;
+      pausedGauge.set({ contract_id: CONTRACT_ID }, isPaused ? 1 : 0);
+      if (isPaused) {
+        const sinceVal = await callContract("paused_since").catch(() => null);
+        pausedSinceGauge.set({ contract_id: CONTRACT_ID }, sinceVal ? Number(sinceVal.u64()) : 0);
+      } else {
+        pausedSinceGauge.set({ contract_id: CONTRACT_ID }, 0);
+      }
+    } catch {
+      pausedGauge.set({ contract_id: CONTRACT_ID }, 0);
+      pausedSinceGauge.set({ contract_id: CONTRACT_ID }, 0);
     }
   } catch (err) {
     console.error("Scrape error:", err.message);

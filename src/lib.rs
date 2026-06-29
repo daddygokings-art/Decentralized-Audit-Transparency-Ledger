@@ -121,6 +121,14 @@ pub enum DataKey {
     RequiredSignatures,
     ProposalCount,
     Proposal(u32),
+    /// Timestamp (u64) at which the contract was paused; absent when not paused.
+    PausedSince,
+    /// Blocklist flag per submitter (issue #141).
+    SubmitterBlocklist(Address),
+    /// Allowlist flag per submitter (issue #141).
+    SubmitterAllowlist(Address),
+    /// When true, only allowlisted submitters may log events (issue #141).
+    AllowlistMode,
 }
 
 #[contracterror]
@@ -149,6 +157,7 @@ pub enum ContractError {
     NoEventsForType = 20,
     InvalidPaginationParams = 21,
     InvalidWasmHash = 22,
+    SubmitterBlocked = 23,
 }
 
 #[contracttype]
@@ -1427,7 +1436,11 @@ impl AuditLedger {
         Self::require_initialized(&env);
         caller.require_auth();
         Self::require_owner_or_multisig(&env, &caller);
+        let already_paused = env.storage().instance().get::<_, bool>(&DataKey::Paused).unwrap_or(false);
         env.storage().instance().set(&DataKey::Paused, &true);
+        if !already_paused {
+            env.storage().instance().set(&DataKey::PausedSince, &env.ledger().timestamp());
+        }
         env.events().publish((Symbol::new(&env, "contract_paused"),), (caller,));
     }
 
@@ -1437,8 +1450,19 @@ impl AuditLedger {
         caller.require_auth();
         Self::require_owner_or_multisig(&env, &caller);
         env.storage().instance().set(&DataKey::Paused, &false);
+        env.storage().instance().remove(&DataKey::PausedSince);
         env.events()
             .publish((Symbol::new(&env, "contract_unpaused"),), (caller,));
+    }
+
+    /// Returns true if the contract is currently paused.
+    pub fn is_paused(env: Env) -> bool {
+        env.storage().instance().get::<_, bool>(&DataKey::Paused).unwrap_or(false)
+    }
+
+    /// Returns the ledger timestamp when the contract was paused, or 0 if not paused.
+    pub fn paused_since(env: Env) -> u64 {
+        env.storage().instance().get::<_, u64>(&DataKey::PausedSince).unwrap_or(0)
     }
 
     /// Block a submitter (owner-only). Issue #141: governance.
