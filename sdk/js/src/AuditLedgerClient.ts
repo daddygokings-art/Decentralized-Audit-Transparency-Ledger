@@ -1,6 +1,11 @@
-import { Event, AuditLedgerError } from './types';
+import { ContractStatistics, Event, AuditLedgerError } from './types';
 
 export type Transport = (method: string, params: any[]) => Promise<any>;
+
+export interface RetryOptions {
+  maxRetries?: number;
+  baseDelayMs?: number;
+}
 
 export interface BatchProgress {
   completed: number;
@@ -10,62 +15,105 @@ export interface BatchProgress {
 export class AuditLedgerClient {
   transport: Transport;
   contractId?: string;
+  maxRetries: number;
+  baseDelayMs: number;
 
-  constructor(transport: Transport, contractId?: string) {
+  constructor(transport: Transport, contractId?: string, retryOptions: RetryOptions = {}) {
     this.transport = transport;
     this.contractId = contractId;
+    this.maxRetries = retryOptions.maxRetries ?? 3;
+    this.baseDelayMs = retryOptions.baseDelayMs ?? 500;
   }
 
-  static fromRpc(rpcUrl: string, contractId?: string) {
+  static fromRpc(rpcUrl: string, contractId?: string, retryOptions: RetryOptions = {}) {
     const transport: Transport = async (method, params) => {
-      const res = await fetch(rpcUrl, {
-        method: 'POST',
-        headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({ method, params }),
-      });
-      if (!res.ok) throw new AuditLedgerError('Transport error');
-      const json = await res.json();
-      if (json.error) throw new AuditLedgerError(json.error.message, json.error.code);
-      return json.result;
+      try {
+        const res = await fetch(rpcUrl, {
+          method: 'POST',
+          headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify({ method, params }),
+        });
+        if (!res.ok) throw new AuditLedgerError('Transport error', undefined, res.status);
+        const json = await res.json();
+        if (json.error) throw new AuditLedgerError(json.error.message, json.error.code, res.status);
+        return json.result;
+      } catch (err) {
+        if (err instanceof AuditLedgerError) throw err;
+        throw err;
+      }
     };
-    return new AuditLedgerClient(transport, contractId);
+    return new AuditLedgerClient(transport, contractId, retryOptions);
+  }
+
+  private async sleep(ms: number) {
+    await new Promise((resolve) => setTimeout(resolve, ms));
+  }
+
+  private isRetryableError(err: unknown) {
+    if (err instanceof AuditLedgerError) {
+      return err.status === 429 || err.status === 503;
+    }
+    if (err instanceof TypeError) return true;
+    if (typeof err === 'object' && err !== null) {
+      const error = err as { name?: string; code?: string; status?: number };
+      if (error.status === 429 || error.status === 503) return true;
+      if (error.name === 'FetchError' || error.name === 'NetworkError') return true;
+      if (error.code && ['ECONNRESET', 'ETIMEDOUT', 'EAI_AGAIN', 'ENOTFOUND'].includes(error.code)) return true;
+    }
+    return false;
+  }
+
+  private async callTransport<T>(method: string, params: any[]): Promise<T> {
+    let attempt = 0;
+    for (;;) {
+      try {
+        return await this.transport(method, params);
+      } catch (err) {
+        if (attempt >= this.maxRetries || !this.isRetryableError(err)) {
+          throw err;
+        }
+        const delay = this.baseDelayMs * (2 ** attempt);
+        attempt += 1;
+        await this.sleep(delay);
+      }
+    }
   }
 
   async initialize(owner: string, globalMaxLogs: number) {
-    return this.transport('initialize', [owner, globalMaxLogs]);
+    return this.callTransport('initialize', [owner, globalMaxLogs]);
   }
 
   async logEvent(submitter: string, eventType: string, metadata: string) : Promise<string> {
-    return this.transport('log_event', [submitter, eventType, metadata]);
+    return this.callTransport('log_event', [submitter, eventType, metadata]);
   }
 
   async logEvents(events: { submitter: string; type: string; metadata: string }[]): Promise<number[]> {
-    return this.transport('log_events', [events]);
+    return this.callTransport('log_events', [events]);
   }
 
   async getEvent(id: string): Promise<Event> {
-    return this.transport('get_event', [id]);
+    return this.callTransport('get_event', [id]);
   }
 
   async totalEvents(): Promise<number> {
-    return this.transport('total_events', []);
+    return this.callTransport('total_events', []);
   }
 
   async eventCount(type: string): Promise<number> {
-    return this.transport('event_count', [type]);
+    return this.callTransport('event_count', [type]);
   }
 
   async getEventByType(type: string, index: number): Promise<Event> {
-    return this.transport('get_event_by_type', [type, index]);
+    return this.callTransport('get_event_by_type', [type, index]);
   }
 
   async getStatistics(): Promise<ContractStatistics> {
-    return this.transport('get_statistics', []);
+    return this.callTransport('get_statistics', []);
   }
 
   // Governance helpers (examples)
   async setGlobalMaxLogs(caller: string, newMax: number) {
-    return this.transport('set_global_max_logs', [caller, newMax]);
+    return this.callTransport('set_global_max_logs', [caller, newMax]);
   }
 
   // Event watching via WebSocket
