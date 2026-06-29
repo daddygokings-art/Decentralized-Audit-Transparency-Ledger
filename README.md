@@ -60,7 +60,15 @@ fn set_global_max_logs(env: Env, caller: Address, new_max: u32);
 fn set_event_max_logs(env: Env, caller: Address, event_type: Symbol, new_max: u32);
 fn remove_event_cap(env: Env, caller: Address, event_type: Symbol);
 fn transfer_ownership(env: Env, caller: Address, new_owner: Address);
+fn set_event_ttl(env: Env, caller: Address, ttl_ledgers: u32);
+fn get_event_ttl(env: Env) -> u32;
 ```
+
+All governance functions publish a typed Soroban event with topic `("governance", "<function_name>")` and payload `(caller, old_value, new_value)` so off-chain monitors can track admin activity without polling state.
+
+#### TTL Storage
+
+`set_event_ttl(ttl_ledgers)` enables optional persistent storage for events. When `ttl_ledgers > 0`, each `log_event` call additionally writes the event to `env.storage().persistent()` and extends its TTL to `ttl_ledgers` ledgers, making events eligible for network expiry after that point. See [`docs/fees.md#ttl-storage`](docs/fees.md#ttl-storage) for cost tradeoffs.
 
 ## Quick Start
 
@@ -211,6 +219,14 @@ Every push and pull request triggers a GitHub Actions workflow that:
 3. Lints with `cargo clippy`
 4. Builds with `cargo build`
 5. Runs the full test suite with `cargo test`
+6. Scans Rust dependencies for known vulnerabilities with `cargo audit --deny warnings` (checks [RustSec Advisory Database](https://rustsec.org/))
+
+## Security
+
+This project follows security best practices:
+- **Dependency Vulnerability Scanning**: All transitive and direct dependencies are scanned via the [RustSec Advisory Database](https://rustsec.org/) on every CI run.
+- **Boundary Validation**: Contract logic validates all edge cases and boundary conditions.
+- **Immutable Audit Trail**: Events are cryptographically chained to prevent tampering.
 
 ## License
 
