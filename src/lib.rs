@@ -120,6 +120,8 @@ pub enum DataKey {
     EventMetadataMaxSize(Symbol),
     /// Global metadata size cap (issue #67). Absent = DEFAULT_MAX_METADATA_SIZE.
     GlobalMetadataMaxSize,
+    /// Cached full runtime state for fast reads.
+    RuntimeState,
     /// Signature stored for an event (issue #69): (pubkey, signature).
     EventSignature(BytesN<32>),
     /// Cached event count per type (issue #52). Updated alongside EventTypeIndices.
@@ -336,7 +338,12 @@ pub struct AuditLedger;
 
 #[contractimpl]
 impl AuditLedger {
-    pub fn initialize(env: Env, owners: Vec<Address>, global_max_logs: u32) {
+    pub fn initialize(
+        env: Env,
+        owners: Vec<Address>,
+        global_max_logs: u32,
+        max_metadata_bytes: u32,
+    ) {
         if env.storage().instance().has(&DataKey::Owner) {
             panic_with_error!(&env, ContractError::SameOwner);
         }
@@ -357,6 +364,23 @@ impl AuditLedger {
         env.storage()
             .instance()
             .set(&DataKey::GlobalMaxLogs, &global_max_logs);
+        env.storage()
+            .instance()
+            .set(&DataKey::GlobalMetadataMaxSize, &max_metadata_bytes);
+        env.storage()
+            .instance()
+            .set(
+                &DataKey::RuntimeState,
+                &RuntimeState {
+                    global_max_logs,
+                    total_events: 0,
+                    paused: false,
+                    allowlist_mode: false,
+                    low_cost_mode: false,
+                    emission_mode: 1,
+                    global_metadata_max_size: max_metadata_bytes,
+                },
+            );
         env.storage().instance().set(&DataKey::TotalEvents, &0u32);
         env.storage().instance().set(&DataKey::Paused, &false);
         
@@ -647,6 +671,23 @@ impl AuditLedger {
             }
         }
 
+        let rs: RuntimeState = env
+            .storage()
+            .instance()
+            .get(&DataKey::RuntimeState)
+            .unwrap_or_else(|| {
+                let cfg: Config = env.storage().instance().get(&DataKey::Config).unwrap();
+                RuntimeState {
+                    global_max_logs: cfg.global_max_logs,
+                    total_events: cfg.total_events,
+                    paused: env.storage().instance().get::<_, bool>(&DataKey::Paused).unwrap_or(false),
+                    allowlist_mode: env.storage().instance().get::<_, bool>(&DataKey::AllowlistMode).unwrap_or(false),
+                    low_cost_mode: env.storage().instance().get::<_, bool>(&DataKey::LowCostMode).unwrap_or(false),
+                    emission_mode: env.storage().instance().get::<_, u32>(&DataKey::EventEmissionConfig).unwrap_or(1),
+                    global_metadata_max_size: env.storage().instance().get::<_, u32>(&DataKey::GlobalMetadataMaxSize).unwrap_or(0),
+                }
+            });
+
         // --- issue #62: enforce per-submitter rate limit (per-submitter key, optional) ---
         if let Some(limit) = env
             .storage()
@@ -700,18 +741,8 @@ impl AuditLedger {
             total_events: rs.total_events,
         });
 
-        // --- issue #67: enforce metadata size cap (from RuntimeState, no extra read) ---
-        let max_meta = if let Some(v) = env
-            .storage()
-            .instance()
-            .get::<_, u32>(&DataKey::EventMetadataMaxSize(event_type.clone()))
-        {
-            v
-        } else if rs.global_metadata_max_size > 0 {
-            rs.global_metadata_max_size
-        } else {
-            DEFAULT_MAX_METADATA_SIZE
-        };
+        // --- issue #67: enforce metadata size cap ---
+        let max_meta = Self::effective_metadata_max_size(&env, &event_type);
         if metadata.len() > max_meta {
             panic_with_error!(&env, ContractError::MetadataTooLarge);
         }
