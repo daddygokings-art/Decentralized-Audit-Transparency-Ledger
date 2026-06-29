@@ -1,6 +1,27 @@
 version: "3.9"
 
 services:
+  relayer:
+    build: ./bridge/relayer
+    image: audit-ledger-relayer:latest
+    environment:
+      STELLAR_RPC: "${STELLAR_RPC:-https://soroban-testnet.stellar.org}"
+      CONTRACT_ID: "${CONTRACT_ID}"
+      EVM_RPC: "${EVM_RPC:-http://localhost:8545}"
+      VERIFIER_ADDRESS: "${VERIFIER_ADDRESS}"
+      RELAY_PRIVATE_KEY: "${RELAY_PRIVATE_KEY}"
+      POLL_INTERVAL_MS: "${POLL_INTERVAL_MS:-5000}"
+      HEALTH_PORT: "8080"
+    ports:
+      - "8080:8080"
+    restart: unless-stopped
+    # Issue #145: Health check endpoint
+    healthcheck:
+      test: ["CMD", "wget", "-qO-", "http://localhost:8080/healthz"]
+      interval: 15s
+      timeout: 5s
+      retries: 3
+
   metrics-exporter:
     build: ./tools/metrics-exporter
     image: audit-ledger-metrics-exporter:latest

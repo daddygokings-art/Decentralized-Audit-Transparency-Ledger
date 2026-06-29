@@ -35,6 +35,9 @@ jobs:
       - name: Run tests
         run: cargo test
 
+      - name: Run cargo-audit for dependency vulnerabilities
+        run: cargo install cargo-audit && cargo audit --deny warnings
+
   shellcheck:
     name: Shell syntax validation
     runs-on: ubuntu-latest

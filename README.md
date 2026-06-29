@@ -211,6 +211,14 @@ Every push and pull request triggers a GitHub Actions workflow that:
 3. Lints with `cargo clippy`
 4. Builds with `cargo build`
 5. Runs the full test suite with `cargo test`
+6. Scans Rust dependencies for known vulnerabilities with `cargo audit --deny warnings` (checks [RustSec Advisory Database](https://rustsec.org/))
+
+## Security
+
+This project follows security best practices:
+- **Dependency Vulnerability Scanning**: All transitive and direct dependencies are scanned via the [RustSec Advisory Database](https://rustsec.org/) on every CI run.
+- **Boundary Validation**: Contract logic validates all edge cases and boundary conditions.
+- **Immutable Audit Trail**: Events are cryptographically chained to prevent tampering.
 
 ## License
 
