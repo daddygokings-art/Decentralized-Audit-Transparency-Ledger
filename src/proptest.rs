@@ -18,7 +18,9 @@ fn create_ledger() -> (Env, Address, AuditLedgerClient<'static>) {
     let client = AuditLedgerClient::new(&env, &contract_id);
 
     env.mock_all_auths();
-    client.initialize(&owner, &1000);
+    let mut owners = SorobanVec::new(&env);
+    owners.push_back(owner.clone());
+    client.initialize(&owners, &1000);
     (env, owner, client)
 }
 

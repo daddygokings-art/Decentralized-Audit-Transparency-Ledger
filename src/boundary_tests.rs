@@ -1,6 +1,6 @@
 use super::*;
 use soroban_sdk::testutils::Address as _;
-use soroban_sdk::{symbol_short, Bytes, BytesN, Env};
+use soroban_sdk::{symbol_short, Bytes, BytesN, Env, Vec};
 
 fn create_ledger() -> (Env, Address, AuditLedgerClient<'static>) {
     let env = Env::default();
@@ -9,7 +9,9 @@ fn create_ledger() -> (Env, Address, AuditLedgerClient<'static>) {
     let client = AuditLedgerClient::new(&env, &contract_id);
 
     env.mock_all_auths();
-    client.initialize(&owner, &100);
+    let mut owners = Vec::new(&env);
+    owners.push_back(owner.clone());
+    client.initialize(&owners, &100);
     (env, owner, client)
 }
 
@@ -23,8 +25,9 @@ fn boundary_event_at_max_index_minus_one() {
     let client = AuditLedgerClient::new(&env, &contract_id);
 
     env.mock_all_auths();
-    // Set global max to allow events up to u32::MAX
-    client.initialize(&owner, &u32::MAX);
+    let mut owners = Vec::new(&env);
+    owners.push_back(owner.clone());
+    client.initialize(&owners, &u32::MAX);
 
     let submitter = Address::generate(&env);
     
@@ -99,8 +102,9 @@ fn boundary_global_max_logs_at_u32_max() {
     let client = AuditLedgerClient::new(&env, &contract_id);
 
     env.mock_all_auths();
-    // Setting global_max_logs to u32::MAX should work
-    client.initialize(&owner, &u32::MAX);
+    let mut owners = Vec::new(&env);
+    owners.push_back(owner.clone());
+    client.initialize(&owners, &u32::MAX);
     
     // Verify it was set
     // (cannot directly read, but initialization succeeded)
@@ -124,8 +128,9 @@ fn boundary_total_events_near_overflow() {
     let client = AuditLedgerClient::new(&env, &contract_id);
 
     env.mock_all_auths();
-    // Initialize with a high but safe max
-    client.initialize(&owner, &1000);
+    let mut owners = Vec::new(&env);
+    owners.push_back(owner.clone());
+    client.initialize(&owners, &1000);
 
     let submitter = Address::generate(&env);
     
@@ -159,8 +164,9 @@ fn boundary_log_event_near_capacity() {
     let client = AuditLedgerClient::new(&env, &contract_id);
 
     env.mock_all_auths();
-    // Set a small capacity to test near-capacity behavior
-    client.initialize(&owner, &5);
+    let mut owners = Vec::new(&env);
+    owners.push_back(owner.clone());
+    client.initialize(&owners, &5);
 
     let submitter = Address::generate(&env);
     
@@ -430,7 +436,9 @@ fn boundary_global_max_logs_one() {
     let client = AuditLedgerClient::new(&env, &contract_id);
 
     env.mock_all_auths();
-    client.initialize(&owner, &1);
+    let mut owners = Vec::new(&env);
+    owners.push_back(owner.clone());
+    client.initialize(&owners, &1);
 
     let submitter = Address::generate(&env);
     client.log_event(&submitter, &symbol_short!("test"), &Bytes::from_slice(&env, b"first"));

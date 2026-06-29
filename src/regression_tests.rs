@@ -1,6 +1,6 @@
 use super::*;
 use soroban_sdk::testutils::{Address as _, Events, Ledger};
-use soroban_sdk::{symbol_short, Bytes, BytesN, Env};
+use soroban_sdk::{symbol_short, Bytes, BytesN, Env, Vec};
 
 fn create_ledger() -> (Env, Address, AuditLedgerClient<'static>) {
     let env = Env::default();
@@ -9,7 +9,9 @@ fn create_ledger() -> (Env, Address, AuditLedgerClient<'static>) {
     let client = AuditLedgerClient::new(&env, &contract_id);
 
     env.mock_all_auths();
-    client.initialize(&owner, &100);
+    let mut owners = Vec::new(&env);
+    owners.push_back(owner.clone());
+    client.initialize(&owners, &100);
     (env, owner, client)
 }
 
@@ -23,7 +25,9 @@ fn regression_initialize_and_verify_state() {
     let client = AuditLedgerClient::new(&env, &contract_id);
 
     env.mock_all_auths();
-    client.initialize(&owner, &100);
+    let mut owners = Vec::new(&env);
+    owners.push_back(owner.clone());
+    client.initialize(&owners, &100);
 
     assert_eq!(client.total_events(), 0);
     assert!(!client.is_low_cost_mode());
@@ -165,7 +169,9 @@ fn regression_global_max_logs_reached_panics() {
     let client = AuditLedgerClient::new(&env, &contract_id);
 
     env.mock_all_auths();
-    client.initialize(&owner, &2);
+    let mut owners = Vec::new(&env);
+    owners.push_back(owner.clone());
+    client.initialize(&owners, &2);
 
     client.log_event(&submitter, &symbol_short!("p"), &Bytes::from_slice(&env, b"tx1"));
     client.log_event(&submitter, &symbol_short!("p"), &Bytes::from_slice(&env, b"tx2"));
@@ -323,7 +329,9 @@ fn regression_zero_global_max_logs() {
     let client = AuditLedgerClient::new(&env, &contract_id);
 
     env.mock_all_auths();
-    client.initialize(&owner, &0);
+    let mut owners = Vec::new(&env);
+    owners.push_back(owner.clone());
+    client.initialize(&owners, &0);
 
     let result = client.try_log_event(
         &Address::generate(&env),

@@ -1,6 +1,6 @@
 use super::*;
 use soroban_sdk::testutils::{Address as _, Events, Ledger};
-use soroban_sdk::{symbol_short, Bytes, BytesN, Env};
+use soroban_sdk::{symbol_short, Bytes, BytesN, Env, Vec};
 
 fn create_ledger() -> (Env, Address, AuditLedgerClient<'static>) {
     let env = Env::default();
@@ -9,7 +9,9 @@ fn create_ledger() -> (Env, Address, AuditLedgerClient<'static>) {
     let client = AuditLedgerClient::new(&env, &contract_id);
 
     env.mock_all_auths();
-    client.initialize(&owner, &100);
+    let mut owners = Vec::new(&env);
+    owners.push_back(owner.clone());
+    client.initialize(&owners, &100);
     (env, owner, client)
 }
 
@@ -23,7 +25,9 @@ fn test_initialize() {
     let client = AuditLedgerClient::new(&env, &contract_id);
 
     env.mock_all_auths();
-    client.initialize(&owner, &100);
+    let mut owners = Vec::new(&env);
+    owners.push_back(owner.clone());
+    client.initialize(&owners, &100);
 
     assert_eq!(client.total_events(), 0);
 }
@@ -90,8 +94,10 @@ fn test_initialize_reinitialization_panics() {
     let client = AuditLedgerClient::new(&env, &contract_id);
 
     env.mock_all_auths();
-    client.initialize(&owner, &100);
-    client.initialize(&owner, &200);
+    let mut owners = Vec::new(&env);
+    owners.push_back(owner.clone());
+    client.initialize(&owners, &100);
+    client.initialize(&owners, &200);
 }
 
 #[test]
@@ -322,7 +328,9 @@ fn test_global_max_logs() {
     let client = AuditLedgerClient::new(&env, &contract_id);
 
     env.mock_all_auths();
-    client.initialize(&owner, &2);
+    let mut owners = Vec::new(&env);
+    owners.push_back(owner.clone());
+    client.initialize(&owners, &2);
 
     let payment = symbol_short!("payment");
     let refund = symbol_short!("refund");
@@ -449,7 +457,9 @@ fn test_zero_global_max_logs() {
     let client = AuditLedgerClient::new(&env, &contract_id);
 
     env.mock_all_auths();
-    client.initialize(&owner, &0);
+    let mut owners = Vec::new(&env);
+    owners.push_back(owner.clone());
+    client.initialize(&owners, &0);
 
     let result = client.try_log_event(
         &submitter,
@@ -653,7 +663,9 @@ fn test_log_event_rejects_total_events_overflow() {
     let client = AuditLedgerClient::new(&env, &contract_id);
 
     env.mock_all_auths();
-    client.initialize(&owner, &u32::MAX);
+    let mut owners = Vec::new(&env);
+    owners.push_back(owner.clone());
+    client.initialize(&owners, &u32::MAX);
     env.storage().instance().set(&super::DataKey::TotalEvents, &u32::MAX);
 
     let submitter = Address::generate(&env);
@@ -1793,4 +1805,64 @@ fn test_blocklist_takes_precedence() {
         )
     }));
     assert!(result.is_err());
+}
+
+// ── Multi-owner initialize tests (issue #112) ────────────────────────────────
+
+#[test]
+fn test_initialize_single_owner() {
+    let env = Env::default();
+    let owner = Address::generate(&env);
+    let contract_id = env.register(AuditLedger, ());
+    let client = AuditLedgerClient::new(&env, &contract_id);
+
+    env.mock_all_auths();
+    let mut owners = Vec::new(&env);
+    owners.push_back(owner.clone());
+    client.initialize(&owners, &100);
+
+    assert_eq!(client.total_events(), 0);
+    client.pause(&owner);
+    client.unpause(&owner);
+}
+
+#[test]
+fn test_initialize_multi_owner_any_can_govern() {
+    let env = Env::default();
+    let owner1 = Address::generate(&env);
+    let owner2 = Address::generate(&env);
+    let owner3 = Address::generate(&env);
+    let contract_id = env.register(AuditLedger, ());
+    let client = AuditLedgerClient::new(&env, &contract_id);
+
+    env.mock_all_auths();
+    let mut owners = Vec::new(&env);
+    owners.push_back(owner1.clone());
+    owners.push_back(owner2.clone());
+    owners.push_back(owner3.clone());
+    client.initialize(&owners, &1000);
+
+    client.pause(&owner1);
+    client.unpause(&owner2);
+    client.set_global_max_logs(&owner3, &500);
+    assert_eq!(client.total_events(), 0);
+}
+
+#[test]
+fn test_initialize_multi_owner_non_owner_cannot_govern() {
+    let env = Env::default();
+    let owner1 = Address::generate(&env);
+    let owner2 = Address::generate(&env);
+    let outsider = Address::generate(&env);
+    let contract_id = env.register(AuditLedger, ());
+    let client = AuditLedgerClient::new(&env, &contract_id);
+
+    env.mock_all_auths();
+    let mut owners = Vec::new(&env);
+    owners.push_back(owner1.clone());
+    owners.push_back(owner2.clone());
+    client.initialize(&owners, &100);
+
+    let result = client.try_pause(&outsider);
+    assert!(result.is_err(), "non-owner must not be able to pause");
 }

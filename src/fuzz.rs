@@ -5,7 +5,7 @@ extern crate std;
 use super::*;
 use rand::prelude::*;
 use soroban_sdk::testutils::{Address as _, Ledger};
-use soroban_sdk::{Bytes, Symbol, BytesN};
+use soroban_sdk::{Bytes, Symbol, BytesN, Vec};
 
 const FUZZ_ITERATIONS: usize = 10_000;
 const MAX_METADATA_LEN: usize = 1024;
@@ -18,7 +18,9 @@ fn create_ledger() -> (Env, Address, AuditLedgerClient<'static>) {
     let client = AuditLedgerClient::new(&env, &contract_id);
 
     env.mock_all_auths();
-    client.initialize(&owner, &1000);
+    let mut owners = Vec::new(&env);
+    owners.push_back(owner.clone());
+    client.initialize(&owners, &1000);
     (env, owner, client)
 }
 
