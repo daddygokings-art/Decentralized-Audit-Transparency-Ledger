@@ -28,17 +28,17 @@ fn log_sample_events(
     ids.push_back(client.log_event(
         submitter,
         &symbol_short!("payment"),
-        &Bytes::from_slice(env, b"{\"reference\":\"INV-001\"}"), &None, &None, &false
+        &Bytes::from_slice(env, b"{\"reference\":\"INV-001\"}"),
     ));
     ids.push_back(client.log_event(
         submitter,
         &symbol_short!("refund"),
-        &Bytes::from_slice(env, b"{\"reference\":\"RF-001\"}"), &None, &None, &false
+        &Bytes::from_slice(env, b"{\"reference\":\"RF-001\"}"),
     ));
     ids.push_back(client.log_event(
         submitter,
         &symbol_short!("audit"),
-        &Bytes::from_slice(env, b"{\"reference\":\"AUD-001\"}"), &None, &None, &false
+        &Bytes::from_slice(env, b"{\"reference\":\"AUD-001\"}"),
     ));
     ids
 }
@@ -83,7 +83,7 @@ fn successful_upgrade_preserves_events_and_allows_new_behavior() {
     let new_id = client.log_event(
         &submitter,
         &symbol_short!("payment"),
-        &Bytes::from_slice(&env, b"{\"reference\":\"INV-002\"}"), &None, &None, &false
+        &Bytes::from_slice(&env, b"{\"reference\":\"INV-002\"}"),
     );
     let new_event = client.get_event(&new_id);
     assert_eq!(new_event.index, 3);
@@ -188,7 +188,7 @@ fn rollback_upgrade_preserves_existing_data() {
     let post_rollback_id = client.log_event(
         &submitter,
         &symbol_short!("audit"),
-        &Bytes::from_slice(&env, b"{\"reference\":\"AUD-002\"}"), &None, &None, &false
+        &Bytes::from_slice(&env, b"{\"reference\":\"AUD-002\"}"),
     );
     assert_eq!(client.get_event(&post_rollback_id).index, 3);
     assert_eq!(client.total_events(), 4);

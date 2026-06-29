@@ -210,7 +210,7 @@ fn boundary_event_type_near_capacity() {
     assert_eq!(client.event_count(&payment), 3);
 
     // Next event of this type should fail
-    let result = client.try_log_event(&submitter, &payment, &Bytes::from_slice(&env, b"overflow"), &None, &None, &false);
+    let result = client.try_log_event(&submitter, &payment, &Bytes::from_slice(&env, b"overflow"));
     assert!(result.is_err());
 }
 
@@ -298,17 +298,17 @@ fn boundary_event_order_index_increment() {
     let id0 = client.log_event(
         &submitter,
         &symbol_short!("test"),
-        &Bytes::from_slice(&env, b"0"), &None, &None, &false
+        &Bytes::from_slice(&env, b"0"),
     );
     let id1 = client.log_event(
         &submitter,
         &symbol_short!("test"),
-        &Bytes::from_slice(&env, b"1"), &None, &None, &false
+        &Bytes::from_slice(&env, b"1"),
     );
     let id2 = client.log_event(
         &submitter,
         &symbol_short!("test"),
-        &Bytes::from_slice(&env, b"2"), &None, &None, &false
+        &Bytes::from_slice(&env, b"2"),
     );
 
     let evt0 = client.get_event(&id0);
@@ -396,7 +396,7 @@ fn boundary_zero_index_event() {
     let id = client.log_event(
         &submitter,
         &symbol_short!("test"),
-        &Bytes::from_slice(&env, b"first"), &None, &None, &false
+        &Bytes::from_slice(&env, b"first"),
     );
 
     let evt = client.get_event(&id);
@@ -455,7 +455,7 @@ fn boundary_global_max_logs_one() {
     client.log_event(
         &submitter,
         &symbol_short!("test"),
-        &Bytes::from_slice(&env, b"first"), &None, &None, &false
+        &Bytes::from_slice(&env, b"first"),
     );
 
     assert_eq!(client.total_events(), 1);
@@ -481,6 +481,6 @@ fn boundary_event_max_logs_one() {
 
     assert_eq!(client.event_count(&payment), 1);
 
-    let result = client.try_log_event(&submitter, &payment, &Bytes::from_slice(&env, b"second"), &None, &None, &false);
+    let result = client.try_log_event(&submitter, &payment, &Bytes::from_slice(&env, b"second"));
     assert!(result.is_err());
 }

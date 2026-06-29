@@ -176,17 +176,17 @@ fn regression_global_max_logs_reached_panics() {
     client.log_event(
         &submitter,
         &symbol_short!("p"),
-        &Bytes::from_slice(&env, b"tx1"), &None, &None, &false
+        &Bytes::from_slice(&env, b"tx1"),
     );
     client.log_event(
         &submitter,
         &symbol_short!("p"),
-        &Bytes::from_slice(&env, b"tx2"), &None, &None, &false
+        &Bytes::from_slice(&env, b"tx2"),
     );
     client.log_event(
         &submitter,
         &symbol_short!("p"),
-        &Bytes::from_slice(&env, b"tx3"), &None, &None, &false
+        &Bytes::from_slice(&env, b"tx3"),
     );
 }
 
@@ -407,7 +407,7 @@ fn regression_single_event_operations() {
     let id = client.log_event(
         &submitter,
         &symbol_short!("test"),
-        &Bytes::from_slice(&env, b"data"), &None, &None, &false
+        &Bytes::from_slice(&env, b"data"),
     );
 
     assert_eq!(client.total_events(), 1);
@@ -428,12 +428,12 @@ fn regression_multiple_submitters() {
     client.log_event(
         &submitter1,
         &symbol_short!("test"),
-        &Bytes::from_slice(&env, b"user1"), &None, &None, &false
+        &Bytes::from_slice(&env, b"user1"),
     );
     client.log_event(
         &submitter2,
         &symbol_short!("test"),
-        &Bytes::from_slice(&env, b"user2"), &None, &None, &false
+        &Bytes::from_slice(&env, b"user2"),
     );
 
     assert_eq!(client.total_events(), 2);
@@ -448,17 +448,17 @@ fn regression_multiple_event_types() {
     client.log_event(
         &submitter,
         &symbol_short!("type1"),
-        &Bytes::from_slice(&env, b"a"), &None, &None, &false
+        &Bytes::from_slice(&env, b"a"),
     );
     client.log_event(
         &submitter,
         &symbol_short!("type2"),
-        &Bytes::from_slice(&env, b"b"), &None, &None, &false
+        &Bytes::from_slice(&env, b"b"),
     );
     client.log_event(
         &submitter,
         &symbol_short!("type3"),
-        &Bytes::from_slice(&env, b"c"), &None, &None, &false
+        &Bytes::from_slice(&env, b"c"),
     );
 
     assert_eq!(client.total_events(), 3);
@@ -478,7 +478,7 @@ fn regression_event_emitted_on_log() {
     client.log_event(
         &submitter,
         &symbol_short!("test"),
-        &Bytes::from_slice(&env, b"data"), &None, &None, &false
+        &Bytes::from_slice(&env, b"data"),
     );
 
     let contract_events = env.events().all();
@@ -552,7 +552,7 @@ fn regression_event_emission_index_only_mode() {
     client.log_event(
         &submitter,
         &symbol_short!("test"),
-        &Bytes::from_slice(&env, b"data"), &None, &None, &false
+        &Bytes::from_slice(&env, b"data"),
     );
 
     let contract_events = env.events().all();
@@ -571,7 +571,7 @@ fn regression_event_emission_hash_only_mode() {
     client.log_event(
         &submitter,
         &symbol_short!("test"),
-        &Bytes::from_slice(&env, b"data"), &None, &None, &false
+        &Bytes::from_slice(&env, b"data"),
     );
 
     let contract_events = env.events().all();
@@ -590,7 +590,7 @@ fn regression_event_emission_none_mode() {
     client.log_event(
         &submitter,
         &symbol_short!("test"),
-        &Bytes::from_slice(&env, b"data"), &None, &None, &false
+        &Bytes::from_slice(&env, b"data"),
     );
 
     let contract_events = env.events().all();
@@ -612,7 +612,7 @@ fn regression_old_format_data_readable() {
     let id = client.log_event(
         &submitter,
         &symbol_short!("test"),
-        &Bytes::from_slice(&env, b"data"), &None, &None, &false
+        &Bytes::from_slice(&env, b"data"),
     );
 
     // Should be able to retrieve using all methods
@@ -635,12 +635,12 @@ fn regression_hash_chain_backward_compatible() {
     let id1 = client.log_event(
         &submitter,
         &symbol_short!("test"),
-        &Bytes::from_slice(&env, b"first"), &None, &None, &false
+        &Bytes::from_slice(&env, b"first"),
     );
     let id2 = client.log_event(
         &submitter,
         &symbol_short!("test"),
-        &Bytes::from_slice(&env, b"second"), &None, &None, &false
+        &Bytes::from_slice(&env, b"second"),
     );
 
     let evt1 = client.get_event(&id1);

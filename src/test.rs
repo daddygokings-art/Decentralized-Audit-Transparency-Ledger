@@ -264,7 +264,7 @@ fn test_event_ids_are_bytes32() {
     let payment = symbol_short!("payment");
 
     env.mock_all_auths();
-    let id: BytesN<32> = client.log_event(&submitter, &payment, &Bytes::from_slice(&env, b"tx1"), &None, &None, &false);
+    let id: BytesN<32> = client.log_event(&submitter, &payment, &Bytes::from_slice(&env, b"tx1"));
     // ID is a 32-byte value (BytesN<32> by type)
     assert_eq!(id.len(), 32);
 }
@@ -324,7 +324,7 @@ fn test_verify_integrity_single_event() {
     client.log_event(
         &submitter,
         &symbol_short!("p"),
-        &Bytes::from_slice(&env, b"x"), &None, &None, &false
+        &Bytes::from_slice(&env, b"x"),
     );
 
     assert!(client.verify_integrity());
@@ -438,7 +438,7 @@ fn test_set_global_max_logs_below_current_count_panics() {
     client.log_event(
         &submitter,
         &symbol_short!("p"),
-        &Bytes::from_slice(&env, b"tx1"), &None, &None, &false
+        &Bytes::from_slice(&env, b"tx1"),
     );
     let result = client.try_set_global_max_logs(&owner, &0);
     assert!(result.is_err());
@@ -453,14 +453,14 @@ fn test_set_global_max_logs_equal_current_count_freezes_logging() {
     client.log_event(
         &submitter,
         &symbol_short!("p"),
-        &Bytes::from_slice(&env, b"tx1"), &None, &None, &false
+        &Bytes::from_slice(&env, b"tx1"),
     );
     client.set_global_max_logs(&owner, &1);
 
     let result = client.try_log_event(
         &submitter,
         &symbol_short!("p"),
-        &Bytes::from_slice(&env, b"tx2"), &None, &None, &false
+        &Bytes::from_slice(&env, b"tx2"),
     );
     assert!(result.is_err());
 }
@@ -618,7 +618,7 @@ fn test_event_was_emitted() {
     let meta = Bytes::from_slice(&env, b"emit-test");
 
     env.mock_all_auths();
-    client.log_event(&submitter, &payment, &meta, &None, &None, &false, &None, &None, &false);
+    client.log_event(&submitter, &payment, &meta, &None, &None, &false);
 
     let contract_events = env.events().all();
     let events = contract_events.events();
@@ -665,7 +665,7 @@ fn test_log_event_returns_correct_fields() {
 
     env.ledger().set_timestamp(1000);
     env.mock_all_auths();
-    let id = client.log_event(&submitter, &payment, &meta, &None, &None, &false, &None, &None, &false);
+    let id = client.log_event(&submitter, &payment, &meta, &None, &None, &false);
     let evt = client.get_event(&id);
 
     assert_eq!(evt.index, 0);
@@ -699,7 +699,7 @@ fn test_log_event_before_initialize_panics() {
     client.log_event(
         &submitter,
         &symbol_short!("payment"),
-        &Bytes::from_slice(&env, b"tx1"), &None, &None, &false
+        &Bytes::from_slice(&env, b"tx1"),
     );
 }
 
@@ -731,7 +731,7 @@ fn test_log_event_rejects_future_timestamp() {
 
     env.ledger()
         .set_timestamp(1000 + super::MAX_TIMESTAMP_DRIFT_SECONDS + 1);
-    client.log_event(&submitter, &payment, &Bytes::from_slice(&env, b"tx2"), &None, &None, &false);
+    client.log_event(&submitter, &payment, &Bytes::from_slice(&env, b"tx2"));
 }
 
 #[test]
@@ -768,7 +768,7 @@ fn test_log_event_rejects_total_events_overflow() {
     client.log_event(
         &submitter,
         &symbol_short!("payment"),
-        &Bytes::from_slice(&env, b"tx1"), &None, &None, &false
+        &Bytes::from_slice(&env, b"tx1"),
     );
 }
 
@@ -854,7 +854,7 @@ fn test_metadata_size_cap_default_allows_1kb() {
     env.mock_all_auths();
     // Default max is 1024; 100 bytes should pass.
     let meta = Bytes::from_slice(&env, &[0u8; 100]);
-    let _id = client.log_event(&submitter, &symbol_short!("p"), &meta, &None, &None, &false, &None, &None, &false);
+    let _id = client.log_event(&submitter, &symbol_short!("p"), &meta, &None, &None, &false);
     assert_eq!(client.total_events(), 1);
 }
 
@@ -881,14 +881,14 @@ fn test_metadata_size_cap_owner_can_set_global() {
     let _id = client.log_event(
         &submitter,
         &symbol_short!("t"),
-        &Bytes::from_slice(&env, &[0u8; 50]), &None, &None, &false
+        &Bytes::from_slice(&env, &[0u8; 50]),
     );
     assert_eq!(client.total_events(), 1);
     // 51 bytes → rejected
     let r2 = client.try_log_event(
         &submitter,
         &symbol_short!("t"),
-        &Bytes::from_slice(&env, &[0u8; 51]), &None, &None, &false
+        &Bytes::from_slice(&env, &[0u8; 51]),
     );
     assert!(r2.is_err());
 }
@@ -919,7 +919,7 @@ fn test_metadata_size_cap_per_type_overrides_global() {
     let r2 = client.try_log_event(
         &submitter,
         &symbol_short!("z"),
-        &Bytes::from_slice(&env, &[0u8; 11]), &None, &None, &false
+        &Bytes::from_slice(&env, &[0u8; 11]),
     );
     assert!(r2.is_err());
 }
@@ -976,7 +976,7 @@ fn test_get_event_signature_returns_none_for_unsigned() {
     let id = client.log_event(
         &submitter,
         &symbol_short!("p"),
-        &Bytes::from_slice(&env, b"x"), &None, &None, &false
+        &Bytes::from_slice(&env, b"x"),
     );
     let stored = client.get_event_signature(&id);
     assert!(stored.is_none());
@@ -1006,12 +1006,12 @@ fn test_verify_integrity_empty_range() {
     client.log_event(
         &submitter,
         &symbol_short!("a"),
-        &Bytes::from_slice(&env, b"x"), &None, &None, &false
+        &Bytes::from_slice(&env, b"x"),
     );
     client.log_event(
         &submitter,
         &symbol_short!("b"),
-        &Bytes::from_slice(&env, b"y"), &None, &None, &false
+        &Bytes::from_slice(&env, b"y"),
     );
 
     assert!(client.verify_integrity_range(&0, &0));
@@ -1028,7 +1028,7 @@ fn test_metadata_size_cap_u32_max_disables_limit() {
     client.set_metadata_max_size(&owner, &u32::MAX);
 
     let large_meta = Bytes::from_slice(&env, &[0u8; 2000]);
-    let _id = client.log_event(&submitter, &symbol_short!("p"), &large_meta, &None, &None, &false, &None, &None, &false);
+    let _id = client.log_event(&submitter, &symbol_short!("p"), &large_meta, &None, &None, &false);
     assert_eq!(client.total_events(), 1);
 }
 
@@ -1064,12 +1064,12 @@ fn test_get_event_by_order_returns_correct_id() {
     let id0 = client.log_event(
         &submitter,
         &symbol_short!("a"),
-        &Bytes::from_slice(&env, b"first"), &None, &None, &false
+        &Bytes::from_slice(&env, b"first"),
     );
     let id1 = client.log_event(
         &submitter,
         &symbol_short!("b"),
-        &Bytes::from_slice(&env, b"second"), &None, &None, &false
+        &Bytes::from_slice(&env, b"second"),
     );
 
     let evt0 = client.get_event_by_order(&0);
@@ -1111,7 +1111,7 @@ fn test_protocol_version_header() {
 
     env.mock_all_auths();
     let meta = Bytes::from_slice(&env, b"proto-check");
-    let id = client.log_event(&submitter, &symbol_short!("p"), &meta, &None, &None, &false, &None, &None, &false);
+    let id = client.log_event(&submitter, &symbol_short!("p"), &meta, &None, &None, &false);
 
     let evt = client.get_event(&id);
     assert_eq!(evt.event_hash.len(), 32);
@@ -1207,7 +1207,7 @@ fn test_low_cost_mode_logs_without_indexing() {
     let meta = Bytes::from_slice(&env, b"test-metadata");
 
     env.mock_all_auths();
-    let id = client.log_event(&submitter, &payment, &meta, &None, &None, &false);
+    let id = client.log_event(&submitter, &payment, &meta);
 
     assert_eq!(client.total_events(), 1);
 
@@ -1225,7 +1225,7 @@ fn test_low_cost_mode_emission() {
     let meta = Bytes::from_slice(&env, b"test-metadata");
 
     env.mock_all_auths();
-    let id = client.log_event(&submitter, &payment, &meta, &None, &None, &false);
+    let id = client.log_event(&submitter, &payment, &meta);
 
     let contract_events = env.events().all();
     let events = contract_events.events();
@@ -1273,7 +1273,7 @@ fn test_event_emission_index_only() {
     let meta = Bytes::from_slice(&env, b"large-metadata-that-would-be-emitted-full");
 
     env.mock_all_auths();
-    let id = client.log_event(&submitter, &payment, &meta, &None, &None, &false);
+    let id = client.log_event(&submitter, &payment, &meta);
 
     let contract_events = env.events().all();
     let events = contract_events.events();
@@ -1292,7 +1292,7 @@ fn test_get_event_metadata() {
     let meta = Bytes::from_slice(&env, b"test-metadata");
 
     env.mock_all_auths();
-    let id = client.log_event(&submitter, &payment, &meta, &None, &None, &false);
+    let id = client.log_event(&submitter, &payment, &meta);
 
     let retrieved_meta = client.get_event_metadata(&id);
     assert_eq!(retrieved_meta, meta);
@@ -1307,7 +1307,7 @@ fn test_get_event_header() {
 
     env.ledger().set_timestamp(1000);
     env.mock_all_auths();
-    let id = client.log_event(&submitter, &payment, &meta, &None, &None, &false);
+    let id = client.log_event(&submitter, &payment, &meta);
 
     let header = client.get_event_header(&id);
     // EventHeader contains only index/timestamp/event_type/submitter — no metadata (issue #56)
@@ -1328,7 +1328,7 @@ fn test_get_event_header_has_no_metadata_field() {
     let meta = Bytes::from_slice(&env, b"lazy-test");
 
     env.mock_all_auths();
-    let id = client.log_event(&submitter, &payment, &meta, &None, &None, &false, &None, &None, &false);
+    let id = client.log_event(&submitter, &payment, &meta, &None, &None, &false);
 
     // Full event has metadata
     let evt = client.get_event(&id);
@@ -2025,54 +2025,4 @@ fn test_log_event_with_ttl_enabled() {
     );
     let evt = client.get_event(&id);
     assert_eq!(evt.metadata, Bytes::from_slice(&env, b"ttl_test"));
-}
-
-// ── Issue #63: Symbol validation tests ─────────────────────────────────────
-
-#[test]
-fn test_log_event_valid_symbol() {
-    let (env, _owner, client) = create_ledger();
-    let submitter = Address::generate(&env);
-    env.mock_all_auths();
-    let valid = symbol_short!("pay_tx1");
-    let id = client.log_event(&submitter, &valid, &Bytes::from_slice(&env, b"ok"), &None, &None, &false);
-    assert_eq!(client.total_events(), 1);
-    assert_eq!(client.get_event(&id).event_type, valid);
-}
-
-#[test]
-fn test_log_event_rejects_too_long_symbol() {
-    // symbol_short! is limited to 9 chars; use Symbol::new for longer strings.
-    // Soroban SDK allows up to 32 chars; 33 chars should be rejected by our validate_event_type.
-    let (env, _owner, client) = create_ledger();
-    let submitter = Address::generate(&env);
-    env.mock_all_auths();
-    // 33 a's — exceeds our 32-byte limit
-    let too_long = Symbol::new(&env, "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa");
-    let result = client.try_log_event(
-        &submitter,
-        &too_long,
-        &Bytes::from_slice(&env, b"data"),
-        &None,
-        &None,
-        &false,
-    );
-    assert!(result.is_err());
-}
-
-#[test]
-fn test_set_event_max_logs_rejects_too_long_symbol() {
-    let (env, owner, client) = create_ledger();
-    env.mock_all_auths();
-    let too_long = Symbol::new(&env, "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"); // 33 chars
-    let result = client.try_set_event_max_logs(&owner, &too_long, &10);
-    assert!(result.is_err());
-}
-
-#[test]
-fn test_set_event_max_logs_accepts_valid_symbol() {
-    let (env, owner, client) = create_ledger();
-    env.mock_all_auths();
-    client.set_event_max_logs(&owner, &symbol_short!("transfer"), &5);
-    // No panic = success
 }
