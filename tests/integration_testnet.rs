@@ -1,5 +1,5 @@
 // Integration tests for Stellar testnet and standalone network
-// 
+//
 // These tests deploy and interact with the contract on real Stellar infrastructure
 // to validate real-network behavior.
 //
@@ -15,8 +15,9 @@
 
 use audit_ledger::{AuditLedger, AuditLedgerClient};
 use soroban_sdk::{
+    symbol_short,
     testutils::{Address as _, Ledger},
-    symbol_short, Address, Bytes, Env,
+    Address, Bytes, Env,
 };
 
 // ── Standalone Network Tests ───────────────────────────────────────────────────────
@@ -247,7 +248,11 @@ fn standalone_low_cost_mode() {
     assert!(client.is_low_cost_mode());
 
     // Log event in low-cost mode
-    client.log_event(&submitter, &symbol_short!("test"), &Bytes::from_slice(&env, b"data"));
+    client.log_event(
+        &submitter,
+        &symbol_short!("test"),
+        &Bytes::from_slice(&env, b"data"),
+    );
     assert_eq!(client.total_events(), 1);
 
     // Disable low-cost mode
@@ -304,14 +309,14 @@ fn testnet_deploy_and_initialize() {
     // let rpc_url = std::env::var("STELLAR_RPC_URL").unwrap();
     // let network_passphrase = std::env::var("STELLAR_NETWORK_PASSPHRASE").unwrap();
     // let secret_key = std::env::var("TESTNET_SECRET_KEY").unwrap();
-    // 
+    //
     // let env = Env::from_network(rpc_url, network_passphrase);
     // let owner = Address::from_secret_key(&secret_key);
-    // 
+    //
     // // Deploy contract
     // let contract_id = deploy_contract(&env);
     // let client = AuditLedgerClient::new(&env, &contract_id);
-    // 
+    //
     // client.initialize(&owner, &1000);
     // assert_eq!(client.total_events(), 0);
 }
@@ -366,7 +371,7 @@ fn fund_account_with_friendbot(account_address: &Address) {
     // 1. Call friendbot API with account address
     // 2. Wait for funding confirmation
     // 3. Return success/failure
-    // 
+    //
     // Example API call:
     // POST https://friendbot.stellar.org
     // Body: { "address": "G..." }

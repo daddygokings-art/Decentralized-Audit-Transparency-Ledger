@@ -22,6 +22,7 @@ const RPC_URL =
 const NETWORK = process.env.NETWORK || "testnet";
 const SCRAPE_INTERVAL_MS = parseInt(process.env.SCRAPE_INTERVAL_MS || "15000", 10);
 const PORT = parseInt(process.env.PORT || "8000", 10);
+const TOP_SUBMITTERS_N = parseInt(process.env.TOP_SUBMITTERS_N || "10", 10);
 
 if (!CONTRACT_ID) {
   console.error("ERROR: CONTRACT_ID environment variable is required.");
@@ -70,27 +71,10 @@ const avgGasCost = new client.Gauge({
   registers: [registry],
 });
 
-// Issue 1: paused gauge with contract_id label
-const pausedGauge = new client.Gauge({
-  name: "audit_ledger_paused",
-  help: "1 if the AuditLedger contract is paused, 0 if active",
-  labelNames: ["contract_id"],
-  registers: [registry],
-});
-
-// Issue 1: paused_since gauge (unix timestamp, 0 when not paused)
-const pausedSinceGauge = new client.Gauge({
-  name: "audit_ledger_paused_since",
-  help: "Unix timestamp when the contract was paused (0 if not paused)",
-  labelNames: ["contract_id"],
-  registers: [registry],
-});
-
-// Issue 3: scrape error gauge — set to 1 after 10 consecutive failures
-const scrapeErrorGauge = new client.Gauge({
-  name: "audit_ledger_scrape_error",
-  help: "1 if the exporter has hit 10+ consecutive RPC failures",
-  labelNames: ["contract_id"],
+const eventsBySubmitter = new client.Gauge({
+  name: "audit_ledger_events_by_submitter",
+  help: "Number of events per submitter (top-N, configurable via TOP_SUBMITTERS_N)",
+  labelNames: ["submitter"],
   registers: [registry],
 });
 
@@ -188,33 +172,34 @@ async function scrape() {
       }
     }
 
-    // Issue 1: paused status
+    // per-submitter counts via get_statistics (returns top_submitters Vec<(Address, u32)>)
     try {
-      const pausedVal = await callContract("is_paused");
-      const isPaused = pausedVal?.value() === true || pausedVal?.switch()?.name === "scvBool" && pausedVal.b() === true;
-      pausedGauge.set({ contract_id: CONTRACT_ID }, isPaused ? 1 : 0);
-
-      if (isPaused) {
-        try {
-          const sinceVal = await callContract("paused_since");
-          // u64 comes back as a BigInt-like value
-          const since = Number(sinceVal?.u64() ?? sinceVal?.i64() ?? 0);
-          pausedSinceGauge.set({ contract_id: CONTRACT_ID }, since);
-        } catch {
-          pausedSinceGauge.set({ contract_id: CONTRACT_ID }, 0);
+      const statsVal = await callContract("get_statistics");
+      if (statsVal && statsVal.switch().name === "scvMap") {
+        const statsMap = statsVal.map();
+        const topSubmittersEntry = statsMap && statsMap.find(
+          (e) => e.key().switch().name === "scvSymbol" && e.key().sym() === "top_submitters"
+        );
+        if (topSubmittersEntry) {
+          const submitterVec = topSubmittersEntry.val().vec() || [];
+          // Reset existing labels then set top-N
+          eventsBySubmitter.reset();
+          const topN = submitterVec.slice(0, TOP_SUBMITTERS_N);
+          for (const entry of topN) {
+            if (entry.switch().name === "scvVec") {
+              const pair = entry.vec();
+              if (pair && pair.length === 2) {
+                const addr = pair[0].address ? pair[0].address().toString() : String(pair[0]);
+                const count = pair[1].u32 ? pair[1].u32() : 0;
+                eventsBySubmitter.set({ submitter: addr }, count);
+              }
+            }
+          }
         }
-      } else {
-        pausedSinceGauge.set({ contract_id: CONTRACT_ID }, 0);
       }
     } catch {
-      // is_paused not available; default to 0
-      pausedGauge.set({ contract_id: CONTRACT_ID }, 0);
-      pausedSinceGauge.set({ contract_id: CONTRACT_ID }, 0);
+      // get_statistics not available or parse error; skip submitter metrics
     }
-
-    // Issue 3: reset failure counter on success
-    consecutiveFailures = 0;
-    scrapeErrorGauge.set({ contract_id: CONTRACT_ID }, 0);
   } catch (err) {
     console.error("Scrape error:", err.message);
     errorCount.inc();
