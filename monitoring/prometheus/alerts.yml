@@ -36,3 +36,17 @@ groups:
         annotations:
           summary: "AuditLedger contract appears paused"
           description: "global_max_logs is 0, blocking all new event logging."
+
+      - alert: AuditLedgerPaused
+        expr: audit_ledger_paused == 1
+        for: 30m
+        labels:
+          severity: critical
+        annotations:
+          summary: "AuditLedger contract has been paused for > 30 minutes"
+          description: >
+            Contract {{ $labels.contract_id }} has been paused since
+            {{ with query (printf "audit_ledger_paused_since{contract_id=\"%s\"}" $labels.contract_id) }}{{ . | first | value | humanizeTimestamp }}{{ end }}.
+            All write operations are blocked.
+          contract_id: "{{ $labels.contract_id }}"
+          paused_since: "{{ with query (printf \"audit_ledger_paused_since{contract_id=\\\"%s\\\"}\" $labels.contract_id) }}{{ . | first | value }}{{ end }}"

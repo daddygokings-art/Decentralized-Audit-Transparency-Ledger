@@ -18,6 +18,14 @@ export const typeDefs = `
     eventsByType: JSON!
   }
 
+  type GovernanceEvent {
+    action: String!
+    caller: String!
+    oldValue: String
+    newValue: String
+    timestamp: Int!
+  }
+
   input EventFilter {
     type: String
     submitter: String
@@ -38,6 +46,7 @@ export const typeDefs = `
     eventByType(type: String!, typeIndex: Int!): Event
     statistics: ContractStats!
     searchEvents(query: String!): [Event!]!
+    governanceHistory(types: [String!], limit: Int = 50, offset: Int = 0): [GovernanceEvent!]!
   }
 
   type Mutation {

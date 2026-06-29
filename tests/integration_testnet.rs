@@ -1,5 +1,5 @@
 // Integration tests for Stellar testnet and standalone network
-// 
+//
 // These tests deploy and interact with the contract on real Stellar infrastructure
 // to validate real-network behavior.
 //
@@ -15,8 +15,9 @@
 
 use audit_ledger::{AuditLedger, AuditLedgerClient};
 use soroban_sdk::{
+    symbol_short,
     testutils::{Address as _, Ledger},
-    symbol_short, Address, Bytes, Env,
+    Address, Bytes, Env,
 };
 
 // ── Standalone Network Tests ───────────────────────────────────────────────────────
@@ -30,7 +31,9 @@ fn standalone_deploy_and_initialize() {
     let client = AuditLedgerClient::new(&env, &contract_id);
 
     env.mock_all_auths();
-    client.initialize(&owner, &1000);
+    let mut owners = Vec::new(&env);
+    owners.push_back(owner.clone());
+    client.initialize(&owners, &1000);
 
     assert_eq!(client.total_events(), 0);
 }
@@ -45,7 +48,9 @@ fn standalone_log_and_retrieve_events() {
     let client = AuditLedgerClient::new(&env, &contract_id);
 
     env.mock_all_auths();
-    client.initialize(&owner, &1000);
+    let mut owners = Vec::new(&env);
+    owners.push_back(owner.clone());
+    client.initialize(&owners, &1000);
 
     // Log events with various metadata sizes
     let small_meta = Bytes::from_slice(&env, b"small");
@@ -78,7 +83,9 @@ fn standalone_governance_operations() {
     let client = AuditLedgerClient::new(&env, &contract_id);
 
     env.mock_all_auths();
-    client.initialize(&owner, &100);
+    let mut owners = Vec::new(&env);
+    owners.push_back(owner.clone());
+    client.initialize(&owners, &100);
 
     // Set global max logs
     client.set_global_max_logs(&owner, &500);
@@ -104,7 +111,9 @@ fn standalone_cap_management() {
     let client = AuditLedgerClient::new(&env, &contract_id);
 
     env.mock_all_auths();
-    client.initialize(&owner, &100);
+    let mut owners = Vec::new(&env);
+    owners.push_back(owner.clone());
+    client.initialize(&owners, &100);
 
     let payment = symbol_short!("payment");
 
@@ -136,7 +145,9 @@ fn standalone_ownership_transfer() {
     let client = AuditLedgerClient::new(&env, &contract_id);
 
     env.mock_all_auths();
-    client.initialize(&owner, &100);
+    let mut owners = Vec::new(&env);
+    owners.push_back(owner.clone());
+    client.initialize(&owners, &100);
 
     // Transfer ownership
     client.transfer_ownership(&owner, &new_owner);
@@ -159,7 +170,9 @@ fn standalone_pause_unpause() {
     let client = AuditLedgerClient::new(&env, &contract_id);
 
     env.mock_all_auths();
-    client.initialize(&owner, &100);
+    let mut owners = Vec::new(&env);
+    owners.push_back(owner.clone());
+    client.initialize(&owners, &100);
 
     // Pause contract
     client.pause(&owner);
@@ -186,7 +199,9 @@ fn standalone_hash_chain_integrity() {
     let client = AuditLedgerClient::new(&env, &contract_id);
 
     env.mock_all_auths();
-    client.initialize(&owner, &100);
+    let mut owners = Vec::new(&env);
+    owners.push_back(owner.clone());
+    client.initialize(&owners, &100);
 
     // Log multiple events
     for i in 0u8..10 {
@@ -212,7 +227,9 @@ fn standalone_event_emission_modes() {
     let client = AuditLedgerClient::new(&env, &contract_id);
 
     env.mock_all_auths();
-    client.initialize(&owner, &100);
+    let mut owners = Vec::new(&env);
+    owners.push_back(owner.clone());
+    client.initialize(&owners, &100);
 
     // Test index-only mode
     client.set_event_emission_mode(&owner, &1);
@@ -240,14 +257,20 @@ fn standalone_low_cost_mode() {
     let client = AuditLedgerClient::new(&env, &contract_id);
 
     env.mock_all_auths();
-    client.initialize(&owner, &100);
+    let mut owners = Vec::new(&env);
+    owners.push_back(owner.clone());
+    client.initialize(&owners, &100);
 
     // Enable low-cost mode
     client.set_low_cost_mode(&owner, &true);
     assert!(client.is_low_cost_mode());
 
     // Log event in low-cost mode
-    client.log_event(&submitter, &symbol_short!("test"), &Bytes::from_slice(&env, b"data"));
+    client.log_event(
+        &submitter,
+        &symbol_short!("test"),
+        &Bytes::from_slice(&env, b"data"),
+    );
     assert_eq!(client.total_events(), 1);
 
     // Disable low-cost mode
@@ -265,7 +288,9 @@ fn standalone_event_signatures() {
     let client = AuditLedgerClient::new(&env, &contract_id);
 
     env.mock_all_auths();
-    client.initialize(&owner, &100);
+    let mut owners = Vec::new(&env);
+    owners.push_back(owner.clone());
+    client.initialize(&owners, &100);
 
     // Log event with signature
     let sig_payload = Bytes::from_slice(&env, &[0u8; 96]);
@@ -304,14 +329,14 @@ fn testnet_deploy_and_initialize() {
     // let rpc_url = std::env::var("STELLAR_RPC_URL").unwrap();
     // let network_passphrase = std::env::var("STELLAR_NETWORK_PASSPHRASE").unwrap();
     // let secret_key = std::env::var("TESTNET_SECRET_KEY").unwrap();
-    // 
+    //
     // let env = Env::from_network(rpc_url, network_passphrase);
     // let owner = Address::from_secret_key(&secret_key);
-    // 
+    //
     // // Deploy contract
     // let contract_id = deploy_contract(&env);
     // let client = AuditLedgerClient::new(&env, &contract_id);
-    // 
+    //
     // client.initialize(&owner, &1000);
     // assert_eq!(client.total_events(), 0);
 }
@@ -366,7 +391,7 @@ fn fund_account_with_friendbot(account_address: &Address) {
     // 1. Call friendbot API with account address
     // 2. Wait for funding confirmation
     // 3. Return success/failure
-    // 
+    //
     // Example API call:
     // POST https://friendbot.stellar.org
     // Body: { "address": "G..." }

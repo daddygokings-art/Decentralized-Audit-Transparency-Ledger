@@ -1,6 +1,8 @@
 "use client";
 import Link from "next/link";
 import { usePathname } from "next/navigation";
+import { Sun, Moon } from "lucide-react";
+import { useTheme } from "@/components/ThemeProvider";
 
 const NAV = [
   { href: "/", label: "Dashboard" },
@@ -11,6 +13,7 @@ const NAV = [
 
 export default function Nav() {
   const path = usePathname();
+  const { theme, toggle } = useTheme();
   return (
     <nav
       style={{
@@ -39,6 +42,14 @@ export default function Nav() {
           {label}
         </Link>
       ))}
+      <button
+        onClick={toggle}
+        aria-label={theme === "dark" ? "Switch to light mode" : "Switch to dark mode"}
+        className="secondary"
+        style={{ marginLeft: "auto", padding: "6px 10px", display: "flex", alignItems: "center" }}
+      >
+        {theme === "dark" ? <Sun size={16} /> : <Moon size={16} />}
+      </button>
     </nav>
   );
 }

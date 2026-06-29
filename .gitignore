@@ -66,3 +66,20 @@ logs/
 *.key
 *.p12
 *.pfx
+
+# Benchmark / profiling outputs
+docs/fees-benchmark.txt
+*.profdata
+*.profraw
+
+# Python virtual envs & local build
+.python-version
+*.whl
+build/
+
+# TypeScript declaration map
+*.tsbuildinfo
+
+# Editor local history
+.history/
+.idea/workspace.xml

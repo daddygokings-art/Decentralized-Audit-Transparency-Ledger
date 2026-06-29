@@ -11,7 +11,9 @@ fn create_ledger(global_max_logs: u32) -> (Env, Address, AuditLedgerClient<'stat
     let client = AuditLedgerClient::new(&env, &contract_id);
 
     env.mock_all_auths();
-    client.initialize(&owner, &global_max_logs);
+    let mut owners = Vec::new(&env);
+    owners.push_back(owner.clone());
+    client.initialize(&owners, &global_max_logs);
     (env, owner, client)
 }
 
@@ -55,7 +57,7 @@ fn log_interleaved_round(
         client.log_event(
             &submitter,
             &event_type_for(submitter_index),
-            &metadata_for(env, submitter_index, sequence),
+            &metadata_for(env, submitter_index, sequence), &None, &None, &false,
         );
     }
 }
@@ -158,7 +160,7 @@ fn concurrent_cap_removal_and_logging_same_type() {
         client.log_event(
             &submitter,
             &event_type,
-            &metadata_for(&env, submitter_index, sequence),
+            &metadata_for(&env, submitter_index, sequence), &None, &None, &false,
         );
     }
 
