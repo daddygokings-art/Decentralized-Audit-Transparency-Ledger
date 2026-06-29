@@ -96,6 +96,8 @@ pub enum DataKey {
     GlobalMaxLogs,
     /// Paused flag: when true, write operations are blocked.
     Paused,
+    /// Timestamp when the contract was paused.
+    PausedSince,
     /// Blocked submitters cannot submit events (issue #141).
     SubmitterBlocklist(Address),
     /// If true, allowlist mode is enabled (issue #141).
@@ -159,12 +161,16 @@ pub enum DataKey {
     /// TTL configuration (#121): number of ledgers after which persistent events are eligible for expiry.
     /// Absent = TTL disabled (instance storage, no expiry).
     EventTtl,
-    /// Submitter blocklist (#141): Address → bool.
-    SubmitterBlocklist(Address),
-    /// Allowlist mode flag (#141).
-    AllowlistMode,
-    /// Submitter allowlist (#141): Address → bool.
-    SubmitterAllowlist(Address),
+    /// Contract schema version (incremented on upgrades).
+    ContractVersion,
+    /// Maximum category Symbol length in bytes (governance-configurable).
+    CategoryMaxLen,
+    /// Reentrancy guard for log_event (issue #61).
+    LogEventReentrancyGuard,
+    /// Content hash → event index for deduplication.
+    EventContentHash(BytesN<32>),
+    /// Packed global runtime state (issue #114).
+    RuntimeState,
 }
 
 #[contracterror]
@@ -261,6 +267,14 @@ pub enum ContractError {
     InvalidPaginationParams = 21,
     InvalidWasmHash = 22,
     SubmitterBlocked = 23,
+    /// **Code 24**: Event category Symbol exceeds the configured maximum length.
+    CategoryTooLong = 24,
+    /// **Code 25**: Reentrant call into log_event detected.
+    ReentrancyDetected = 25,
+    /// **Code 26**: Event type Symbol length is outside the valid range (1–32 bytes).
+    InvalidEventTypeLength = 26,
+    /// **Code 27**: Event type Symbol contains invalid characters (only [a-zA-Z0-9_] allowed).
+    InvalidEventTypeChars = 27,
 }
 
 #[contracttype]
@@ -569,15 +583,16 @@ impl AuditLedger {
     /// `submitter`, and `metadata`) are deduplicated: the second call returns the
     /// existing event's ID without storing a new event.
     /// Set `force = true` to bypass deduplication and always store a new event.
-    #[allow(deprecated)]
-    // Backward-compatible 3-arg API.
     pub fn log_event(
         env: Env,
         submitter: Address,
         event_type: Symbol,
         metadata: Bytes,
+        category: Option<Symbol>,
+        sub_event_type: Option<Symbol>,
+        force: bool,
     ) -> BytesN<32> {
-        Self::log_event_with_hierarchy(env, submitter, event_type, metadata, None, None)
+        Self::log_event_with_hierarchy(env, submitter, event_type, metadata, category, sub_event_type, force)
     }
 
     // Extended API with optional hierarchy fields.
@@ -687,16 +702,29 @@ impl AuditLedger {
             .get::<_, u32>(&DataKey::EventMetadataMaxSize(event_type.clone()))
         {
             v
-        } else if rs.global_metadata_max_size > 0 {
-            rs.global_metadata_max_size
         } else {
-            DEFAULT_MAX_METADATA_SIZE
+            let global_meta_max: u32 = env
+                .storage()
+                .instance()
+                .get(&DataKey::GlobalMetadataMaxSize)
+                .unwrap_or(0);
+            if global_meta_max > 0 {
+                global_meta_max
+            } else {
+                DEFAULT_MAX_METADATA_SIZE
+            }
         };
         if metadata.len() > max_meta {
             panic_with_error!(&env, ContractError::MetadataTooLarge);
         }
 
-        if rs.total_events >= rs.global_max_logs {
+        let mut cfg: Config = env
+            .storage()
+            .instance()
+            .get(&DataKey::Config)
+            .unwrap_or_else(|| panic_with_error!(&env, ContractError::ContractNotInitialized));
+
+        if cfg.total_events >= cfg.global_max_logs {
             panic_with_error!(&env, ContractError::GlobalMaxLogsReached);
         }
 
@@ -801,6 +829,11 @@ impl AuditLedger {
         env.storage()
             .instance()
             .set(&DataKey::EventOrder(index), &event_id);
+
+        // Store content hash for deduplication
+        env.storage()
+            .instance()
+            .set(&DataKey::EventContentHash(content_hash), &index);
 
         // --- issue #56: store lightweight header separately ---
         let header = EventHeader {
@@ -941,6 +974,7 @@ impl AuditLedger {
             metadata,
             None,
             None,
+            false,
         );
 
         env.storage()
@@ -1548,6 +1582,7 @@ impl AuditLedger {
             submitter: current_event.submitter.clone(),
             metadata: new_metadata.clone(),
             sub_event_type: current_event.sub_event_type.clone(),
+            version: current_event.version,
             event_hash: updated_event_hash.clone(),
             prev_hash: prev_hash.clone(),
         };
@@ -1883,7 +1918,6 @@ impl AuditLedger {
         Self::require_initialized(&env);
         caller.require_auth();
         Self::require_owner_or_multisig(&env, &caller);
-        let already_paused = env.storage().instance().get::<_, bool>(&DataKey::Paused).unwrap_or(false);
         env.storage().instance().set(&DataKey::Paused, &true);
         env.events()
             .publish((Symbol::new(&env, "contract_paused"),), (caller,));
@@ -2137,6 +2171,35 @@ impl AuditLedger {
         removed
     }
 
+    fn current_contract_version(env: &Env) -> u32 {
+        env.storage()
+            .instance()
+            .get(&DataKey::ContractVersion)
+            .unwrap_or(1u32)
+    }
+
+    /// Validate event_type Symbol for issue #63.
+    /// Rejects empty symbols, symbols longer than 32 bytes, and symbols containing
+    /// characters outside [a-zA-Z0-9_].
+    fn validate_event_type(env: &Env, event_type: &Symbol) {
+        let s = event_type.to_string();
+        let bytes = s.to_bytes();
+        let len = bytes.len();
+        if len == 0 || len > 32 {
+            panic_with_error!(env, ContractError::InvalidEventTypeLength);
+        }
+        for i in 0..len {
+            let c = bytes.get(i).unwrap();
+            let valid = (c >= b'a' && c <= b'z')
+                || (c >= b'A' && c <= b'Z')
+                || (c >= b'0' && c <= b'9')
+                || c == b'_';
+            if !valid {
+                panic_with_error!(env, ContractError::InvalidEventTypeChars);
+            }
+        }
+    }
+
     fn effective_low_cost_mode(env: &Env) -> bool {
         env.storage()
             .instance()
@@ -2192,13 +2255,14 @@ impl AuditLedger {
         if signature_payload.len() != 96 {
             panic_with_error!(&env, ContractError::InvalidSignature);
         }
-        let event_id = Self::log_event(
+        let event_id = Self::log_event_with_hierarchy(
             env.clone(),
             submitter,
             event_type,
             metadata.clone(),
             category,
             sub_event_type,
+            false,
         );
         env.storage().instance().set(
             &DataKey::EventSignature(event_id.clone()),

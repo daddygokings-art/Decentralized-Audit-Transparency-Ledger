@@ -82,7 +82,7 @@ fn run_random_sequence(env: &Env, owner: &Address, client: &AuditLedgerClient<'_
                 let _ = client.try_log_event(
                     &Address::generate(env),
                     &symbol(env, event_type),
-                    &bytes(env, metadata),
+                    &bytes(env, metadata), &None, &None, &false
                 );
             }
             Op::SetCap { event_type, cap } => {
@@ -132,7 +132,7 @@ proptest! {
             let _ = client.try_log_event(
                 &Address::generate(&env),
                 &symbol(&env, &event_type),
-                &bytes(&env, &metadata),
+                &bytes(&env, &metadata), &None, &None, &false
             );
             if !seen_types.iter().any(|v| v == &event_type) {
                 seen_types.push(event_type.clone());
@@ -158,7 +158,7 @@ proptest! {
             let _ = client.try_log_event(
                 &Address::generate(&env),
                 &symbol(&env, &event_type),
-                &bytes(&env, &metadata),
+                &bytes(&env, &metadata), &None, &None, &false
             );
         }
 
@@ -184,7 +184,7 @@ proptest! {
             if let Ok(id) = client.try_log_event(
                 &Address::generate(&env),
                 &symbol(&env, &event_type),
-                &bytes(&env, &metadata),
+                &bytes(&env, &metadata), &None, &None, &false
             ) {
                 let event = client.get_event(&id);
                 original_events.push_back((id, event));
@@ -207,7 +207,7 @@ proptest! {
             let result = client.try_log_event(
                 &Address::generate(&env),
                 &symbol(&env, &event_type),
-                &bytes(&env, &metadata),
+                &bytes(&env, &metadata), &None, &None, &false
             );
             assert!(result.is_ok() || result.is_err(), "calls should safely return result");
         }
@@ -215,7 +215,7 @@ proptest! {
         let extra = client.try_log_event(
             &Address::generate(&env),
             &symbol(&env, &event_type),
-            &bytes(&env, &metadata),
+            &bytes(&env, &metadata), &None, &None, &false
         );
         if cap == 0 {
             assert!(extra.is_err(), "zero cap must reject all logs");
@@ -258,7 +258,7 @@ proptest! {
             let _ = client.try_log_event(
                 &Address::generate(&env),
                 &symbol(&env, &event_type),
-                &bytes(&env, &metadata),
+                &bytes(&env, &metadata), &None, &None, &false
             );
         }
 
@@ -285,7 +285,7 @@ proptest! {
         let result = client.try_log_event(
             &Address::generate(&env),
             &symbol(&env, &event_type),
-            &bytes(&env, &metadata),
+            &bytes(&env, &metadata), &None, &None, &false
         );
 
         if result.is_ok() {
@@ -309,7 +309,7 @@ proptest! {
             let _ = client.try_log_event(
                 &Address::generate(&env),
                 &symbol(&env, &event_type),
-                &bytes(&env, &metadata),
+                &bytes(&env, &metadata), &None, &None, &false
             );
         }
 
