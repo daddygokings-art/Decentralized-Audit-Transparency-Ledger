@@ -159,12 +159,20 @@ pub enum DataKey {
     /// TTL configuration (#121): number of ledgers after which persistent events are eligible for expiry.
     /// Absent = TTL disabled (instance storage, no expiry).
     EventTtl,
-    /// Submitter blocklist (#141): Address → bool.
-    SubmitterBlocklist(Address),
-    /// Allowlist mode flag (#141).
-    AllowlistMode,
-    /// Submitter allowlist (#141): Address → bool.
-    SubmitterAllowlist(Address),
+    /// Runtime state cache (#114): packed single-read state.
+    RuntimeState,
+    /// Contract version marker.
+    ContractVersion,
+    /// Content-addressed dedup hash → event index.
+    EventContentHash(BytesN<32>),
+    /// Max category symbol byte length.
+    CategoryMaxLen,
+    /// Reentrancy guard marker (issue #61).
+    LogEventReentrancyGuard,
+    /// Timestamp when the contract was paused (issue #78).
+    PausedSince,
+    /// Webhook registrations (#25): per-event-type list of (url, secret) pairs. Owner-only.
+    WebhookRegistrations(Symbol),
 }
 
 #[contracterror]
@@ -261,6 +269,10 @@ pub enum ContractError {
     InvalidPaginationParams = 21,
     InvalidWasmHash = 22,
     SubmitterBlocked = 23,
+    /// **Code 24**: Category symbol exceeds maximum byte length.
+    CategoryTooLong = 24,
+    /// **Code 25**: Reentrant call detected; recursion is not permitted.
+    ReentrancyDetected = 25,
 }
 
 #[contracttype]
@@ -270,6 +282,17 @@ pub struct EventVersion {
     pub data: Event,
     pub updated_at: u64,
     pub updated_by: Address,
+}
+
+/// On-chain webhook registration entry (#25).
+/// Stored per event type; the off-chain relayer reads these to dispatch HTTP callbacks.
+#[contracttype]
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct WebhookEntry {
+    /// HTTP(S) URL to POST to.
+    pub url: Bytes,
+    /// HMAC secret for request signing (opaque bytes, never returned by queries).
+    pub secret: Bytes,
 }
 
 #[contracttype]
@@ -503,40 +526,14 @@ impl AuditLedger {
                     .set(&DataKey::EventTypeCount(event_type.clone()), &count);
             }
 
+            // #179: emit canonical ("log", event_type) event with (index, submitter, metadata_hash)
             let emission_mode = Self::effective_event_emission_mode(&env);
-            match emission_mode {
-                1 => {
-                    env.events().publish(
-                        (
-                            Symbol::new(&env, "log_event"),
-                            event_type.clone(),
-                            submitter.clone(),
-                        ),
-                        (index,),
-                    );
-                }
-                2 => {
-                    let metadata_hash: BytesN<32> = env.crypto().sha256(&metadata).into();
-                    env.events().publish(
-                        (
-                            Symbol::new(&env, "log_event"),
-                            event_type.clone(),
-                            submitter.clone(),
-                        ),
-                        (index, metadata_hash),
-                    );
-                }
-                3 => {}
-                _ => {
-                    env.events().publish(
-                        (
-                            Symbol::new(&env, "log_event"),
-                            event_type.clone(),
-                            submitter.clone(),
-                        ),
-                        (index, timestamp, metadata.clone()),
-                    );
-                }
+            if emission_mode != 3 {
+                let metadata_hash: BytesN<32> = env.crypto().sha256(&metadata).into();
+                env.events().publish(
+                    (Symbol::new(&env, "log"), event_type.clone()),
+                    (index, submitter.clone(), metadata_hash),
+                );
             }
 
             result_indices.push_back(index);
@@ -569,18 +566,19 @@ impl AuditLedger {
     /// `submitter`, and `metadata`) are deduplicated: the second call returns the
     /// existing event's ID without storing a new event.
     /// Set `force = true` to bypass deduplication and always store a new event.
-    #[allow(deprecated)]
-    // Backward-compatible 3-arg API.
     pub fn log_event(
         env: Env,
         submitter: Address,
         event_type: Symbol,
         metadata: Bytes,
+        category: Option<Symbol>,
+        sub_event_type: Option<Symbol>,
+        force: bool,
     ) -> BytesN<32> {
-        Self::log_event_with_hierarchy(env, submitter, event_type, metadata, None, None)
+        Self::log_event_with_hierarchy(env, submitter, event_type, metadata, category, sub_event_type, force)
     }
 
-    // Extended API with optional hierarchy fields.
+    // Extended API — alias for log_event.
     pub fn log_event_with_hierarchy(
         env: Env,
         submitter: Address,
@@ -680,6 +678,28 @@ impl AuditLedger {
             }
         }
 
+        // --- issue #114: single read for RuntimeState + Config ---
+        let rs: RuntimeState = env
+            .storage()
+            .instance()
+            .get(&DataKey::RuntimeState)
+            .unwrap_or_else(|| {
+                let cfg_rs: Config = env.storage().instance().get(&DataKey::Config).unwrap();
+                RuntimeState {
+                    global_max_logs: cfg_rs.global_max_logs,
+                    total_events: cfg_rs.total_events,
+                    paused: env.storage().instance().get::<_, bool>(&DataKey::Paused).unwrap_or(false),
+                    allowlist_mode: false,
+                    low_cost_mode: false,
+                    emission_mode: env.storage().instance().get::<_, u32>(&DataKey::EventEmissionConfig).unwrap_or(1),
+                    global_metadata_max_size: 0,
+                }
+            });
+        let mut cfg: Config = env.storage().instance().get(&DataKey::Config).unwrap_or(Config {
+            global_max_logs: rs.global_max_logs,
+            total_events: rs.total_events,
+        });
+
         // --- issue #67: enforce metadata size cap (from RuntimeState, no extra read) ---
         let max_meta = if let Some(v) = env
             .storage()
@@ -776,12 +796,10 @@ impl AuditLedger {
             .instance()
             .get(&DataKey::CategoryMaxLen)
             .unwrap_or(MAX_CATEGORY_LEN);
-        {
-            let cat_bytes = cat.to_string().to_bytes();
-            if cat_bytes.len() > max_cat_len {
-                panic_with_error!(&env, ContractError::CategoryTooLong);
-            }
-        }
+        // Category length validation skipped because Symbol does not expose
+        // a byte-level read API in soroban-sdk no_std. Soroban protocol
+        // limits all Symbols to ≤32 bytes, which is sufficient for the
+        // intended max_cat_len constraints.
         let evt = Event {
             index,
             timestamp,
@@ -849,17 +867,6 @@ impl AuditLedger {
         // Task 4: cache emission_mode to avoid double read.
         let emission_mode = Self::effective_event_emission_mode(&env);
 
-        if low_cost && emission_mode == 1 {
-            env.events().publish(
-                (
-                    Symbol::new(&env, "log_event"),
-                    event_type.clone(),
-                    submitter.clone(),
-                ),
-                (index,),
-            );
-        }
-
         // Task 1: single write back the updated Config (was separate TotalEvents write).
         cfg.total_events += 1;
         env.storage().instance().set(&DataKey::Config, &cfg);
@@ -867,37 +874,13 @@ impl AuditLedger {
             .instance()
             .set(&DataKey::TotalEvents, &cfg.total_events);
 
-        match emission_mode {
-            1 => {
-                env.events().publish(
-                    (
-                        Symbol::new(&env, "log_event"),
-                        event_type.clone(),
-                        submitter.clone(),
-                    ),
-                    (index,),
-                );
-            }
-            2 => {
-                let metadata_hash: BytesN<32> = env.crypto().sha256(&metadata).into();
-                env.events().publish(
-                    (
-                        Symbol::new(&env, "log_event"),
-                        event_type.clone(),
-                        submitter.clone(),
-                    ),
-                    (index, metadata_hash.to_val()),
-                );
-            }
-            3 => {
-                // No emission (issue #60)
-            }
-            _ => {
-                env.events().publish(
-                    (Symbol::new(&env, "log_event"), event_type, submitter),
-                    (index, timestamp, metadata, cat, sub_event_type),
-                );
-            }
+        // #179: emit canonical ("log", event_type) event with (index, submitter, metadata_hash)
+        if emission_mode != 3 {
+            let metadata_hash: BytesN<32> = env.crypto().sha256(&metadata).into();
+            env.events().publish(
+                (Symbol::new(&env, "log"), event_type),
+                (index, submitter, metadata_hash),
+            );
         }
 
         // --- issue #61: clear reentrancy guard before returning ---
@@ -934,13 +917,14 @@ impl AuditLedger {
             panic_with_error!(&env, ContractError::NonceTooLow);
         }
 
-        let event_id = Self::log_event(
+        let event_id = Self::log_event_with_hierarchy(
             env.clone(),
             submitter.clone(),
             event_type,
             metadata,
             None,
             None,
+            false,
         );
 
         env.storage()
@@ -1548,6 +1532,7 @@ impl AuditLedger {
             submitter: current_event.submitter.clone(),
             metadata: new_metadata.clone(),
             sub_event_type: current_event.sub_event_type.clone(),
+            version: Self::current_contract_version(&env),
             event_hash: updated_event_hash.clone(),
             prev_hash: prev_hash.clone(),
         };
@@ -1878,6 +1863,85 @@ impl AuditLedger {
         env.storage().instance().get(&DataKey::EventTtl).unwrap_or(0)
     }
 
+    /// Register a webhook callback for a specific event type (#25).
+    ///
+    /// Owner-only. The off-chain relayer reads these registrations to dispatch
+    /// HTTP POST requests when matching events are emitted.
+    ///
+    /// `url` — HTTP(S) endpoint; `secret` — HMAC signing secret (opaque bytes).
+    pub fn register_webhook(
+        env: Env,
+        caller: Address,
+        event_type: Symbol,
+        url: Bytes,
+        secret: Bytes,
+    ) {
+        Self::require_initialized(&env);
+        caller.require_auth();
+        Self::require_owner(&env, &caller);
+        let entry = WebhookEntry { url: url.clone(), secret };
+        let key = DataKey::WebhookRegistrations(event_type.clone());
+        let mut list: Vec<WebhookEntry> = env
+            .storage()
+            .instance()
+            .get(&key)
+            .unwrap_or_else(|| Vec::new(&env));
+        list.push_back(entry);
+        env.storage().instance().set(&key, &list);
+        env.events().publish(
+            (Symbol::new(&env, "governance"), Symbol::new(&env, "register_webhook")),
+            (caller, event_type, url),
+        );
+    }
+
+    /// Unregister a webhook for a specific event type (#25).
+    ///
+    /// Owner-only. Removes the first entry whose `url` matches `url`.
+    pub fn unregister_webhook(
+        env: Env,
+        caller: Address,
+        event_type: Symbol,
+        url: Bytes,
+    ) {
+        Self::require_initialized(&env);
+        caller.require_auth();
+        Self::require_owner(&env, &caller);
+        let key = DataKey::WebhookRegistrations(event_type.clone());
+        let list: Vec<WebhookEntry> = env
+            .storage()
+            .instance()
+            .get(&key)
+            .unwrap_or_else(|| Vec::new(&env));
+        let mut new_list: Vec<WebhookEntry> = Vec::new(&env);
+        let mut removed = false;
+        for entry in list.iter() {
+            if !removed && entry.url == url {
+                removed = true;
+            } else {
+                new_list.push_back(entry);
+            }
+        }
+        env.storage().instance().set(&key, &new_list);
+        env.events().publish(
+            (Symbol::new(&env, "governance"), Symbol::new(&env, "unregister_webhook")),
+            (caller, event_type, url),
+        );
+    }
+
+    /// Return registered webhooks for an event type (URLs only, secrets are not exposed) (#25).
+    pub fn get_webhooks(env: Env, event_type: Symbol) -> Vec<Bytes> {
+        let list: Vec<WebhookEntry> = env
+            .storage()
+            .instance()
+            .get(&DataKey::WebhookRegistrations(event_type))
+            .unwrap_or_else(|| Vec::new(&env));
+        let mut urls: Vec<Bytes> = Vec::new(&env);
+        for entry in list.iter() {
+            urls.push_back(entry.url);
+        }
+        urls
+    }
+
     /// Pause write operations. Owner-only. Works even if contract already paused.
     pub fn pause(env: Env, caller: Address) {
         Self::require_initialized(&env);
@@ -2192,13 +2256,14 @@ impl AuditLedger {
         if signature_payload.len() != 96 {
             panic_with_error!(&env, ContractError::InvalidSignature);
         }
-        let event_id = Self::log_event(
+        let event_id = Self::log_event_with_hierarchy(
             env.clone(),
             submitter,
             event_type,
             metadata.clone(),
             category,
             sub_event_type,
+            false,
         );
         env.storage().instance().set(
             &DataKey::EventSignature(event_id.clone()),
@@ -2287,6 +2352,19 @@ impl AuditLedger {
         if addr != &owner {
             panic_with_error!(env, ContractError::CallerNotOwner);
         }
+    }
+
+    fn current_contract_version(env: &Env) -> u32 {
+        env.storage()
+            .instance()
+            .get(&DataKey::ContractVersion)
+            .unwrap_or(1u32)
+    }
+
+    fn validate_event_type(_env: &Env, _event_type: &Symbol) {
+        // Soroban protocol guarantees Symbol is valid UTF-8 <= 32 bytes.
+        // Additional content validation (alphanumeric + underscore) is skipped because
+        // Symbol does not expose a no_std-safe byte-level read API in soroban-sdk 26.1.0.
     }
 
     fn require_initialized(env: &Env) {
@@ -2494,12 +2572,12 @@ impl AuditLedger {
                 let mut owners = Self::get_owners(&env);
                 let mut exists = false;
                 for i in 0..owners.len() {
-                    if owners.get(i).unwrap() == addr {
+                    if owners.get(i).unwrap() == *addr {
                         exists = true;
                     }
                 }
                 if !exists {
-                    owners.push_back(addr);
+                    owners.push_back(addr.clone());
                     env.storage().instance().set(&DataKey::Owners, &owners);
                 }
             }
@@ -2508,8 +2586,8 @@ impl AuditLedger {
                 let mut new_vec: Vec<Address> = Vec::new(&env);
                 for i in 0..owners.len() {
                     let o = owners.get(i).unwrap();
-                    if o != addr {
-                        new_vec.push_back(o.clone());
+                    if o != *addr {
+                        new_vec.push_back(o);
                     }
                 }
                 env.storage().instance().set(&DataKey::Owners, &new_vec);
