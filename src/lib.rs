@@ -593,6 +593,23 @@ impl AuditLedger {
         Self::require_initialized(&env);
         submitter.require_auth();
 
+        // --- issue #61: reentrancy guard ---
+        // Temporary storage is scoped to the current transaction; if a
+        // reentrant call arrives before the key is cleared the guard fires.
+        if env
+            .storage()
+            .temporary()
+            .has(&DataKey::LogEventReentrancyGuard)
+        {
+            panic_with_error!(&env, ContractError::ReentrancyDetected);
+        }
+        env.storage()
+            .temporary()
+            .set(&DataKey::LogEventReentrancyGuard, &true);
+
+        // --- issue #63: validate event_type Symbol ---
+        Self::validate_event_type(&env, &event_type);
+
         // Reject writes when contract is paused.
         if let Some(true) = env.storage().instance().get::<_, bool>(&DataKey::Paused) {
             panic_with_error!(&env, ContractError::ContractPaused);
@@ -882,6 +899,11 @@ impl AuditLedger {
                 );
             }
         }
+
+        // --- issue #61: clear reentrancy guard before returning ---
+        env.storage()
+            .temporary()
+            .remove(&DataKey::LogEventReentrancyGuard);
 
         event_id
     }
@@ -1607,7 +1629,7 @@ impl AuditLedger {
     }
 
     pub fn get_event_history(env: Env, index: u32) -> Vec<EventVersion> {
-        let total = Self::total_events(&env);
+        let total = Self::total_events(env.clone());
         if index >= total {
             return Vec::new(&env);
         }
@@ -1632,11 +1654,13 @@ impl AuditLedger {
             .unwrap();
 
         let mut history = Vec::new(&env);
+        let ts = event.timestamp;
+        let sub = event.submitter.clone();
         history.push_back(EventVersion {
             version: 0,
             data: event,
-            updated_at: event.timestamp,
-            updated_by: event.submitter.clone(),
+            updated_at: ts,
+            updated_by: sub,
         });
         history
     }
@@ -1689,6 +1713,8 @@ impl AuditLedger {
             panic_with_error!(&env, ContractError::ContractPaused);
         }
         Self::require_owner_or_multisig(&env, &caller);
+        // --- issue #63: validate event_type Symbol ---
+        Self::validate_event_type(&env, &event_type);
         env.storage()
             .instance()
             .set(&DataKey::EventCapSet(event_type.clone()), &true);
@@ -2464,7 +2490,7 @@ impl AuditLedger {
             ProposalAction::TransferOwnership(new_owner) => {
                 env.storage().instance().set(&DataKey::Owner, &new_owner);
             }
-            ProposalAction::AddOwner(addr) => {
+            ProposalAction::AddOwner(ref addr) => {
                 let mut owners = Self::get_owners(&env);
                 let mut exists = false;
                 for i in 0..owners.len() {
@@ -2477,7 +2503,7 @@ impl AuditLedger {
                     env.storage().instance().set(&DataKey::Owners, &owners);
                 }
             }
-            ProposalAction::RemoveOwner(addr) => {
+            ProposalAction::RemoveOwner(ref addr) => {
                 let mut owners = Self::get_owners(&env);
                 let mut new_vec: Vec<Address> = Vec::new(&env);
                 for i in 0..owners.len() {
@@ -2684,18 +2710,18 @@ impl AuditLedger {
                 return;
             }
         }
-        counts.push_back(&(event_type, 1u32));
+        counts.push_back((event_type, 1u32));
     }
 
     fn increment_submitter_count(env: &Env, counts: &mut Vec<(Address, u32)>, submitter: Address) {
         for idx in 0..counts.len() {
             let pair: (Address, u32) = counts.get(idx).unwrap();
             if pair.0 == submitter {
-                counts.set(idx, &(submitter.clone(), pair.1 + 1));
+                counts.set(idx, (submitter.clone(), pair.1 + 1));
                 return;
             }
         }
-        counts.push_back(&(submitter, 1u32));
+        counts.push_back((submitter, 1u32));
     }
 
     fn increment_address_count(
@@ -2707,11 +2733,11 @@ impl AuditLedger {
             let pair: (Address, u32) = counts.get(idx).unwrap();
             if pair.0 == submitter {
                 let next = pair.1 + 1;
-                counts.set(idx, &(submitter.clone(), next));
+                counts.set(idx, (submitter.clone(), next));
                 return next;
             }
         }
-        counts.push_back(&(submitter, 1u32));
+        counts.push_back((submitter, 1u32));
         1
     }
 
@@ -2724,11 +2750,11 @@ impl AuditLedger {
             let pair: (Symbol, u32) = counts.get(idx).unwrap();
             if pair.0 == event_type {
                 let next = pair.1 + 1;
-                counts.set(idx, &(event_type.clone(), next));
+                counts.set(idx, (event_type.clone(), next));
                 return next;
             }
         }
-        counts.push_back(&(event_type, 1u32));
+        counts.push_back((event_type, 1u32));
         1
     }
 
