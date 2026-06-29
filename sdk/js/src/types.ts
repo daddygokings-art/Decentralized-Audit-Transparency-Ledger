@@ -37,9 +37,11 @@ export enum ContractError {
 
 export class AuditLedgerError extends Error {
   code?: number;
-  constructor(message: string, code?: number) {
+  status?: number;
+  constructor(message: string, code?: number, status?: number) {
     super(message);
     this.name = 'AuditLedgerError';
     this.code = code;
+    this.status = status;
   }
 }

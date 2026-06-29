@@ -1,10 +1,11 @@
-import { PubSub } from "graphql-subscriptions";
+import { PubSub, withFilter } from "graphql-subscriptions";
 
 export const pubsub = new PubSub();
-const EVENT_LOGGED = "EVENT_LOGGED";
+export const EVENT_LOGGED = "EVENT_LOGGED";
 
 // In-memory mock store (replace with JS SDK calls in production)
 interface EventRecord {
+  id: string;
   index: number;
   timestamp: number;
   event_type: string;
@@ -24,6 +25,14 @@ function matchesFilter(e: EventRecord, filter: any): boolean {
   if (filter.startTime && e.timestamp < filter.startTime) return false;
   if (filter.endTime && e.timestamp > filter.endTime) return false;
   return true;
+}
+
+export function resetEvents() {
+  events.length = 0;
+}
+
+export async function publishEventLogged(event: EventRecord) {
+  await pubsub.publish(EVENT_LOGGED, { eventLogged: event });
 }
 
 export const resolvers = {
@@ -59,6 +68,7 @@ export const resolvers = {
       const prevHash = events.length > 0 ? events[events.length - 1].event_hash : "0".repeat(64);
       const hash = Buffer.from(`${idx}:${eventType}:${submitter}:${metadata}:${now}`).toString("hex").slice(0, 64).padEnd(64, "0");
       const ev: EventRecord = {
+        id: String(idx),
         index: idx,
         timestamp: now,
         event_type: eventType,
@@ -68,33 +78,18 @@ export const resolvers = {
         prev_hash: prevHash,
       };
       events.push(ev);
-      void pubsub.publish(EVENT_LOGGED, { eventLogged: ev });
+      void publishEventLogged(ev);
       return ev;
     },
   },
 
   Subscription: {
     eventLogged: {
-      subscribe: (_: any, { type }: any) => {
-        const asyncIter = pubsub.asyncIterableIterator(EVENT_LOGGED);
-        if (!type) return asyncIter;
-        // Filter by event type
-        return {
-          [Symbol.asyncIterator]() {
-            return {
-              next: async () => {
-                for await (const payload of asyncIter) {
-                  if ((payload as any).eventLogged.event_type === type) {
-                    return { value: payload, done: false };
-                  }
-                }
-                return { value: undefined, done: true };
-              },
-              return: () => Promise.resolve({ value: undefined, done: true }),
-            };
-          },
-        };
-      },
+      subscribe: withFilter(
+        () => pubsub.asyncIterableIterator(EVENT_LOGGED),
+        (payload: { eventLogged: EventRecord } | undefined, variables: { type?: string } | undefined) =>
+          !!payload && (!variables?.type || payload.eventLogged.event_type === variables.type)
+      ),
     },
   },
 };
