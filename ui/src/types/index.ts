@@ -7,6 +7,7 @@ export interface AuditEvent {
   metadata: string; // hex
   event_hash: string; // hex
   prev_hash: string; // hex
+  tx_hash?: string; // Stellar transaction hash (when available)
 }
 
 export interface ContractStats {
