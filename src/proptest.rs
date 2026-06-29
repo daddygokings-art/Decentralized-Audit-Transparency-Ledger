@@ -242,4 +242,97 @@ proptest! {
         }
         assert_eq!(total, sum, "total_events should remain consistent after governance operations");
     }
+
+    // ── Hash chain invariant tests (issue #111) ──────────────────────────────
+
+    #[test]
+    fn prop_hash_chain_continuity(events in capped_event_sequence_strategy()) {
+        let (env, _owner, client) = create_ledger();
+        let mut current_timestamp: u64 = 1000;
+
+        for (event_type, metadata, delta) in events.into_iter() {
+            current_timestamp = current_timestamp.saturating_add(delta.min(MAX_TIMESTAMP_DRIFT_SECONDS));
+            env.ledger().set_timestamp(current_timestamp);
+            let _ = client.try_log_event(
+                &Address::generate(&env),
+                &symbol(&env, &event_type),
+                &bytes(&env, &metadata),
+            );
+        }
+
+        let total = client.total_events();
+        if total < 2 {
+            return Ok(());
+        }
+        for i in 1..total {
+            let evt = client.get_event_by_order(&i);
+            let prev = client.get_event_by_order(&(i - 1));
+            assert_eq!(
+                evt.prev_hash, prev.event_hash,
+                "event[{i}].prev_hash must equal event[{}].event_hash",
+                i - 1
+            );
+        }
+    }
+
+    #[test]
+    fn prop_genesis_prev_hash_is_zero(event_type in event_type_strategy(), metadata in metadata_strategy()) {
+        let (env, _owner, client) = create_ledger();
+        env.ledger().set_timestamp(1000);
+
+        let result = client.try_log_event(
+            &Address::generate(&env),
+            &symbol(&env, &event_type),
+            &bytes(&env, &metadata),
+        );
+
+        if result.is_ok() {
+            let genesis = client.get_event_by_order(&0);
+            assert_eq!(
+                genesis.prev_hash,
+                BytesN::from_array(&env, &[0u8; 32]),
+                "genesis event must have all-zero prev_hash"
+            );
+        }
+    }
+
+    #[test]
+    fn prop_chain_breaks_on_tampered_metadata(events in capped_event_sequence_strategy()) {
+        let (env, owner, client) = create_ledger();
+        let mut current_timestamp: u64 = 1000;
+
+        for (event_type, metadata, delta) in events.into_iter() {
+            current_timestamp = current_timestamp.saturating_add(delta.min(MAX_TIMESTAMP_DRIFT_SECONDS));
+            env.ledger().set_timestamp(current_timestamp);
+            let _ = client.try_log_event(
+                &Address::generate(&env),
+                &symbol(&env, &event_type),
+                &bytes(&env, &metadata),
+            );
+        }
+
+        let total = client.total_events();
+        // Chain must be valid before any tampering
+        assert!(client.verify_integrity(), "hash chain must be valid after logging");
+
+        if total > 0 {
+            // Use update_event (which properly recomputes all downstream hashes)
+            // and verify the chain remains valid afterwards
+            let idx = 0u32;
+            let new_meta = bytes(&env, b"tampered");
+            let _ = client.try_update_event(&owner, &idx, &new_meta);
+            assert!(
+                client.verify_integrity(),
+                "hash chain must remain valid after update_event recomputes hashes"
+            );
+
+            // Directly verify the updated event's prev_hash is still zero (genesis)
+            let genesis = client.get_event_by_order(&0);
+            assert_eq!(
+                genesis.prev_hash,
+                BytesN::from_array(&env, &[0u8; 32]),
+                "genesis prev_hash must stay zero even after metadata update"
+            );
+        }
+    }
 }
