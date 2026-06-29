@@ -22,6 +22,7 @@ const RPC_URL =
 const NETWORK = process.env.NETWORK || "testnet";
 const SCRAPE_INTERVAL_MS = parseInt(process.env.SCRAPE_INTERVAL_MS || "15000", 10);
 const PORT = parseInt(process.env.PORT || "8000", 10);
+const TOP_SUBMITTERS_N = parseInt(process.env.TOP_SUBMITTERS_N || "10", 10);
 
 if (!CONTRACT_ID) {
   console.error("ERROR: CONTRACT_ID environment variable is required.");
@@ -67,6 +68,13 @@ const errorCount = new client.Counter({
 const avgGasCost = new client.Gauge({
   name: "audit_ledger_avg_gas_cost",
   help: "Average fee (stroops) per log_event invocation (sampled)",
+  registers: [registry],
+});
+
+const eventsBySubmitter = new client.Gauge({
+  name: "audit_ledger_events_by_submitter",
+  help: "Number of events per submitter (top-N, configurable via TOP_SUBMITTERS_N)",
+  labelNames: ["submitter"],
   registers: [registry],
 });
 
@@ -154,6 +162,35 @@ async function scrape() {
       } catch {
         // type not yet logged; ignore
       }
+    }
+
+    // per-submitter counts via get_statistics (returns top_submitters Vec<(Address, u32)>)
+    try {
+      const statsVal = await callContract("get_statistics");
+      if (statsVal && statsVal.switch().name === "scvMap") {
+        const statsMap = statsVal.map();
+        const topSubmittersEntry = statsMap && statsMap.find(
+          (e) => e.key().switch().name === "scvSymbol" && e.key().sym() === "top_submitters"
+        );
+        if (topSubmittersEntry) {
+          const submitterVec = topSubmittersEntry.val().vec() || [];
+          // Reset existing labels then set top-N
+          eventsBySubmitter.reset();
+          const topN = submitterVec.slice(0, TOP_SUBMITTERS_N);
+          for (const entry of topN) {
+            if (entry.switch().name === "scvVec") {
+              const pair = entry.vec();
+              if (pair && pair.length === 2) {
+                const addr = pair[0].address ? pair[0].address().toString() : String(pair[0]);
+                const count = pair[1].u32 ? pair[1].u32() : 0;
+                eventsBySubmitter.set({ submitter: addr }, count);
+              }
+            }
+          }
+        }
+      }
+    } catch {
+      // get_statistics not available or parse error; skip submitter metrics
     }
   } catch (err) {
     console.error("Scrape error:", err.message);

@@ -8,7 +8,7 @@ import struct
 import time
 from typing import Any, Generator, Optional
 
-from .models import Event, ContractError, RPCError
+from .models import Event, ContractError, RPCError, Page
 
 try:
     import stellar_sdk
@@ -169,6 +169,7 @@ class AuditLedgerClient:
         })
         return Event.from_dict(result) if isinstance(result, dict) else result
 
+<<<<<<< fix/127-stream-events
     def stream_events(
         self, after_index: int = 0, poll_interval_s: float = 5.0
     ) -> Generator[Event, None, None]:
@@ -188,6 +189,24 @@ class AuditLedgerClient:
                 yield self.get_event_by_order(cursor)
                 cursor += 1
             time.sleep(poll_interval_s)
+=======
+    def get_events(self, offset: int = 0, limit: int = 50) -> "Page[Event]":
+        """Return a paginated slice of all events.
+
+        Args:
+            offset: Zero-based index of the first event to return.
+            limit: Maximum number of events to return.
+
+        Returns:
+            Page[Event] with items, total, offset, and limit fields.
+        """
+        total = self.total_events()
+        items: list[Event] = []
+        end = min(offset + limit, total)
+        for i in range(offset, end):
+            items.append(self.get_event_by_order(i))
+        return Page(items=items, total=total, offset=offset, limit=limit)
+>>>>>>> master
 
     # ── Governance ────────────────────────────────────────────────────────
 

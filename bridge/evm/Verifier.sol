@@ -2,24 +2,24 @@
 pragma solidity ^0.8.24;
 
 /**
- * @title AuditLedger Cross-Chain Verifier (#79)
- * @notice Verifies Stellar AuditLedger event proofs on EVM chains.
+ * @title AuditLedger Cross-Chain Verifier (#79, #139)
+ * @notice Verifies Stellar AuditLedger event proofs on EVM chains using N-of-M threshold scheme.
  *
- * Trust model (testnet):
- *   A single trusted relayer key signs each proof. The Verifier recovers the
- *   signer from the ECDSA signature and checks it against `trustedSigner`.
- *   For production, replace with threshold / quorum verification against the
- *   full Stellar validator set.
+ * Trust model:
+ *   Multiple signers required to verify each proof. At least `threshold` valid signatures
+ *   from the registered signer set are needed. Prevents single point of failure.
  *
  * Proof format:
  *   (uint64 ledgerSeq, bytes32 txHash, uint32 eventIndex,
- *    bytes32 eventHash, bytes signature)
+ *    bytes32 eventHash, bytes[] signatures)
  */
 contract AuditLedgerVerifier {
     // ── Storage ──────────────────────────────────────────────────────────────
 
     address public owner;
-    address public trustedSigner;
+    address[] public signers;
+    mapping(address => bool) public isSigner;
+    uint8 public threshold;
 
     /// @dev Maximum ledger age (in ledgers) accepted for a proof.
     uint64 public maxLedgerAge = 1000;
@@ -33,7 +33,7 @@ contract AuditLedgerVerifier {
     // ── Events ────────────────────────────────────────────────────────────────
 
     event EventVerified(bytes32 indexed eventHash, uint64 ledgerSeq, uint32 eventIndex);
-    event TrustedSignerUpdated(address indexed oldSigner, address indexed newSigner);
+    event SignersUpdated(address[] signers, uint8 threshold);
     event OwnershipTransferred(address indexed oldOwner, address indexed newOwner);
 
     // ── Errors ────────────────────────────────────────────────────────────────
@@ -42,12 +42,23 @@ contract AuditLedgerVerifier {
     error AlreadyVerified();
     error ProofTooOld();
     error Unauthorized();
+    error InvalidThreshold();
+    error DuplicateSigner();
+    error InvalidSignature();
 
     // ── Constructor ───────────────────────────────────────────────────────────
 
-    constructor(address _trustedSigner) {
+    constructor(address[] memory _signers, uint8 _threshold) {
         owner = msg.sender;
-        trustedSigner = _trustedSigner;
+        if (_threshold == 0 || _threshold > _signers.length) revert InvalidThreshold();
+        
+        for (uint256 i = 0; i < _signers.length; i++) {
+            if (isSigner[_signers[i]]) revert DuplicateSigner();
+            isSigner[_signers[i]] = true;
+        }
+        
+        signers = _signers;
+        threshold = _threshold;
     }
 
     // ── Modifiers ─────────────────────────────────────────────────────────────
@@ -60,12 +71,12 @@ contract AuditLedgerVerifier {
     // ── Core ──────────────────────────────────────────────────────────────────
 
     /**
-     * @notice Verify a Stellar AuditLedger event proof.
+     * @notice Verify a Stellar AuditLedger event proof with threshold signatures.
      * @param ledgerSeq   Stellar ledger sequence containing the event.
      * @param txHash      Transaction hash on Stellar (as bytes32).
      * @param eventIndex  Event's sequential index.
      * @param eventHash   keccak256 of the ABI-encoded event data.
-     * @param signature   65-byte ECDSA signature over the proof digest.
+     * @param signatures  Array of signatures from registered signers.
      * @return true if the proof is valid.
      */
     function verifyEvent(
@@ -73,7 +84,7 @@ contract AuditLedgerVerifier {
         bytes32 txHash,
         uint32 eventIndex,
         bytes32 eventHash,
-        bytes calldata signature
+        bytes[] calldata signatures
     ) external returns (bool) {
         // Replay protection
         if (verifiedEvents[eventHash]) revert AlreadyVerified();
@@ -89,9 +100,24 @@ contract AuditLedgerVerifier {
         bytes32 digest = keccak256(abi.encodePacked(ledgerSeq, txHash, eventHash));
         bytes32 ethSignedDigest = keccak256(abi.encodePacked("\x19Ethereum Signed Message:\n32", digest));
 
-        // Recover signer
-        address recovered = _recover(ethSignedDigest, signature);
-        if (recovered != trustedSigner) revert InvalidProof();
+        // Verify threshold signatures
+        address[] memory recoveredSigners = new address[](signatures.length);
+        uint8 validCount = 0;
+
+        for (uint256 i = 0; i < signatures.length; i++) {
+            address recovered = _recover(ethSignedDigest, signatures[i]);
+            if (!isSigner[recovered]) revert InvalidProof();
+
+            // Check for duplicates
+            for (uint256 j = 0; j < i; j++) {
+                if (recoveredSigners[j] == recovered) revert DuplicateSigner();
+            }
+
+            recoveredSigners[i] = recovered;
+            validCount++;
+        }
+
+        if (validCount < threshold) revert InvalidSignature();
 
         // Record and emit
         verifiedEvents[eventHash] = true;
@@ -111,9 +137,23 @@ contract AuditLedgerVerifier {
 
     // ── Governance ────────────────────────────────────────────────────────────
 
-    function updateTrustedSigner(address newSigner) external onlyOwner {
-        emit TrustedSignerUpdated(trustedSigner, newSigner);
-        trustedSigner = newSigner;
+    function updateSigners(address[] calldata newSigners, uint8 newThreshold) external onlyOwner {
+        if (newThreshold == 0 || newThreshold > newSigners.length) revert InvalidThreshold();
+
+        // Clear old signers
+        for (uint256 i = 0; i < signers.length; i++) {
+            isSigner[signers[i]] = false;
+        }
+
+        // Add new signers
+        for (uint256 i = 0; i < newSigners.length; i++) {
+            if (isSigner[newSigners[i]]) revert DuplicateSigner();
+            isSigner[newSigners[i]] = true;
+        }
+
+        signers = newSigners;
+        threshold = newThreshold;
+        emit SignersUpdated(newSigners, newThreshold);
     }
 
     function updateMaxLedgerAge(uint64 newAge) external onlyOwner {
