@@ -15,18 +15,8 @@ rand = "0.8"
 proptest = "1"
 
 [profile.release]
-# opt-level "z" optimises for binary size over speed (issue #55)
 opt-level = "z"
-# Overflow checks add panic branches; keep enabled for safety but they are
-# elided by panic = "abort" below, so the cost is a branch not an unwind path.
 overflow-checks = true
-# Link-time optimisation allows the linker to dead-strip across crates (issue #55)
 lto = true
-# A single codegen unit maximises inlining and dead-code removal (issue #55)
-codegen-units = 1
-# Abort on panic removes all unwind table sections from the WASM binary,
-# which is the single largest contributor to bloat (issue #55)
-panic = "abort"
 debug = 0
-# Strip all symbol/debuginfo sections from the final binary (issue #55)
 strip = "symbols"
