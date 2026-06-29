@@ -69,7 +69,7 @@ fn fuzz_log_event_random_inputs() {
         let metadata = random_bytes(&env, &mut rng, MAX_METADATA_LEN);
         let submitter = random_address(&env, &mut rng);
 
-        let result = client.try_log_event(&submitter, &event_type, &metadata);
+        let result = client.try_log_event(&submitter, &event_type, &metadata, &None, &None, &false);
         if let Ok(id) = result {
             let fetched = client.get_event(&id);
             assert_eq!(fetched.event_type, event_type);
@@ -87,7 +87,7 @@ fn fuzz_get_event_random_indices() {
 
     let submitter = random_address(&env, &mut rng);
     let event_type = random_symbol(&env, &mut rng);
-    client.try_log_event(&submitter, &event_type, &random_bytes(&env, &mut rng, 16)).ok();
+    client.try_log_event(&submitter, &event_type, &random_bytes(&env, &mut rng, 16), &None, &None, &false).ok();
 
     for _ in 0..FUZZ_ITERATIONS {
         let id = random_event_id(&env, &mut rng);
@@ -103,7 +103,7 @@ fn fuzz_get_event_by_type_random_inputs() {
 
     let event_type = random_symbol(&env, &mut rng);
     let submitter = random_address(&env, &mut rng);
-    client.try_log_event(&submitter, &event_type, &random_bytes(&env, &mut rng, 16)).ok();
+    client.try_log_event(&submitter, &event_type, &random_bytes(&env, &mut rng, 16), &None, &None, &false).ok();
 
     for _ in 0..FUZZ_ITERATIONS {
         let symbol = random_symbol(&env, &mut rng);

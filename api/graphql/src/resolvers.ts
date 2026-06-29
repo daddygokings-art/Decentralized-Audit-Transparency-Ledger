@@ -14,7 +14,26 @@ interface EventRecord {
   prev_hash: string;
 }
 
+interface GovernanceEventRecord {
+  action: string;
+  caller: string;
+  oldValue?: string;
+  newValue?: string;
+  timestamp: number;
+}
+
 const events: EventRecord[] = [];
+const governanceEvents: GovernanceEventRecord[] = [];
+
+interface GovernanceEventRecord {
+  action: string;
+  caller: string;
+  oldValue?: string;
+  newValue?: string;
+  timestamp: number;
+}
+
+const governanceEvents: GovernanceEventRecord[] = [];
 
 function matchesFilter(e: EventRecord, filter: any): boolean {
   if (!filter) return true;
@@ -49,6 +68,13 @@ export const resolvers = {
 
     searchEvents: (_: any, { query }: any) =>
       events.filter((e) => e.metadata.toLowerCase().includes(query.toLowerCase())),
+
+    governanceHistory: (_: any, { types, limit = 50, offset = 0 }: any) => {
+      const filtered = types && types.length > 0
+        ? governanceEvents.filter((g) => types.includes(g.action))
+        : governanceEvents;
+      return filtered.slice(offset, offset + limit);
+    },
   },
 
   Mutation: {
@@ -69,6 +95,21 @@ export const resolvers = {
       };
       events.push(ev);
       void pubsub.publish(EVENT_LOGGED, { eventLogged: ev });
+
+      // Track governance actions in the governance history
+      const GOVERNANCE_TYPES = new Set([
+        "transfer_ownership", "set_global_max_logs", "set_event_max_logs",
+        "remove_event_cap", "contract_paused", "contract_unpaused",
+      ]);
+      if (GOVERNANCE_TYPES.has(eventType)) {
+        governanceEvents.unshift({
+          action: eventType,
+          caller: submitter,
+          newValue: metadata || undefined,
+          timestamp: now,
+        });
+      }
+
       return ev;
     },
   },

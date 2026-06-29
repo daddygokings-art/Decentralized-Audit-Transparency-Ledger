@@ -57,7 +57,7 @@ fn log_interleaved_round(
         client.log_event(
             &submitter,
             &event_type_for(submitter_index),
-            &metadata_for(env, submitter_index, sequence),
+            &metadata_for(env, submitter_index, sequence), &None, &None, &false,
         );
     }
 }
@@ -160,7 +160,7 @@ fn concurrent_cap_removal_and_logging_same_type() {
         client.log_event(
             &submitter,
             &event_type,
-            &metadata_for(&env, submitter_index, sequence),
+            &metadata_for(&env, submitter_index, sequence), &None, &None, &false,
         );
     }
 
