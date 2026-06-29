@@ -22,6 +22,7 @@ const RPC_URL =
 const NETWORK = process.env.NETWORK || "testnet";
 const SCRAPE_INTERVAL_MS = parseInt(process.env.SCRAPE_INTERVAL_MS || "15000", 10);
 const PORT = parseInt(process.env.PORT || "8000", 10);
+const TOP_SUBMITTERS_N = parseInt(process.env.TOP_SUBMITTERS_N || "10", 10);
 
 if (!CONTRACT_ID) {
   console.error("ERROR: CONTRACT_ID environment variable is required.");
@@ -70,17 +71,10 @@ const avgGasCost = new client.Gauge({
   registers: [registry],
 });
 
-const pausedGauge = new client.Gauge({
-  name: "audit_ledger_paused",
-  help: "1 if the AuditLedger contract is paused, 0 if active",
-  labelNames: ["contract_id"],
-  registers: [registry],
-});
-
-const pausedSinceGauge = new client.Gauge({
-  name: "audit_ledger_paused_since",
-  help: "Unix timestamp when the contract was paused (0 if not paused)",
-  labelNames: ["contract_id"],
+const eventsBySubmitter = new client.Gauge({
+  name: "audit_ledger_events_by_submitter",
+  help: "Number of events per submitter (top-N, configurable via TOP_SUBMITTERS_N)",
+  labelNames: ["submitter"],
   registers: [registry],
 });
 
@@ -128,6 +122,20 @@ function scValToU32(val) {
   return val.u32();
 }
 
+// ── Retry state (Issue 3) ───────────────────────────────────────────────────
+
+let consecutiveFailures = 0;
+const MAX_FAILURES_BEFORE_ERROR_GAUGE = 10;
+const BACKOFF_BASE_MS = 1000;
+const BACKOFF_MAX_MS = 60000;
+
+/**
+ * Sleep for `ms` milliseconds.
+ */
+function sleep(ms) {
+  return new Promise((resolve) => setTimeout(resolve, ms));
+}
+
 // ── Scrape loop ─────────────────────────────────────────────────────────────
 
 async function scrape() {
@@ -137,12 +145,8 @@ async function scrape() {
     const total = scValToU32(totalVal);
     totalEvents.set(total);
 
-    // global_max_logs – read from ledger storage directly or via a helper
-    // We approximate by fetching from contract storage key if not exposed via API.
-    // For now, track what we can derive.
+    // global_max_logs
     try {
-      // Try to call a hypothetical get_global_max (not in contract) –
-      // gracefully skip if unavailable.
       const maxVal = await callContract("get_global_max_logs");
       const max = scValToU32(maxVal);
       globalMaxLogs.set(max);
@@ -151,9 +155,7 @@ async function scrape() {
       // Contract doesn't expose this endpoint; skip global max metrics
     }
 
-    // events_by_type – requires knowing all types; scrape is best-effort
-    // In a production setup, maintain a list of known types in config or
-    // discover them from ledger state via get_ledger_entries.
+    // events_by_type
     const knownTypes = (process.env.EVENT_TYPES || "")
       .split(",")
       .map((t) => t.trim())
@@ -170,24 +172,53 @@ async function scrape() {
       }
     }
 
-    // Paused status
+    // per-submitter counts via get_statistics (returns top_submitters Vec<(Address, u32)>)
     try {
-      const pausedVal = await callContract("is_paused");
-      const isPaused = pausedVal && pausedVal.b?.() === true;
-      pausedGauge.set({ contract_id: CONTRACT_ID }, isPaused ? 1 : 0);
-      if (isPaused) {
-        const sinceVal = await callContract("paused_since").catch(() => null);
-        pausedSinceGauge.set({ contract_id: CONTRACT_ID }, sinceVal ? Number(sinceVal.u64()) : 0);
-      } else {
-        pausedSinceGauge.set({ contract_id: CONTRACT_ID }, 0);
+      const statsVal = await callContract("get_statistics");
+      if (statsVal && statsVal.switch().name === "scvMap") {
+        const statsMap = statsVal.map();
+        const topSubmittersEntry = statsMap && statsMap.find(
+          (e) => e.key().switch().name === "scvSymbol" && e.key().sym() === "top_submitters"
+        );
+        if (topSubmittersEntry) {
+          const submitterVec = topSubmittersEntry.val().vec() || [];
+          // Reset existing labels then set top-N
+          eventsBySubmitter.reset();
+          const topN = submitterVec.slice(0, TOP_SUBMITTERS_N);
+          for (const entry of topN) {
+            if (entry.switch().name === "scvVec") {
+              const pair = entry.vec();
+              if (pair && pair.length === 2) {
+                const addr = pair[0].address ? pair[0].address().toString() : String(pair[0]);
+                const count = pair[1].u32 ? pair[1].u32() : 0;
+                eventsBySubmitter.set({ submitter: addr }, count);
+              }
+            }
+          }
+        }
       }
     } catch {
-      pausedGauge.set({ contract_id: CONTRACT_ID }, 0);
-      pausedSinceGauge.set({ contract_id: CONTRACT_ID }, 0);
+      // get_statistics not available or parse error; skip submitter metrics
     }
   } catch (err) {
     console.error("Scrape error:", err.message);
     errorCount.inc();
+
+    consecutiveFailures += 1;
+    if (consecutiveFailures >= MAX_FAILURES_BEFORE_ERROR_GAUGE) {
+      scrapeErrorGauge.set({ contract_id: CONTRACT_ID }, 1);
+      console.error(`${consecutiveFailures} consecutive failures; audit_ledger_scrape_error set to 1`);
+    }
+
+    // Issue 3: exponential backoff retry (1s, 2s, 4s… capped at 60s)
+    const backoffMs = Math.min(
+      BACKOFF_BASE_MS * Math.pow(2, consecutiveFailures - 1),
+      BACKOFF_MAX_MS
+    );
+    console.error(`Retrying in ${backoffMs}ms…`);
+    await sleep(backoffMs);
+    // Recurse once after backoff (single retry attempt per interval cycle)
+    return scrape();
   }
 }
 

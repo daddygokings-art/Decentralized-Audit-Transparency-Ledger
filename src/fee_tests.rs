@@ -20,8 +20,8 @@ fn setup() -> (Env, Address, AuditLedgerClient<'static>) {
 }
 
 fn budget(env: &Env) -> (u64, u64) {
-    let cpu = env.cost_estimate().budget().cpu_instruction_count();
-    let mem = env.cost_estimate().budget().memory_bytes_used();
+    let cpu = env.cost_estimate().budget().cpu_instruction_cost();
+    let mem = env.cost_estimate().budget().memory_bytes_cost();
     (cpu, mem)
 }
 
@@ -56,11 +56,17 @@ fn fee_log_event_small_metadata_10b() {
     let meta = Bytes::from_slice(&env, &[0u8; 10]);
 
     reset(&env);
-    client.log_event(&submitter, &symbol_short!("payment"), &meta);
+    client.log_event(&submitter, &symbol_short!("payment"), &meta, &None, &None, &false);
     let (cpu, mem) = budget(&env);
 
-    assert!(cpu < MAX_CPU_INSNS, "log_event(10B) cpu {cpu} exceeds limit");
-    assert!(mem < MAX_MEM_BYTES, "log_event(10B) mem {mem} exceeds limit");
+    assert!(
+        cpu < MAX_CPU_INSNS,
+        "log_event(10B) cpu {cpu} exceeds limit"
+    );
+    assert!(
+        mem < MAX_MEM_BYTES,
+        "log_event(10B) mem {mem} exceeds limit"
+    );
 }
 
 #[test]
@@ -70,11 +76,17 @@ fn fee_log_event_medium_metadata_100b() {
     let meta = Bytes::from_slice(&env, &[0u8; 100]);
 
     reset(&env);
-    client.log_event(&submitter, &symbol_short!("payment"), &meta);
+    client.log_event(&submitter, &symbol_short!("payment"), &meta, &None, &None, &false);
     let (cpu, mem) = budget(&env);
 
-    assert!(cpu < MAX_CPU_INSNS, "log_event(100B) cpu {cpu} exceeds limit");
-    assert!(mem < MAX_MEM_BYTES, "log_event(100B) mem {mem} exceeds limit");
+    assert!(
+        cpu < MAX_CPU_INSNS,
+        "log_event(100B) cpu {cpu} exceeds limit"
+    );
+    assert!(
+        mem < MAX_MEM_BYTES,
+        "log_event(100B) mem {mem} exceeds limit"
+    );
 }
 
 #[test]
@@ -84,11 +96,17 @@ fn fee_log_event_large_metadata_1kb() {
     let meta = Bytes::from_slice(&env, &[0u8; 1024]);
 
     reset(&env);
-    client.log_event(&submitter, &symbol_short!("payment"), &meta);
+    client.log_event(&submitter, &symbol_short!("payment"), &meta, &None, &None, &false);
     let (cpu, mem) = budget(&env);
 
-    assert!(cpu < MAX_CPU_INSNS, "log_event(1KB) cpu {cpu} exceeds limit");
-    assert!(mem < MAX_MEM_BYTES, "log_event(1KB) mem {mem} exceeds limit");
+    assert!(
+        cpu < MAX_CPU_INSNS,
+        "log_event(1KB) cpu {cpu} exceeds limit"
+    );
+    assert!(
+        mem < MAX_MEM_BYTES,
+        "log_event(1KB) mem {mem} exceeds limit"
+    );
 }
 
 // ── log_events batch vs single comparison ────────────────────────────────────
@@ -105,7 +123,7 @@ fn fee_log_events_batch_10_vs_single() {
     let mut single_mem_total: u64 = 0;
     for _ in 0..10 {
         reset(&env);
-        client.log_event(&submitter, &event_type, &meta);
+        client.log_event(&submitter, &event_type, &meta, &None, &None, &false);
         let (c, m) = budget(&env);
         single_cpu_total += c;
         single_mem_total += m;
@@ -122,8 +140,14 @@ fn fee_log_events_batch_10_vs_single() {
     let (batch_cpu, batch_mem) = budget(&env);
 
     // Batch must not exceed the per-transaction limit
-    assert!(batch_cpu < MAX_CPU_INSNS, "batch cpu {batch_cpu} exceeds limit");
-    assert!(batch_mem < MAX_MEM_BYTES, "batch mem {batch_mem} exceeds limit");
+    assert!(
+        batch_cpu < MAX_CPU_INSNS,
+        "batch cpu {batch_cpu} exceeds limit"
+    );
+    assert!(
+        batch_mem < MAX_MEM_BYTES,
+        "batch mem {batch_mem} exceeds limit"
+    );
 
     // Batch should be cheaper (or at most equal) than the sum of singles in CPU
     // (this is a regression guard — if batch becomes more expensive, investigate)
@@ -143,7 +167,7 @@ fn fee_get_event() {
     let id = client.log_event(
         &submitter,
         &symbol_short!("payment"),
-        &Bytes::from_slice(&env, b"test"),
+        &Bytes::from_slice(&env, b"test"), &None, &None, &false,
     );
 
     reset(&env);
@@ -159,14 +183,20 @@ fn fee_get_event_by_type() {
     let (env, _, client) = setup();
     let submitter = Address::generate(&env);
     let event_type = symbol_short!("payment");
-    client.log_event(&submitter, &event_type, &Bytes::from_slice(&env, b"test"));
+    client.log_event(&submitter, &event_type, &Bytes::from_slice(&env, b"test"), &None, &None, &false);
 
     reset(&env);
     let _ = client.get_event_by_type(&event_type, &0);
     let (cpu, mem) = budget(&env);
 
-    assert!(cpu < MAX_CPU_INSNS, "get_event_by_type cpu {cpu} exceeds limit");
-    assert!(mem < MAX_MEM_BYTES, "get_event_by_type mem {mem} exceeds limit");
+    assert!(
+        cpu < MAX_CPU_INSNS,
+        "get_event_by_type cpu {cpu} exceeds limit"
+    );
+    assert!(
+        mem < MAX_MEM_BYTES,
+        "get_event_by_type mem {mem} exceeds limit"
+    );
 }
 
 // ── governance functions ──────────────────────────────────────────────────────
@@ -179,8 +209,14 @@ fn fee_set_global_max_logs() {
     client.set_global_max_logs(&owner, &500_000);
     let (cpu, mem) = budget(&env);
 
-    assert!(cpu < MAX_CPU_INSNS, "set_global_max_logs cpu {cpu} exceeds limit");
-    assert!(mem < MAX_MEM_BYTES, "set_global_max_logs mem {mem} exceeds limit");
+    assert!(
+        cpu < MAX_CPU_INSNS,
+        "set_global_max_logs cpu {cpu} exceeds limit"
+    );
+    assert!(
+        mem < MAX_MEM_BYTES,
+        "set_global_max_logs mem {mem} exceeds limit"
+    );
 }
 
 #[test]
@@ -191,8 +227,14 @@ fn fee_set_event_max_logs() {
     client.set_event_max_logs(&owner, &symbol_short!("payment"), &100);
     let (cpu, mem) = budget(&env);
 
-    assert!(cpu < MAX_CPU_INSNS, "set_event_max_logs cpu {cpu} exceeds limit");
-    assert!(mem < MAX_MEM_BYTES, "set_event_max_logs mem {mem} exceeds limit");
+    assert!(
+        cpu < MAX_CPU_INSNS,
+        "set_event_max_logs cpu {cpu} exceeds limit"
+    );
+    assert!(
+        mem < MAX_MEM_BYTES,
+        "set_event_max_logs mem {mem} exceeds limit"
+    );
 }
 
 #[test]
@@ -204,8 +246,14 @@ fn fee_remove_event_cap() {
     client.remove_event_cap(&owner, &symbol_short!("payment"));
     let (cpu, mem) = budget(&env);
 
-    assert!(cpu < MAX_CPU_INSNS, "remove_event_cap cpu {cpu} exceeds limit");
-    assert!(mem < MAX_MEM_BYTES, "remove_event_cap mem {mem} exceeds limit");
+    assert!(
+        cpu < MAX_CPU_INSNS,
+        "remove_event_cap cpu {cpu} exceeds limit"
+    );
+    assert!(
+        mem < MAX_MEM_BYTES,
+        "remove_event_cap mem {mem} exceeds limit"
+    );
 }
 
 #[test]
@@ -217,6 +265,12 @@ fn fee_transfer_ownership() {
     client.transfer_ownership(&owner, &new_owner);
     let (cpu, mem) = budget(&env);
 
-    assert!(cpu < MAX_CPU_INSNS, "transfer_ownership cpu {cpu} exceeds limit");
-    assert!(mem < MAX_MEM_BYTES, "transfer_ownership mem {mem} exceeds limit");
+    assert!(
+        cpu < MAX_CPU_INSNS,
+        "transfer_ownership cpu {cpu} exceeds limit"
+    );
+    assert!(
+        mem < MAX_MEM_BYTES,
+        "transfer_ownership mem {mem} exceeds limit"
+    );
 }
