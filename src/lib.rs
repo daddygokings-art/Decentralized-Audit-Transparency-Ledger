@@ -110,10 +110,6 @@ pub enum DataKey {
     /// Per-submitter nonce for replay-attack prevention (issue #64).
     /// Stores the last accepted nonce; absent means no event submitted yet (treat as 0).
     SubmitterNonce(Address),
-<<<<<<< feat/issues-145-146-147-137
-    /// Monotonic contract version counter (issue #147) — prevents re-initialization even if owner is cleared.
-    ContractVersion,
-=======
     ArchivedTotalEvents,
     ArchivedEventData(BytesN<32>),
     ArchivedEventHeaderKey(BytesN<32>),
@@ -125,7 +121,6 @@ pub enum DataKey {
     RequiredSignatures,
     ProposalCount,
     Proposal(u32),
->>>>>>> master
 }
 
 #[contracterror]
@@ -216,13 +211,6 @@ pub enum ContractError {
     /// **Common cause**: `remove_event_cap()` called twice on the same event type.
     /// **Resolution**: No action needed; cap is already lifted. Use `set_event_max_logs()` to set a new cap.
     CapAlreadyRemoved = 17,
-<<<<<<< feat/issues-145-146-147-137
-
-    /// **Code 19**: Contract already initialized. Cannot re-initialize a contract that has been initialized (issue #147).
-    /// **Common cause**: `initialize()` called more than once, even after ownership transfer.
-    /// **Resolution**: Deploy a new contract instance; initialization is a one-time operation.
-    AlreadyInitialized = 19,
-=======
     CapNeverSet = 18,
     NonceTooLow = 19,
     NoEventsForType = 20,
@@ -271,7 +259,6 @@ pub struct Proposal {
     pub approvals: Vec<Address>,
     pub expires_at: u64,
     pub executed: bool,
->>>>>>> master
 }
 
 const NULL_ACCOUNT: &str = "GAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAWHF";
@@ -283,18 +270,9 @@ pub struct AuditLedger;
 impl AuditLedger {
     pub fn initialize(env: Env, owner: Address, global_max_logs: u32) {
         owner.require_auth();
-<<<<<<< feat/issues-145-146-147-137
-        
-        // Issue #147: Reject re-initialization using monotonic version counter
-        if env.storage().instance().has(&DataKey::ContractVersion) {
-            panic_with_error!(&env, ContractError::AlreadyInitialized);
-        }
-        
-=======
         if env.storage().instance().has(&DataKey::Owner) {
             panic_with_error!(&env, ContractError::SameOwner);
         }
->>>>>>> master
         // Support both single-owner (legacy) and multi-owner setups.
         env.storage().instance().set(&DataKey::Owner, &owner);
         env.storage().instance().set(
@@ -867,15 +845,7 @@ impl AuditLedger {
 
     /// Count events matching a category (scans all events; pagination available via list_events_by_category)
     pub fn event_count_by_category(env: Env, category: Symbol) -> u32 {
-<<<<<<< feat/issues-145-146-147-137
-        let total: u32 = env
-            .storage()
-            .instance()
-            .get(&DataKey::TotalEvents)
-            .unwrap_or(0u32);
-=======
         let total = Self::total_events(env.clone());
->>>>>>> master
         let mut cnt: u32 = 0;
         for i in 0..total {
             let id: BytesN<32> = env
@@ -896,22 +866,8 @@ impl AuditLedger {
     }
 
     /// List event headers for a given category with simple pagination.
-<<<<<<< feat/issues-145-146-147-137
-    pub fn list_events_by_category(
-        env: Env,
-        category: Symbol,
-        start: u32,
-        limit: u32,
-    ) -> Vec<EventHeader> {
-        let total: u32 = env
-            .storage()
-            .instance()
-            .get(&DataKey::TotalEvents)
-            .unwrap_or(0u32);
-=======
     pub fn list_events_by_category(env: Env, category: Symbol, start: u32, limit: u32) -> Vec<EventHeader> {
         let total = Self::total_events(env.clone());
->>>>>>> master
         let mut out: Vec<EventHeader> = Vec::new(&env);
         if start >= total {
             return out;
@@ -949,21 +905,8 @@ impl AuditLedger {
     pub fn archive_events(env: Env, caller: Address, cutoff_timestamp: u64) -> u32 {
         caller.require_auth();
         Self::require_owner_or_multisig(&env, &caller);
-<<<<<<< feat/issues-145-146-147-137
-        let total: u32 = env
-            .storage()
-            .instance()
-            .get(&DataKey::TotalEvents)
-            .unwrap_or(0u32);
-        let mut archived: u32 = env
-            .storage()
-            .instance()
-            .get(&DataKey::ArchivedTotalEvents)
-            .unwrap_or(0u32);
-=======
         let total = Self::total_events(env.clone());
         let mut archived: u32 = env.storage().instance().get(&DataKey::ArchivedTotalEvents).unwrap_or(0u32);
->>>>>>> master
         let mut moved: u32 = 0;
         for i in 0..total {
             let id: BytesN<32> = env
@@ -1155,16 +1098,6 @@ impl AuditLedger {
         // Note: callers should ensure the new WASM is compatible with storage layout.
         // Try to obtain current wasm hash if available (best-effort).
         let old_hash_opt: Option<BytesN<32>> = None;
-<<<<<<< feat/issues-145-146-147-137
-        env.events().publish(
-            (Symbol::new(&env, "contract_upgraded"),),
-            (old_hash_opt, new_wasm_hash.clone()),
-        );
-        // Perform upgrade via deployer API (Soroban deployer helper).
-        // This is a best-effort call and may vary by runtime.
-        env.deployer()
-            .update_current_contract_wasm(new_wasm_hash.clone());
-=======
         env.events().publish((Symbol::new(&env, "contract_upgraded"),), (old_hash_opt, new_wasm_hash.clone()));
         #[cfg(test)]
         {
@@ -1176,7 +1109,6 @@ impl AuditLedger {
         // This is a best-effort call and may vary by runtime.
         env.deployer().update_current_contract_wasm(new_wasm_hash.clone());
         }
->>>>>>> master
     }
 
     pub fn get_event_by_type(env: Env, event_type: Symbol, type_index: u32) -> Event {
@@ -1548,15 +1480,7 @@ impl AuditLedger {
             panic_with_error!(&env, ContractError::ContractPaused);
         }
         Self::require_owner(&env, &caller);
-<<<<<<< feat/issues-145-146-147-137
-        let total_events: u32 = env
-            .storage()
-            .instance()
-            .get(&DataKey::TotalEvents)
-            .unwrap_or(0);
-=======
         let total_events = Self::total_events(env.clone());
->>>>>>> master
         if new_max < total_events {
             panic_with_error!(&env, ContractError::MaxLogsBelowCurrentCount);
         }
@@ -2374,12 +2298,8 @@ impl AuditLedger {
         let total: u32 = env
             .storage()
             .instance()
-<<<<<<< feat/issues-145-146-147-137
-            .get(&DataKey::TotalEvents)
-=======
             .get::<_, Config>(&DataKey::Config)
             .map(|c| c.total_events)
->>>>>>> master
             .unwrap_or(0);
         let now = env.ledger().timestamp();
         let mut events_by_type: Vec<(Symbol, u32)> = Vec::new(&env);

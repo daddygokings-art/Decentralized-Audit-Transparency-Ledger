@@ -73,6 +73,13 @@ services:
     depends_on:
       - prometheus
 
+  rest:
+    build: ./api/rest
+    image: audit-ledger-rest:latest
+    ports:
+      - "3002:3002"
+    restart: unless-stopped
+
   ui:
     build: ./ui
     image: audit-ledger-ui:latest

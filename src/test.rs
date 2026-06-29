@@ -226,6 +226,31 @@ fn test_batch_log_events_exceeds_type_cap_reverts() {
     assert!(result.is_err());
 }
 
+#[test]
+#[should_panic(expected = "HostError: Error(Contract, #3)")]
+fn test_batch_log_events_integer_overflow_cap_check() {
+    let (env, owner, client) = create_ledger();
+    let submitter = Address::generate(&env);
+    let event_type = symbol_short!("payment");
+
+    env.mock_all_auths();
+    client.set_event_max_logs(&owner, &event_type, &5);
+
+    let events1 = soroban_sdk::vec![&env,
+        (submitter.clone(), event_type.clone(), Bytes::from_slice(&env, b"1")),
+        (submitter.clone(), event_type.clone(), Bytes::from_slice(&env, b"2")),
+        (submitter.clone(), event_type.clone(), Bytes::from_slice(&env, b"3")),
+    ];
+    client.log_events(&events1);
+
+    let events2 = soroban_sdk::vec![&env,
+        (submitter.clone(), event_type.clone(), Bytes::from_slice(&env, b"4")),
+        (submitter.clone(), event_type.clone(), Bytes::from_slice(&env, b"5")),
+        (submitter.clone(), event_type.clone(), Bytes::from_slice(&env, b"6")),
+    ];
+    client.log_events(&events2);
+}
+
 // ── issue #70: hash-based IDs ───────────────────────────────────────────────
 
 #[test]
