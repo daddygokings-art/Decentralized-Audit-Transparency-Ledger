@@ -65,6 +65,27 @@ pub struct Config {
     pub total_events: u32,
 }
 
+/// Packed global runtime state (issue #114).
+/// Combines all global instance storage reads into a single key so that
+/// `log_event` only needs 1 read for all global flags instead of ~6.
+#[contracttype]
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct RuntimeState {
+    /// Global maximum events and running total (was DataKey::Config).
+    pub global_max_logs: u32,
+    pub total_events: u32,
+    /// Whether the contract is paused (was DataKey::Paused).
+    pub paused: bool,
+    /// Whether allowlist mode is active (was DataKey::AllowlistMode).
+    pub allowlist_mode: bool,
+    /// Whether low-cost mode is active (was DataKey::LowCostMode).
+    pub low_cost_mode: bool,
+    /// Event emission mode 0-3 (was DataKey::EventEmissionConfig).
+    pub emission_mode: u32,
+    /// Global metadata size cap; 0 means use DEFAULT_MAX_METADATA_SIZE (was DataKey::GlobalMetadataMaxSize).
+    pub global_metadata_max_size: u32,
+}
+
 #[derive(Clone)]
 #[contracttype]
 pub enum DataKey {
@@ -322,14 +343,32 @@ impl AuditLedger {
 
     /// Log a batch of events atomically and return their sequential indices.
     pub fn log_events(env: Env, events: Vec<(Address, Symbol, Bytes)>) -> Vec<u32> {
-        if let Some(true) = env.storage().instance().get::<_, bool>(&DataKey::Paused) {
+        Self::require_initialized(&env);
+
+        // Single read for all global state (issue #114)
+        let rs: RuntimeState = env
+            .storage()
+            .instance()
+            .get(&DataKey::RuntimeState)
+            .unwrap_or_else(|| {
+                let cfg: Config = env.storage().instance().get(&DataKey::Config).unwrap();
+                RuntimeState {
+                    global_max_logs: cfg.global_max_logs,
+                    total_events: cfg.total_events,
+                    paused: env.storage().instance().get::<_, bool>(&DataKey::Paused).unwrap_or(false),
+                    allowlist_mode: false,
+                    low_cost_mode: env.storage().instance().get::<_, bool>(&DataKey::LowCostMode).unwrap_or(false),
+                    emission_mode: env.storage().instance().get::<_, u32>(&DataKey::EventEmissionConfig).unwrap_or(1),
+                    global_metadata_max_size: 0,
+                }
+            });
+
+        if rs.paused {
             panic_with_error!(&env, ContractError::ContractPaused);
         }
 
-        Self::require_initialized(&env);
-        let cfg: Config = env.storage().instance().get(&DataKey::Config).unwrap();
-        let global_max = cfg.global_max_logs;
-        let total = cfg.total_events;
+        let global_max = rs.global_max_logs;
+        let total = rs.total_events;
         let batch_len: u32 = events.len();
 
         if total.checked_add(batch_len).is_none() || total + batch_len > global_max {
@@ -515,6 +554,11 @@ impl AuditLedger {
         env.storage()
             .instance()
             .set(&DataKey::TotalEvents, &current_total);
+        // Sync RuntimeState total_events (issue #114)
+        if let Some(mut rs2) = env.storage().instance().get::<_, RuntimeState>(&DataKey::RuntimeState) {
+            rs2.total_events = current_total;
+            env.storage().instance().set(&DataKey::RuntimeState, &rs2);
+        }
 
         result_indices
     }
@@ -605,7 +649,7 @@ impl AuditLedger {
             }
         }
 
-        // --- issue #62: enforce per-submitter rate limit ---
+        // --- issue #62: enforce per-submitter rate limit (per-submitter key, optional) ---
         if let Some(limit) = env
             .storage()
             .instance()
@@ -636,20 +680,27 @@ impl AuditLedger {
             }
         }
 
-        // --- issue #67: enforce metadata size cap ---
-        let max_meta = Self::effective_metadata_max_size(&env, &event_type);
+        // --- issue #67: enforce metadata size cap (from RuntimeState, no extra read) ---
+        let max_meta = if let Some(v) = env
+            .storage()
+            .instance()
+            .get::<_, u32>(&DataKey::EventMetadataMaxSize(event_type.clone()))
+        {
+            v
+        } else if rs.global_metadata_max_size > 0 {
+            rs.global_metadata_max_size
+        } else {
+            DEFAULT_MAX_METADATA_SIZE
+        };
         if metadata.len() > max_meta {
             panic_with_error!(&env, ContractError::MetadataTooLarge);
         }
 
-        // Task 1: single read for both global_max and total (was 2 reads).
-        let mut cfg: Config = env.storage().instance().get(&DataKey::Config).unwrap();
-
-        if cfg.total_events >= cfg.global_max_logs {
+        if rs.total_events >= rs.global_max_logs {
             panic_with_error!(&env, ContractError::GlobalMaxLogsReached);
         }
 
-        // Task 2+5: single read for cap + current count; reuse count later.
+        // Read 2: EventCapConfig (per-type cap, optional) — single read.
         let mut type_count_opt: Option<u32> = None;
         if let Some(cap) = env
             .storage()
@@ -761,7 +812,6 @@ impl AuditLedger {
         env.storage()
             .instance()
             .set(&DataKey::EventHeaderKey(event_id.clone()), &header);
-        // Task 3: removed redundant EventMeta write (same data as EventData).
         env.storage()
             .instance()
             .set(&DataKey::EventMetadata(event_id.clone()), &metadata);
@@ -910,6 +960,10 @@ impl AuditLedger {
 
     pub fn total_events(env: Env) -> u32 {
         Self::require_initialized(&env);
+        // Prefer RuntimeState for a single read; fallback to Config for legacy contracts.
+        if let Some(rs) = env.storage().instance().get::<_, RuntimeState>(&DataKey::RuntimeState) {
+            return rs.total_events;
+        }
         env.storage()
             .instance()
             .get::<_, Config>(&DataKey::Config)
@@ -1767,6 +1821,10 @@ impl AuditLedger {
         env.storage()
             .instance()
             .set(&DataKey::GlobalMetadataMaxSize, &max_size);
+        if let Some(mut rs) = env.storage().instance().get::<_, RuntimeState>(&DataKey::RuntimeState) {
+            rs.global_metadata_max_size = max_size;
+            env.storage().instance().set(&DataKey::RuntimeState, &rs);
+        }
     }
 
     /// Set a per-event-type metadata size limit (owner-only).
@@ -1902,6 +1960,10 @@ impl AuditLedger {
         caller.require_auth();
         Self::require_owner_or_multisig(&env, &caller);
         env.storage().instance().set(&DataKey::AllowlistMode, &true);
+        if let Some(mut rs) = env.storage().instance().get::<_, RuntimeState>(&DataKey::RuntimeState) {
+            rs.allowlist_mode = true;
+            env.storage().instance().set(&DataKey::RuntimeState, &rs);
+        }
         env.events()
             .publish((Symbol::new(&env, "allowlist_enabled"),), (caller,));
     }
@@ -1974,11 +2036,18 @@ impl AuditLedger {
         env.storage()
             .instance()
             .set(&DataKey::EventEmissionVersion, &2u32);
+        if let Some(mut rs) = env.storage().instance().get::<_, RuntimeState>(&DataKey::RuntimeState) {
+            rs.emission_mode = mode;
+            env.storage().instance().set(&DataKey::RuntimeState, &rs);
+        }
     }
 
     /// Get the current event emission mode.
     pub fn get_event_emission_mode(env: Env) -> u32 {
         Self::require_initialized(&env);
+        if let Some(rs) = env.storage().instance().get::<_, RuntimeState>(&DataKey::RuntimeState) {
+            return rs.emission_mode;
+        }
         Self::effective_event_emission_mode(&env)
     }
 
@@ -1992,11 +2061,18 @@ impl AuditLedger {
         env.storage()
             .instance()
             .set(&DataKey::LowCostMode, &enabled);
+        if let Some(mut rs) = env.storage().instance().get::<_, RuntimeState>(&DataKey::RuntimeState) {
+            rs.low_cost_mode = enabled;
+            env.storage().instance().set(&DataKey::RuntimeState, &rs);
+        }
     }
 
     /// Check if low-cost mode is enabled.
     pub fn is_low_cost_mode(env: Env) -> bool {
         Self::require_initialized(&env);
+        if let Some(rs) = env.storage().instance().get::<_, RuntimeState>(&DataKey::RuntimeState) {
+            return rs.low_cost_mode;
+        }
         env.storage()
             .instance()
             .get(&DataKey::LowCostMode)

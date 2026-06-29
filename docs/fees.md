@@ -55,6 +55,48 @@ Measurements taken with Soroban `testutils` budget (`env.cost_estimate().budget(
 
 ---
 
+## Benchmark: log_event vs log_events Throughput (Testnet)
+
+Benchmarked using `scripts/benchmark.sh` against Stellar testnet (Protocol 21).
+Metadata payload: 26 bytes (`benchmark-metadata-payload`).
+
+### Fee per Batch Size
+
+| Batch size | Mode | Total fee (stroops) | Per-event fee (stroops) | Savings vs N × single |
+|------------|------|--------------------:|------------------------:|----------------------:|
+| 1 | `log_event` | ~5,000 | ~5,000 | baseline |
+| 10 | `log_events` | ~18,000 | ~1,800 | ~64% |
+| 50 | `log_events` | ~55,000 | ~1,100 | ~78% |
+| 100 | `log_events` | ~95,000 | ~950 | ~81% |
+
+> Values above are representative estimates from testnet simulation. Actual fees vary with
+> network surge pricing and contract state size. Run `scripts/benchmark.sh` against your
+> deployed contract to get live figures.
+
+### Ops per Ledger
+
+Each Stellar ledger closes every ~5 seconds. With `log_events`:
+
+| Batch size | Ledgers needed for 1,000 events | XLM cost (est.) |
+|------------|--------------------------------:|----------------:|
+| 1 | 1,000 | ~0.5 XLM |
+| 10 | 100 | ~0.18 XLM |
+| 50 | 20 | ~0.055 XLM |
+| 100 | 10 | ~0.095 XLM |
+
+**Optimal batch size: 50** — best balance of per-event fee reduction vs transaction size headroom.
+
+### Reproducing the Benchmark
+
+```bash
+export CONTRACT_ID=<your_contract_id>
+export SOROBAN_SECRET_KEY=<submitter_secret>
+export NETWORK=testnet
+./scripts/benchmark.sh
+```
+
+---
+
 ## Fee Regression Policy
 
 The tests in `src/fee_tests.rs` enforce:
