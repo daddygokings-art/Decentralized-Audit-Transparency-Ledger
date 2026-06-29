@@ -108,6 +108,36 @@ pub enum DataKey {
     /// Per-submitter nonce for replay-attack prevention (issue #64).
     /// Stores the last accepted nonce; absent means no event submitted yet (treat as 0).
     SubmitterNonce(Address),
+    /// Combined global config (global_max_logs + total_events) in one storage slot.
+    Config,
+    /// Per-event-type cap: stores Option<u32> — Some(n) = capped, None = uncapped.
+    EventCapConfig(Symbol),
+    /// Multi-owner list for multisig governance.
+    Owners,
+    /// Number of owner approvals required to execute a governance proposal.
+    RequiredSignatures,
+    /// On-chain governance proposal storage (issue #multi-sig).
+    Proposal(u32),
+    /// Total number of proposals ever submitted.
+    ProposalCount,
+    /// Total count of archived events.
+    ArchivedTotalEvents,
+    /// Archived event data (mirrors EventData for cold events).
+    ArchivedEventData(BytesN<32>),
+    /// Archived event header (mirrors EventHeaderKey for cold events).
+    ArchivedEventHeaderKey(BytesN<32>),
+    /// Archived event metadata (mirrors EventMetadata for cold events).
+    ArchivedEventMetadata(BytesN<32>),
+    /// Sequential index → archived event ID (mirrors EventOrder for cold events).
+    ArchivedEventOrder(u32),
+    /// Flag marking an event as archived so it is skipped in subsequent archive scans.
+    EventArchivedFlag(BytesN<32>),
+    /// Metadata schema registered for an event type (issue #23).
+    /// Value: Bytes containing the schema descriptor.
+    MetadataSchema(Symbol),
+    /// Retention duration in seconds for an event type (issue #20).
+    /// 0 = keep forever (default). Owner-only write.
+    RetentionPolicy(Symbol),
 }
 
 #[contracterror]
@@ -132,9 +162,72 @@ pub enum ContractError {
     MaxLogsBelowCurrentCount = 16,
     CapAlreadyRemoved = 17,
     CapNeverSet = 18,
+    /// Contract has already been initialized.
+    AlreadyInitialized = 19,
+    /// No events logged for the requested event type.
+    NoEventsForType = 20,
+    /// Nonce is too low (replay-attack prevention, issue #64).
+    NonceTooLow = 21,
+    /// Metadata does not conform to the registered schema (issue #23).
+    MetadataSchemaViolation = 22,
+    /// Invalid pagination parameters (offset/limit out of range).
+    InvalidPaginationParams = 23,
 }
 
 const NULL_ACCOUNT: &str = "GAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAWHF";
+
+// ── Additional type definitions ──────────────────────────────────────────────
+
+/// A versioned snapshot of an Event, stored when `update_event` is called.
+#[contracttype]
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct EventVersion {
+    /// 0-based version counter (0 = original).
+    pub version: u32,
+    /// Full event data at this version.
+    pub data: Event,
+    /// Ledger timestamp when this version was recorded.
+    pub updated_at: u64,
+    /// Address that triggered the update (or original submitter for version 0).
+    pub updated_by: Address,
+}
+
+/// Aggregate statistics returned by `get_statistics`.
+#[contracttype]
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct ContractStatistics {
+    pub total_events: u32,
+    pub events_by_type: Vec<(Symbol, u32)>,
+    pub events_last_hour: u32,
+    pub events_last_day: u32,
+    pub events_last_week: u32,
+    pub top_submitters: Vec<(Address, u32)>,
+}
+
+/// Governance action carried by a multisig proposal.
+#[contracttype]
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub enum ProposalAction {
+    TransferOwnership(Address),
+    AddOwner(Address),
+    RemoveOwner(Address),
+    SetRequiredSignatures(u32),
+    SetGlobalMaxLogs(u32),
+    Pause,
+    Unpause,
+}
+
+/// An on-chain governance proposal awaiting multisig approval.
+#[contracttype]
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct Proposal {
+    pub id: u32,
+    pub proposer: Address,
+    pub action: ProposalAction,
+    pub approvals: Vec<Address>,
+    pub expires_at: u64,
+    pub executed: bool,
+}
 
 #[contract]
 pub struct AuditLedger;
@@ -143,6 +236,10 @@ pub struct AuditLedger;
 impl AuditLedger {
     pub fn initialize(env: Env, owner: Address, global_max_logs: u32) {
         owner.require_auth();
+        // Prevent re-initialization.
+        if env.storage().instance().has(&DataKey::Owner) {
+            panic_with_error!(&env, ContractError::AlreadyInitialized);
+        }
         // Support both single-owner (legacy) and multi-owner setups.
         env.storage().instance().set(&DataKey::Owner, &owner);
         env.storage().instance().set(
@@ -159,12 +256,10 @@ impl AuditLedger {
             panic_with_error!(&env, ContractError::ContractPaused);
         }
 
-        let global_max: u32 = env
-            .storage()
-            .instance()
-            .get(&DataKey::GlobalMaxLogs)
-            .unwrap();
-        let total: u32 = env.storage().instance().get(&DataKey::TotalEvents).unwrap();
+        let cfg: Config = env.storage().instance().get(&DataKey::Config)
+            .unwrap_or_else(|| panic_with_error!(&env, ContractError::ContractNotInitialized));
+        let global_max: u32 = cfg.global_max_logs;
+        let total: u32 = cfg.total_events;
         let batch_len: u32 = events.len();
 
         if total.checked_add(batch_len).is_none() || total + batch_len > global_max {
@@ -266,8 +361,10 @@ impl AuditLedger {
                 index,
                 timestamp,
                 event_type: event_type.clone(),
+                category: Symbol::new(&env, "general"),
                 submitter: submitter.clone(),
                 metadata: metadata.clone(),
+                sub_event_type: None,
                 event_hash: event_hash.clone(),
                 prev_hash: prev_hash.clone(),
             };
@@ -337,22 +434,19 @@ impl AuditLedger {
             current_total += 1;
         }
 
-        env.storage()
-            .instance()
-            .set(&DataKey::TotalEvents, &current_total);
+        let mut updated_cfg: Config = env.storage().instance().get(&DataKey::Config).unwrap();
+        updated_cfg.total_events = current_total;
+        env.storage().instance().set(&DataKey::Config, &updated_cfg);
 
         result_indices
     }
 
     /// Log an event and return its content-addressed `BytesN<32>` ID.
-    #[allow(deprecated)]
     pub fn log_event(
         env: Env,
         submitter: Address,
         event_type: Symbol,
         metadata: Bytes,
-        category: Option<Symbol>,
-        sub_event_type: Option<Symbol>,
     ) -> BytesN<32> {
         Self::require_initialized(&env);
         submitter.require_auth();
@@ -399,11 +493,27 @@ impl AuditLedger {
             panic_with_error!(&env, ContractError::MetadataTooLarge);
         }
 
+        // --- issue #23: enforce metadata schema if one is registered ---
+        if let Some(schema) = env
+            .storage()
+            .instance()
+            .get::<_, Bytes>(&DataKey::MetadataSchema(event_type.clone()))
+        {
+            if !Self::validate_metadata_schema(&metadata, &schema) {
+                panic_with_error!(&env, ContractError::MetadataSchemaViolation);
+            }
+        }
+
         // Task 1: single read for both global_max and total (was 2 reads).
         let mut cfg: Config = env.storage().instance().get(&DataKey::Config).unwrap();
 
         if cfg.total_events >= cfg.global_max_logs {
             panic_with_error!(&env, ContractError::GlobalMaxLogsReached);
+        }
+
+        // Check total_events overflow
+        if cfg.total_events == u32::MAX {
+            panic_with_error!(&env, ContractError::TotalEventsOverflow);
         }
 
         // Task 2+5: single read for cap + current count; reuse count later.
@@ -463,15 +573,14 @@ impl AuditLedger {
         let event_hash =
             Self::compute_event_hash(&env, &event_id, &prev_hash, index, timestamp);
 
-        let cat = category.unwrap_or(Symbol::new(&env, "general"));
         let evt = Event {
             index,
             timestamp,
             event_type: event_type.clone(),
-            category: cat.clone(),
+            category: Symbol::new(&env, "general"),
             submitter: submitter.clone(),
             metadata: metadata.clone(),
-            sub_event_type: sub_event_type.clone(),
+            sub_event_type: None,
             event_hash: event_hash.clone(),
             prev_hash,
         };
@@ -493,7 +602,6 @@ impl AuditLedger {
         env.storage()
             .instance()
             .set(&DataKey::EventHeaderKey(event_id.clone()), &header);
-        // Task 3: removed redundant EventMeta write (same data as EventData).
         env.storage()
             .instance()
             .set(&DataKey::EventMetadata(event_id.clone()), &metadata);
@@ -513,13 +621,6 @@ impl AuditLedger {
 
         // Task 4: cache emission_mode to avoid double read.
         let emission_mode = Self::effective_event_emission_mode(&env);
-
-        if low_cost && emission_mode == 1 {
-            env.events().publish(
-                (Symbol::new(&env, "log_event"), event_type.clone(), submitter.clone()),
-                (index,),
-            );
-        }
 
         // Task 1: single write back the updated Config (was separate TotalEvents write).
         cfg.total_events += 1;
@@ -545,7 +646,7 @@ impl AuditLedger {
             _ => {
                 env.events().publish(
                     (Symbol::new(&env, "log_event"), event_type, submitter),
-                    (index, timestamp, metadata, cat, sub_event_type),
+                    (index, timestamp, metadata),
                 );
             }
         }
@@ -675,7 +776,7 @@ impl AuditLedger {
 
     /// Count events matching a category (scans all events; pagination available via list_events_by_category)
     pub fn event_count_by_category(env: Env, category: Symbol) -> u32 {
-        let total: u32 = env.storage().instance().get(&DataKey::TotalEvents).unwrap_or(0u32);
+        let total: u32 = env.storage().instance().get::<_, Config>(&DataKey::Config).map(|c| c.total_events).unwrap_or(0u32);
         let mut cnt: u32 = 0;
         for i in 0..total {
             let id: BytesN<32> = env.storage().instance().get(&DataKey::EventOrder(i)).unwrap();
@@ -689,7 +790,7 @@ impl AuditLedger {
 
     /// List event headers for a given category with simple pagination.
     pub fn list_events_by_category(env: Env, category: Symbol, start: u32, limit: u32) -> Vec<EventHeader> {
-        let total: u32 = env.storage().instance().get(&DataKey::TotalEvents).unwrap_or(0u32);
+        let total: u32 = env.storage().instance().get::<_, Config>(&DataKey::Config).map(|c| c.total_events).unwrap_or(0u32);
         let mut out: Vec<EventHeader> = Vec::new(&env);
         if start >= total { return out; }
         let mut added: u32 = 0;
@@ -712,7 +813,7 @@ impl AuditLedger {
     pub fn archive_events(env: Env, caller: Address, cutoff_timestamp: u64) -> u32 {
         caller.require_auth();
         Self::require_owner_or_multisig(&env, &caller);
-        let total: u32 = env.storage().instance().get(&DataKey::TotalEvents).unwrap_or(0u32);
+        let total: u32 = env.storage().instance().get::<_, Config>(&DataKey::Config).map(|c| c.total_events).unwrap_or(0u32);
         let mut archived: u32 = env.storage().instance().get(&DataKey::ArchivedTotalEvents).unwrap_or(0u32);
         let mut moved: u32 = 0;
         for i in 0..total {
@@ -1054,8 +1155,10 @@ impl AuditLedger {
             index,
             timestamp: current_event.timestamp,
             event_type: current_event.event_type.clone(),
+            category: current_event.category.clone(),
             submitter: current_event.submitter.clone(),
             metadata: new_metadata.clone(),
+            sub_event_type: current_event.sub_event_type.clone(),
             event_hash: updated_event_hash.clone(),
             prev_hash: prev_hash.clone(),
         };
@@ -1152,12 +1255,14 @@ impl AuditLedger {
             .get(&DataKey::EventData(event_id))
             .unwrap();
 
+        let evt_timestamp = event.timestamp;
+        let evt_submitter = event.submitter.clone();
         let mut history = Vec::new(&env);
         history.push_back(EventVersion {
             version: 0,
             data: event,
-            updated_at: event.timestamp,
-            updated_by: event.submitter.clone(),
+            updated_at: evt_timestamp,
+            updated_by: evt_submitter,
         });
         history
     }
@@ -1171,7 +1276,8 @@ impl AuditLedger {
         let total: u32 = env
             .storage()
             .instance()
-            .get(&DataKey::TotalEvents)
+            .get::<_, Config>(&DataKey::Config)
+            .map(|c| c.total_events)
             .unwrap_or(0);
         Self::verify_range(&env, 0, total)
     }
@@ -1192,13 +1298,12 @@ impl AuditLedger {
             panic_with_error!(&env, ContractError::ContractPaused);
         }
         Self::require_owner(&env, &caller);
-        let total_events: u32 = env.storage().instance().get(&DataKey::TotalEvents).unwrap_or(0);
-        if new_max < total_events {
+        let mut cfg: Config = env.storage().instance().get(&DataKey::Config).unwrap();
+        if new_max < cfg.total_events {
             panic_with_error!(&env, ContractError::MaxLogsBelowCurrentCount);
         }
-        env.storage()
-            .instance()
-            .set(&DataKey::GlobalMaxLogs, &new_max);
+        cfg.global_max_logs = new_max;
+        env.storage().instance().set(&DataKey::Config, &cfg);
     }
 
     pub fn set_event_max_logs(env: Env, caller: Address, event_type: Symbol, new_max: u32) {
@@ -1457,7 +1562,289 @@ impl AuditLedger {
         );
         removed
     }
-    
+
+    // ── Issue #23: Metadata schema validation ────────────────────────────────
+
+    /// Register a metadata schema for an event type (owner-only).
+    ///
+    /// The schema is stored as raw `Bytes` and can represent any format the
+    /// integrator chooses (JSON Schema, Protobuf descriptors, simple field lists, etc.).
+    ///
+    /// ## On-chain enforcement format
+    /// The first 4 bytes of `schema` (little-endian u32) encode the **minimum
+    /// required metadata length**.  `log_event` checks `metadata.len() >= min_len`
+    /// and panics with `MetadataSchemaViolation` if the check fails.  A `min_len`
+    /// of 0 (or an empty schema) imposes no length constraint.
+    ///
+    /// Integrators may embed additional machine-readable schema bytes after the
+    /// first 4 bytes for off-chain validation.
+    pub fn register_metadata_schema(
+        env: Env,
+        caller: Address,
+        event_type: Symbol,
+        schema: Bytes,
+    ) {
+        Self::require_initialized(&env);
+        caller.require_auth();
+        Self::require_owner_or_multisig(&env, &caller);
+        env.storage()
+            .instance()
+            .set(&DataKey::MetadataSchema(event_type.clone()), &schema);
+        env.events().publish(
+            (Symbol::new(&env, "schema_registered"), event_type),
+            (schema.len(),),
+        );
+    }
+
+    /// Retrieve the schema registered for an event type, or `None` if absent.
+    pub fn get_metadata_schema(env: Env, event_type: Symbol) -> Option<Bytes> {
+        Self::require_initialized(&env);
+        env.storage()
+            .instance()
+            .get(&DataKey::MetadataSchema(event_type))
+    }
+
+    /// Remove the metadata schema for an event type (owner-only).
+    /// After removal, `log_event` no longer enforces any schema for that type.
+    pub fn remove_metadata_schema(env: Env, caller: Address, event_type: Symbol) {
+        Self::require_initialized(&env);
+        caller.require_auth();
+        Self::require_owner_or_multisig(&env, &caller);
+        env.storage()
+            .instance()
+            .remove(&DataKey::MetadataSchema(event_type.clone()));
+        env.events().publish(
+            (Symbol::new(&env, "schema_removed"), event_type),
+            (),
+        );
+    }
+
+    // ── Issue #20: Event retention policy ────────────────────────────────────
+
+    /// Set a per-event-type retention duration (owner-only).
+    ///
+    /// `duration_seconds` — how long events of this type are kept.
+    /// Set to `0` for "keep forever" (default).
+    pub fn set_retention_policy(
+        env: Env,
+        caller: Address,
+        event_type: Symbol,
+        duration_seconds: u64,
+    ) {
+        Self::require_initialized(&env);
+        caller.require_auth();
+        Self::require_owner_or_multisig(&env, &caller);
+        env.storage()
+            .instance()
+            .set(&DataKey::RetentionPolicy(event_type.clone()), &duration_seconds);
+        env.events().publish(
+            (Symbol::new(&env, "retention_policy_set"), event_type),
+            (duration_seconds,),
+        );
+    }
+
+    /// Get the retention policy duration for an event type.
+    /// Returns `0` if no policy is set (keep forever).
+    pub fn get_retention_policy(env: Env, event_type: Symbol) -> u64 {
+        Self::require_initialized(&env);
+        env.storage()
+            .instance()
+            .get(&DataKey::RetentionPolicy(event_type))
+            .unwrap_or(0u64)
+    }
+
+    /// Scan all events and remove those past their retention period (owner-only).
+    ///
+    /// For each event type that has a non-zero retention policy, events whose
+    /// `timestamp + duration_seconds <= now` are removed from storage.
+    ///
+    /// Emits an `events_pruned` event with the count of removed events.
+    /// Returns the number of events pruned.
+    ///
+    /// NOTE: This removes the event from primary storage (`EventData`, `EventOrder`,
+    /// `EventHeaderKey`, `EventMetadata`). The hash-chain integrity check may fail
+    /// after pruning — it is the caller's responsibility to archive events before
+    /// pruning if chain integrity must be preserved.
+    pub fn enforce_retention(env: Env, caller: Address) -> u32 {
+        Self::require_initialized(&env);
+        caller.require_auth();
+        Self::require_owner_or_multisig(&env, &caller);
+
+        let cfg: Config = env.storage().instance().get(&DataKey::Config).unwrap();
+        let total = cfg.total_events;
+        let now = env.ledger().timestamp();
+        let mut pruned: u32 = 0;
+
+        for i in 0..total {
+            let event_id_opt: Option<BytesN<32>> = env
+                .storage()
+                .instance()
+                .get(&DataKey::EventOrder(i));
+            let event_id = match event_id_opt {
+                Some(id) => id,
+                None => continue, // already removed
+            };
+            let evt_opt: Option<Event> = env
+                .storage()
+                .instance()
+                .get(&DataKey::EventData(event_id.clone()));
+            let evt = match evt_opt {
+                Some(e) => e,
+                None => continue,
+            };
+
+            let duration: u64 = env
+                .storage()
+                .instance()
+                .get(&DataKey::RetentionPolicy(evt.event_type.clone()))
+                .unwrap_or(0u64);
+
+            if duration == 0 {
+                continue; // keep forever
+            }
+
+            let expires_at = evt.timestamp.saturating_add(duration);
+            if now >= expires_at {
+                // Remove all storage keys for this event.
+                env.storage().instance().remove(&DataKey::EventData(event_id.clone()));
+                env.storage().instance().remove(&DataKey::EventHeaderKey(event_id.clone()));
+                env.storage().instance().remove(&DataKey::EventMetadata(event_id.clone()));
+                env.storage().instance().remove(&DataKey::EventOrder(i));
+                pruned += 1;
+            }
+        }
+
+        env.events().publish(
+            (Symbol::new(&env, "events_pruned"),),
+            (pruned,),
+        );
+        pruned
+    }
+
+    // ── Issue #21: Event export functionality ────────────────────────────────
+
+    /// Export a slice of events, optionally filtered by event type.
+    ///
+    /// Parameters:
+    /// - `caller` — must be authenticated (any user, not owner-only).
+    /// - `event_type` — `None` = export all types, `Some(t)` = only events of type `t`.
+    /// - `start_index` — global sequential index to start from.
+    /// - `count` — maximum number of events to return (capped at 1 000 to prevent gas exhaustion).
+    ///
+    /// Returns a `Vec<Event>` (may be shorter than `count` if fewer events exist).
+    pub fn export_events(
+        env: Env,
+        caller: Address,
+        event_type: Option<Symbol>,
+        start_index: u32,
+        count: u32,
+    ) -> Vec<Event> {
+        Self::require_initialized(&env);
+        caller.require_auth();
+
+        const MAX_EXPORT: u32 = 1000;
+        let limit = if count > MAX_EXPORT { MAX_EXPORT } else { count };
+
+        let cfg: Config = env.storage().instance().get(&DataKey::Config).unwrap();
+        let total = cfg.total_events;
+
+        let mut results: Vec<Event> = Vec::new(&env);
+        let mut exported: u32 = 0;
+        let mut i = start_index;
+
+        while i < total && exported < limit {
+            let event_id_opt: Option<BytesN<32>> = env
+                .storage()
+                .instance()
+                .get(&DataKey::EventOrder(i));
+            if let Some(event_id) = event_id_opt {
+                if let Some(evt) = env
+                    .storage()
+                    .instance()
+                    .get::<_, Event>(&DataKey::EventData(event_id))
+                {
+                    let include = match &event_type {
+                        None => true,
+                        Some(t) => evt.event_type == *t,
+                    };
+                    if include {
+                        results.push_back(evt);
+                        exported += 1;
+                    }
+                }
+            }
+            i += 1;
+        }
+
+        results
+    }
+
+    /// Export ALL events in the ledger (owner-only).
+    ///
+    /// This is a privileged, potentially gas-intensive operation intended for
+    /// backup and auditing purposes. It returns every non-pruned event in
+    /// insertion order.
+    ///
+    /// NOTE: For large ledgers, callers should prefer `export_events` with
+    /// pagination to avoid hitting gas limits.
+    pub fn export_all_events(env: Env, caller: Address) -> Vec<Event> {
+        Self::require_initialized(&env);
+        caller.require_auth();
+        Self::require_owner_or_multisig(&env, &caller);
+
+        let cfg: Config = env.storage().instance().get(&DataKey::Config).unwrap();
+        let total = cfg.total_events;
+        let mut results: Vec<Event> = Vec::new(&env);
+
+        for i in 0..total {
+            let event_id_opt: Option<BytesN<32>> = env
+                .storage()
+                .instance()
+                .get(&DataKey::EventOrder(i));
+            if let Some(event_id) = event_id_opt {
+                if let Some(evt) = env
+                    .storage()
+                    .instance()
+                    .get::<_, Event>(&DataKey::EventData(event_id))
+                {
+                    results.push_back(evt);
+                }
+            }
+        }
+
+        results
+    }
+
+    // ── Issue #24: Event chaining public API ─────────────────────────────────
+
+    /// Verify the full hash chain from genesis to the latest event.
+    ///
+    /// Returns `true` if every event's `prev_hash` matches the preceding
+    /// event's `event_hash` and each event's own `event_hash` is correct.
+    /// Returns `false` on any discrepancy (tampered or missing event).
+    ///
+    /// Delegates to the existing `verify_integrity` implementation.
+    pub fn verify_chain(env: Env) -> bool {
+        Self::verify_integrity(env)
+    }
+
+    /// Verify the hash chain starting from `start_index` to the end.
+    ///
+    /// Useful for verifying only a recent portion of the log without scanning
+    /// the entire history.  Returns `true` if the sub-chain is intact.
+    ///
+    /// Delegates to the existing `verify_integrity_range` implementation.
+    pub fn verify_chain_from(env: Env, start_index: u32) -> bool {
+        Self::require_initialized(&env);
+        let total: u32 = env
+            .storage()
+            .instance()
+            .get::<_, Config>(&DataKey::Config)
+            .map(|c| c.total_events)
+            .unwrap_or(0);
+        Self::verify_range(&env, start_index, total)
+    }
+
     fn effective_low_cost_mode(env: &Env) -> bool {
         env.storage()
             .instance()
@@ -1505,15 +1892,13 @@ impl AuditLedger {
         submitter: Address,
         event_type: Symbol,
         metadata: Bytes,
-        category: Option<Symbol>,
-        sub_event_type: Option<Symbol>,
         signature_payload: Bytes,
     ) -> BytesN<32> {
         // Delegates auth to the inner log_event call.
         if signature_payload.len() != 96 {
             panic_with_error!(&env, ContractError::InvalidSignature);
         }
-        let event_id = Self::log_event(env.clone(), submitter, event_type, metadata.clone(), category, sub_event_type);
+        let event_id = Self::log_event(env.clone(), submitter, event_type, metadata.clone());
         env.storage()
             .instance()
             .set(&DataKey::EventSignature(event_id.clone()), &signature_payload);
@@ -1530,6 +1915,74 @@ impl AuditLedger {
     }
 
     // ── Private helpers ─────────────────────────────────────────────────────
+
+    /// Panic with `ContractNotInitialized` if the contract has not been initialized.
+    fn require_initialized(env: &Env) {
+        if !env.storage().instance().has(&DataKey::Owner) {
+            panic_with_error!(env, ContractError::ContractNotInitialized);
+        }
+    }
+
+    /// Increment the count for `addr` in a (Address, u32) accumulator Vec.
+    /// Returns the NEW count for that address in the batch.
+    fn increment_address_count(
+        _env: &Env,
+        counts: &mut Vec<(Address, u32)>,
+        addr: Address,
+    ) -> u32 {
+        for idx in 0..counts.len() {
+            let pair: (Address, u32) = counts.get(idx).unwrap();
+            if pair.0 == addr {
+                let new_count = pair.1 + 1;
+                counts.set(idx, &(addr.clone(), new_count));
+                return new_count;
+            }
+        }
+        counts.push_back(&(addr, 1u32));
+        1u32
+    }
+
+    /// Increment the count for `sym` in a (Symbol, u32) accumulator Vec.
+    /// Returns the NEW count for that symbol in the batch.
+    fn increment_symbol_count(
+        _env: &Env,
+        counts: &mut Vec<(Symbol, u32)>,
+        sym: Symbol,
+    ) -> u32 {
+        for idx in 0..counts.len() {
+            let pair: (Symbol, u32) = counts.get(idx).unwrap();
+            if pair.0 == sym {
+                let new_count = pair.1 + 1;
+                counts.set(idx, &(sym.clone(), new_count));
+                return new_count;
+            }
+        }
+        counts.push_back(&(sym, 1u32));
+        1u32
+    }
+
+    /// Validate that `metadata` conforms to `schema`.
+    ///
+    /// ## Schema format
+    /// The schema is a length-prefixed byte sequence: the first 4 bytes (LE u32)
+    /// encode the minimum required metadata length.  If `metadata.len() >= min_len`,
+    /// the validation passes.  A `min_len` of 0 accepts any metadata (including empty).
+    ///
+    /// This simple format is intentionally minimal to remain gas-efficient on-chain.
+    /// Off-chain consumers can apply richer validation (JSON Schema, Protobuf, etc.)
+    /// after retrieving the schema via `get_metadata_schema`.
+    fn validate_metadata_schema(metadata: &Bytes, schema: &Bytes) -> bool {
+        if schema.len() < 4 {
+            // Schema too short to contain the minimum-length prefix — treat as no constraint.
+            return true;
+        }
+        let b0 = schema.get(0).unwrap() as u32;
+        let b1 = schema.get(1).unwrap() as u32;
+        let b2 = schema.get(2).unwrap() as u32;
+        let b3 = schema.get(3).unwrap() as u32;
+        let min_len: u32 = b0 | (b1 << 8) | (b2 << 16) | (b3 << 24);
+        metadata.len() >= min_len
+    }
 
     // ── issue #54: packed-Bytes index storage helpers ────────────────────────
 
@@ -1760,7 +2213,10 @@ impl AuditLedger {
                 env.storage().instance().set(&DataKey::RequiredSignatures, &req);
             }
             ProposalAction::SetGlobalMaxLogs(v) => {
-                env.storage().instance().set(&DataKey::GlobalMaxLogs, &v);
+                if let Some(mut c) = env.storage().instance().get::<_, Config>(&DataKey::Config) {
+                    c.global_max_logs = v;
+                    env.storage().instance().set(&DataKey::Config, &c);
+                }
             }
             ProposalAction::Pause => {
                 env.storage().instance().set(&DataKey::Paused, &true);
@@ -1871,7 +2327,7 @@ impl AuditLedger {
     }
 
     fn collect_statistics(env: &Env) -> ContractStatistics {
-        let total: u32 = env.storage().instance().get(&DataKey::TotalEvents).unwrap_or(0);
+        let total: u32 = env.storage().instance().get::<_, Config>(&DataKey::Config).map(|c| c.total_events).unwrap_or(0);
         let now = env.ledger().timestamp();
         let mut events_by_type: Vec<(Symbol, u32)> = Vec::new(&env);
         let mut top_submitters: Vec<(Address, u32)> = Vec::new(&env);

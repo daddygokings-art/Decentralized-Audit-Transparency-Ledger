@@ -1464,3 +1464,323 @@ fn test_update_event_nonexistent_panics() {
     env.mock_all_auths();
     client.update_event(&owner, &0, &Bytes::from_slice(&env, b"updated"));
 }
+
+
+// ── Issue #23: Metadata schema validation ────────────────────────────────────
+
+#[test]
+fn test_register_and_get_metadata_schema() {
+    let (env, owner, client) = create_ledger();
+    let payment = symbol_short!("payment");
+
+    env.mock_all_auths();
+    // Schema: min-length = 3 bytes (stored as LE u32 prefix)
+    let schema = Bytes::from_slice(&env, &[3u8, 0u8, 0u8, 0u8]);
+    client.register_metadata_schema(&owner, &payment, &schema);
+
+    let stored = client.get_metadata_schema(&payment);
+    assert!(stored.is_some());
+    assert_eq!(stored.unwrap(), schema);
+}
+
+#[test]
+fn test_log_event_with_valid_schema_passes() {
+    let (env, owner, client) = create_ledger();
+    let submitter = Address::generate(&env);
+    let payment = symbol_short!("payment");
+
+    env.mock_all_auths();
+    // Schema requires at least 3 bytes of metadata
+    let schema = Bytes::from_slice(&env, &[3u8, 0u8, 0u8, 0u8]);
+    client.register_metadata_schema(&owner, &payment, &schema);
+
+    // Metadata is 5 bytes — passes the >= 3 check
+    let id = client.log_event(&submitter, &payment, &Bytes::from_slice(&env, b"hello"));
+    assert_eq!(client.total_events(), 1);
+    let evt = client.get_event(&id);
+    assert_eq!(evt.metadata, Bytes::from_slice(&env, b"hello"));
+}
+
+#[test]
+#[should_panic(expected = "HostError: Error(Contract, #22)")]
+fn test_log_event_with_invalid_schema_panics() {
+    let (env, owner, client) = create_ledger();
+    let submitter = Address::generate(&env);
+    let payment = symbol_short!("payment");
+
+    env.mock_all_auths();
+    // Schema requires at least 10 bytes
+    let schema = Bytes::from_slice(&env, &[10u8, 0u8, 0u8, 0u8]);
+    client.register_metadata_schema(&owner, &payment, &schema);
+
+    // Metadata is only 3 bytes — fails the >= 10 check
+    client.log_event(&submitter, &payment, &Bytes::from_slice(&env, b"hi!"));
+}
+
+#[test]
+fn test_remove_schema_allows_any_metadata() {
+    let (env, owner, client) = create_ledger();
+    let submitter = Address::generate(&env);
+    let payment = symbol_short!("payment");
+
+    env.mock_all_auths();
+    let schema = Bytes::from_slice(&env, &[10u8, 0u8, 0u8, 0u8]);
+    client.register_metadata_schema(&owner, &payment, &schema);
+    client.remove_metadata_schema(&owner, &payment);
+
+    // After removal, even short metadata is accepted
+    let id = client.log_event(&submitter, &payment, &Bytes::from_slice(&env, b"ok"));
+    assert_eq!(client.total_events(), 1);
+    let _ = client.get_event(&id);
+}
+
+#[test]
+fn test_get_metadata_schema_returns_none_when_absent() {
+    let (_env, _owner, client) = create_ledger();
+    let payment = symbol_short!("payment");
+    assert!(client.get_metadata_schema(&payment).is_none());
+}
+
+// ── Issue #20: Event retention policy ────────────────────────────────────────
+
+#[test]
+fn test_set_and_get_retention_policy() {
+    let (env, owner, client) = create_ledger();
+    let payment = symbol_short!("payment");
+
+    env.mock_all_auths();
+    client.set_retention_policy(&owner, &payment, &3600u64);
+    assert_eq!(client.get_retention_policy(&payment), 3600u64);
+}
+
+#[test]
+fn test_retention_policy_zero_keeps_forever() {
+    let (env, owner, client) = create_ledger();
+    let payment = symbol_short!("payment");
+
+    env.mock_all_auths();
+    client.set_retention_policy(&owner, &payment, &0u64);
+    assert_eq!(client.get_retention_policy(&payment), 0u64);
+}
+
+#[test]
+fn test_enforce_retention_prunes_old_events() {
+    let (env, owner, client) = create_ledger();
+    let submitter = Address::generate(&env);
+    let payment = symbol_short!("payment");
+
+    env.mock_all_auths();
+    // Log event at t=1000
+    env.ledger().set_timestamp(1000);
+    client.log_event(&submitter, &payment, &Bytes::from_slice(&env, b"old"));
+
+    // Set retention to 500 seconds
+    client.set_retention_policy(&owner, &payment, &500u64);
+
+    // Advance time past expiry (1000 + 500 = 1500, now = 1501)
+    env.ledger().set_timestamp(1501);
+    let pruned = client.enforce_retention(&owner);
+    assert_eq!(pruned, 1);
+}
+
+#[test]
+fn test_enforce_retention_keeps_recent_events() {
+    let (env, owner, client) = create_ledger();
+    let submitter = Address::generate(&env);
+    let payment = symbol_short!("payment");
+
+    env.mock_all_auths();
+    env.ledger().set_timestamp(1000);
+    client.log_event(&submitter, &payment, &Bytes::from_slice(&env, b"new"));
+
+    // Set retention to 3600 seconds
+    client.set_retention_policy(&owner, &payment, &3600u64);
+
+    // Only 100 seconds have passed — event should NOT be pruned
+    env.ledger().set_timestamp(1100);
+    let pruned = client.enforce_retention(&owner);
+    assert_eq!(pruned, 0);
+}
+
+#[test]
+fn test_enforce_retention_zero_policy_keeps_all() {
+    let (env, owner, client) = create_ledger();
+    let submitter = Address::generate(&env);
+    let payment = symbol_short!("payment");
+
+    env.mock_all_auths();
+    env.ledger().set_timestamp(1000);
+    client.log_event(&submitter, &payment, &Bytes::from_slice(&env, b"keep"));
+
+    // Duration=0 means keep forever
+    client.set_retention_policy(&owner, &payment, &0u64);
+    env.ledger().set_timestamp(999999);
+    let pruned = client.enforce_retention(&owner);
+    assert_eq!(pruned, 0);
+}
+
+// ── Issue #21: Event export functionality ────────────────────────────────────
+
+#[test]
+fn test_export_events_empty_ledger() {
+    let (env, owner, client) = create_ledger();
+    env.mock_all_auths();
+    let result = client.export_events(&owner, &None, &0, &10);
+    assert_eq!(result.len(), 0);
+}
+
+#[test]
+fn test_export_events_no_type_filter() {
+    let (env, owner, client) = create_ledger();
+    let submitter = Address::generate(&env);
+    let payment = symbol_short!("payment");
+    let refund = symbol_short!("refund");
+
+    env.mock_all_auths();
+    env.ledger().set_timestamp(1000);
+    client.log_event(&submitter, &payment, &Bytes::from_slice(&env, b"a"));
+    env.ledger().set_timestamp(1001);
+    client.log_event(&submitter, &refund, &Bytes::from_slice(&env, b"b"));
+    env.ledger().set_timestamp(1002);
+    client.log_event(&submitter, &payment, &Bytes::from_slice(&env, b"c"));
+
+    let result = client.export_events(&owner, &None, &0, &100);
+    assert_eq!(result.len(), 3);
+}
+
+#[test]
+fn test_export_events_with_type_filter() {
+    let (env, owner, client) = create_ledger();
+    let submitter = Address::generate(&env);
+    let payment = symbol_short!("payment");
+    let refund = symbol_short!("refund");
+
+    env.mock_all_auths();
+    env.ledger().set_timestamp(1000);
+    client.log_event(&submitter, &payment, &Bytes::from_slice(&env, b"p1"));
+    env.ledger().set_timestamp(1001);
+    client.log_event(&submitter, &refund, &Bytes::from_slice(&env, b"r1"));
+    env.ledger().set_timestamp(1002);
+    client.log_event(&submitter, &payment, &Bytes::from_slice(&env, b"p2"));
+
+    let result = client.export_events(&owner, &Some(payment.clone()), &0, &100);
+    assert_eq!(result.len(), 2);
+    assert_eq!(result.get(0).unwrap().metadata, Bytes::from_slice(&env, b"p1"));
+    assert_eq!(result.get(1).unwrap().metadata, Bytes::from_slice(&env, b"p2"));
+}
+
+#[test]
+fn test_export_events_count_limit() {
+    let (env, owner, client) = create_ledger();
+    let submitter = Address::generate(&env);
+    let payment = symbol_short!("payment");
+
+    env.mock_all_auths();
+    env.ledger().set_timestamp(1000);
+    for _ in 0..5u32 {
+        client.log_event(&submitter, &payment, &Bytes::from_slice(&env, b"x"));
+    }
+
+    // Only request 3
+    let result = client.export_events(&owner, &None, &0, &3);
+    assert_eq!(result.len(), 3);
+}
+
+#[test]
+fn test_export_events_beyond_total() {
+    let (env, owner, client) = create_ledger();
+    let submitter = Address::generate(&env);
+    let payment = symbol_short!("payment");
+
+    env.mock_all_auths();
+    env.ledger().set_timestamp(1000);
+    client.log_event(&submitter, &payment, &Bytes::from_slice(&env, b"only"));
+
+    // start_index = 5 but only 1 event exists
+    let result = client.export_events(&owner, &None, &5, &10);
+    assert_eq!(result.len(), 0);
+}
+
+#[test]
+fn test_export_all_events_owner_only() {
+    let (env, owner, client) = create_ledger();
+    let submitter = Address::generate(&env);
+    let payment = symbol_short!("payment");
+
+    env.mock_all_auths();
+    env.ledger().set_timestamp(1000);
+    client.log_event(&submitter, &payment, &Bytes::from_slice(&env, b"a"));
+    env.ledger().set_timestamp(1001);
+    client.log_event(&submitter, &payment, &Bytes::from_slice(&env, b"b"));
+
+    let result = client.export_all_events(&owner);
+    assert_eq!(result.len(), 2);
+}
+
+// ── Issue #24: Event chaining (verify_chain / verify_chain_from) ─────────────
+
+#[test]
+fn test_verify_chain_empty_ledger() {
+    let (_env, _owner, client) = create_ledger();
+    assert!(client.verify_chain());
+}
+
+#[test]
+fn test_verify_chain_single_event() {
+    let (env, _owner, client) = create_ledger();
+    let submitter = Address::generate(&env);
+
+    env.mock_all_auths();
+    env.ledger().set_timestamp(1000);
+    client.log_event(&submitter, &symbol_short!("pay"), &Bytes::from_slice(&env, b"x"));
+    assert!(client.verify_chain());
+}
+
+#[test]
+fn test_verify_chain_multiple_events() {
+    let (env, _owner, client) = create_ledger();
+    let submitter = Address::generate(&env);
+    let payment = symbol_short!("payment");
+
+    env.mock_all_auths();
+    env.ledger().set_timestamp(1000);
+    client.log_event(&submitter, &payment, &Bytes::from_slice(&env, b"a"));
+    env.ledger().set_timestamp(1001);
+    client.log_event(&submitter, &payment, &Bytes::from_slice(&env, b"b"));
+    env.ledger().set_timestamp(1002);
+    client.log_event(&submitter, &payment, &Bytes::from_slice(&env, b"c"));
+
+    assert!(client.verify_chain());
+}
+
+#[test]
+fn test_verify_chain_from_start_index() {
+    let (env, _owner, client) = create_ledger();
+    let submitter = Address::generate(&env);
+    let payment = symbol_short!("payment");
+
+    env.mock_all_auths();
+    env.ledger().set_timestamp(1000);
+    for _ in 0..5u32 {
+        client.log_event(&submitter, &payment, &Bytes::from_slice(&env, b"ev"));
+    }
+
+    // Partial chain verification from index 2
+    assert!(client.verify_chain_from(&2));
+    // Full chain from genesis
+    assert!(client.verify_chain_from(&0));
+}
+
+#[test]
+fn test_verify_chain_genesis_prev_hash_is_zero() {
+    let (env, _owner, client) = create_ledger();
+    let submitter = Address::generate(&env);
+
+    env.mock_all_auths();
+    env.ledger().set_timestamp(1000);
+    let id = client.log_event(&submitter, &symbol_short!("pay"), &Bytes::from_slice(&env, b"g"));
+    let evt = client.get_event(&id);
+    // Genesis prev_hash must be all zeros
+    assert_eq!(evt.prev_hash, BytesN::from_array(&env, &[0u8; 32]));
+    assert!(client.verify_chain());
+}
