@@ -70,6 +70,13 @@ const avgGasCost = new client.Gauge({
   registers: [registry],
 });
 
+const chainIntegrityOk = new client.Gauge({
+  name: "audit_ledger_chain_integrity_ok",
+  help: "1 if the hash chain integrity check passed, 0 if it failed",
+  labelNames: ["contract_id"],
+  registers: [registry],
+});
+
 // ── Soroban RPC helpers ─────────────────────────────────────────────────────
 
 const networkPassphrase =
@@ -135,6 +142,18 @@ async function scrape() {
       storageUsagePct.set(max > 0 ? (total / max) * 100 : 0);
     } catch {
       // Contract doesn't expose this endpoint; skip global max metrics
+    }
+
+    // chain integrity check — calls verify_integrity on-chain
+    try {
+      const integrityVal = await callContract("verify_integrity");
+      // verify_integrity returns a bool ScVal
+      const ok = integrityVal && integrityVal.switch().name === "scvBool"
+        ? (integrityVal.b() ? 1 : 0)
+        : 0;
+      chainIntegrityOk.set({ contract_id: CONTRACT_ID }, ok);
+    } catch {
+      chainIntegrityOk.set({ contract_id: CONTRACT_ID }, 0);
     }
 
     // events_by_type – requires knowing all types; scrape is best-effort

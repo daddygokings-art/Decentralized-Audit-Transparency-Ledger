@@ -36,3 +36,12 @@ groups:
         annotations:
           summary: "AuditLedger contract appears paused"
           description: "global_max_logs is 0, blocking all new event logging."
+
+      - alert: HashChainIntegrityBreak
+        expr: audit_ledger_chain_integrity_ok == 0
+        for: 1m
+        labels:
+          severity: critical
+        annotations:
+          summary: "AuditLedger hash chain integrity violation detected"
+          description: "Contract {{ $labels.contract_id }} failed verify_integrity — the event hash chain may have been tampered with."
