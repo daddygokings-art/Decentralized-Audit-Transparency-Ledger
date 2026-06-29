@@ -1794,3 +1794,79 @@ fn test_blocklist_takes_precedence() {
     }));
     assert!(result.is_err());
 }
+
+// ── Issue #63: Symbol input validation ───────────────────────────────────────
+
+#[test]
+fn test_symbol_single_char_accepted() {
+    let (env, _owner, client) = create_ledger();
+    let submitter = Address::generate(&env);
+    env.mock_all_auths();
+    client.log_event(&submitter, &Symbol::new(&env, "x"), &Bytes::from_slice(&env, b"ok"), &None, &None);
+    assert_eq!(client.total_events(), 1);
+}
+
+#[test]
+fn test_symbol_valid_with_underscore_and_digits() {
+    let (env, _owner, client) = create_ledger();
+    let submitter = Address::generate(&env);
+    env.mock_all_auths();
+    client.log_event(&submitter, &Symbol::new(&env, "pay_v2"), &Bytes::from_slice(&env, b"ok"), &None, &None);
+    assert_eq!(client.total_events(), 1);
+}
+
+#[test]
+#[should_panic(expected = "HostError: Error(Contract, #25)")]
+fn test_symbol_too_long_rejected_in_set_event_max_logs() {
+    let (env, owner, client) = create_ledger();
+    env.mock_all_auths();
+    // 33-character symbol — exceeds the 32-byte maximum
+    client.set_event_max_logs(&owner, &Symbol::new(&env, "abcdefghijklmnopqrstuvwxyz1234567"), &10);
+}
+
+#[test]
+#[should_panic(expected = "HostError: Error(Contract, #26)")]
+fn test_symbol_hyphen_rejected_in_log_event() {
+    let (env, _owner, client) = create_ledger();
+    let submitter = Address::generate(&env);
+    env.mock_all_auths();
+    client.log_event(&submitter, &Symbol::new(&env, "bad-type"), &Bytes::from_slice(&env, b"x"), &None, &None);
+}
+
+#[test]
+#[should_panic(expected = "HostError: Error(Contract, #26)")]
+fn test_symbol_hyphen_rejected_in_set_event_max_logs() {
+    let (env, owner, client) = create_ledger();
+    env.mock_all_auths();
+    client.set_event_max_logs(&owner, &Symbol::new(&env, "bad-type"), &5);
+}
+
+#[test]
+fn test_set_event_max_logs_valid_symbol() {
+    let (env, owner, client) = create_ledger();
+    env.mock_all_auths();
+    client.set_event_max_logs(&owner, &Symbol::new(&env, "transfer_v1"), &10);
+}
+
+// ── Issue #61: Reentrancy guard ───────────────────────────────────────────────
+
+#[test]
+fn test_reentrancy_guard_sequential_calls_work() {
+    let (env, _owner, client) = create_ledger();
+    let submitter = Address::generate(&env);
+    env.mock_all_auths();
+    client.log_event(&submitter, &Symbol::new(&env, "pay"), &Bytes::from_slice(&env, b"1"), &None, &None);
+    client.log_event(&submitter, &Symbol::new(&env, "pay"), &Bytes::from_slice(&env, b"2"), &None, &None);
+    assert_eq!(client.total_events(), 2);
+}
+
+#[test]
+fn test_reentrancy_guard_cleared_after_call() {
+    let (env, _owner, client) = create_ledger();
+    let submitter = Address::generate(&env);
+    env.mock_all_auths();
+    for i in 0u8..5 {
+        client.log_event(&submitter, &Symbol::new(&env, "evt"), &Bytes::from_slice(&env, &[i]), &None, &None);
+    }
+    assert_eq!(client.total_events(), 5);
+}

@@ -121,6 +121,15 @@ pub enum DataKey {
     RequiredSignatures,
     ProposalCount,
     Proposal(u32),
+    /// Blocklist flag per submitter (issue #141). Present+true = blocked.
+    SubmitterBlocklist(Address),
+    /// When true, only allowlisted submitters may log events (issue #141).
+    AllowlistMode,
+    /// Allowlist flag per submitter (issue #141). Present+true = allowed.
+    SubmitterAllowlist(Address),
+    /// Reentrancy guard flag for log_event (issue #61).
+    /// Stored in temporary storage so it auto-expires after the ledger closes.
+    LogEventReentrancyGuard,
 }
 
 #[contracterror]
@@ -149,6 +158,14 @@ pub enum ContractError {
     NoEventsForType = 20,
     InvalidPaginationParams = 21,
     InvalidWasmHash = 22,
+    /// Caller is on the blocklist or not on the allowlist (issue #141).
+    SubmitterBlocked = 23,
+    /// A reentrant call to log_event was detected (issue #61).
+    ReentrancyDetected = 24,
+    /// event_type Symbol is empty or exceeds 32 bytes (issue #63).
+    InvalidEventTypeLength = 25,
+    /// event_type Symbol contains characters outside [a-zA-Z0-9_] (issue #63).
+    InvalidEventTypeChars = 26,
 }
 
 #[contracttype]
@@ -402,7 +419,7 @@ impl AuditLedger {
 
         env.storage()
             .instance()
-            .set(&DataKey::Config, &Config { global_max_logs, total_events: current_total });
+            .set(&DataKey::Config, &Config { global_max_logs: global_max, total_events: current_total });
         env.storage()
             .instance()
             .set(&DataKey::TotalEvents, &current_total);
@@ -422,6 +439,23 @@ impl AuditLedger {
     ) -> BytesN<32> {
         Self::require_initialized(&env);
         submitter.require_auth();
+
+        // --- issue #61: reentrancy guard ---
+        // Temporary storage is scoped to the current transaction; if a
+        // reentrant call arrives before the key is cleared the guard fires.
+        if env
+            .storage()
+            .temporary()
+            .has(&DataKey::LogEventReentrancyGuard)
+        {
+            panic_with_error!(&env, ContractError::ReentrancyDetected);
+        }
+        env.storage()
+            .temporary()
+            .set(&DataKey::LogEventReentrancyGuard, &true);
+
+        // --- issue #63: validate event_type Symbol ---
+        Self::validate_event_type(&env, &event_type);
 
         // Reject writes when contract is paused.
         if let Some(true) = env.storage().instance().get::<_, bool>(&DataKey::Paused) {
@@ -635,6 +669,11 @@ impl AuditLedger {
                 );
             }
         }
+
+        // --- issue #61: clear reentrancy guard before returning ---
+        env.storage()
+            .temporary()
+            .remove(&DataKey::LogEventReentrancyGuard);
 
         event_id
     }
@@ -956,7 +995,7 @@ impl AuditLedger {
             panic_with_error!(&env, ContractError::InvalidPaginationParams);
         }
 
-        let total = Self::total_events(&env);
+        let total = Self::total_events(env.clone());
         if offset >= total {
             return Vec::new(&env);
         }
@@ -982,7 +1021,7 @@ impl AuditLedger {
             panic_with_error!(&env, ContractError::InvalidPaginationParams);
         }
 
-        let total = Self::event_count(&env, event_type.clone());
+        let total = Self::event_count(env.clone(), event_type.clone());
         if offset >= total {
             return Vec::new(&env);
         }
@@ -1012,7 +1051,7 @@ impl AuditLedger {
             return Vec::new(&env);
         }
 
-        let total = Self::total_events(&env);
+        let total = Self::total_events(env.clone());
         let mut matches = Vec::new(&env);
         for i in 0..total {
             let evt = Self::get_event_by_order(env.clone(), i);
@@ -1042,7 +1081,7 @@ impl AuditLedger {
             panic_with_error!(&env, ContractError::InvalidPaginationParams);
         }
 
-        let total = Self::total_events(&env);
+        let total = Self::total_events(env.clone());
         let mut matches = Vec::new(&env);
         for i in 0..total {
             let evt = Self::get_event_by_order(env.clone(), i);
@@ -1073,7 +1112,7 @@ impl AuditLedger {
         caller.require_auth();
         Self::require_owner(&env, &caller);
 
-        let total = Self::total_events(&env);
+        let total = Self::total_events(env.clone());
         if index >= total {
             panic_with_error!(&env, ContractError::EventDoesNotExist);
         }
@@ -1229,7 +1268,7 @@ impl AuditLedger {
     }
 
     pub fn get_event_history(env: Env, index: u32) -> Vec<EventVersion> {
-        let total = Self::total_events(&env);
+        let total = Self::total_events(env.clone());
         if index >= total {
             return Vec::new(&env);
         }
@@ -1252,11 +1291,13 @@ impl AuditLedger {
             .unwrap();
 
         let mut history = Vec::new(&env);
+        let ts = event.timestamp;
+        let sub = event.submitter.clone();
         history.push_back(EventVersion {
             version: 0,
             data: event,
-            updated_at: event.timestamp,
-            updated_by: event.submitter.clone(),
+            updated_at: ts,
+            updated_by: sub,
         });
         history
     }
@@ -1304,6 +1345,8 @@ impl AuditLedger {
             panic_with_error!(&env, ContractError::ContractPaused);
         }
         Self::require_owner_or_multisig(&env, &caller);
+        // --- issue #63: validate event_type Symbol ---
+        Self::validate_event_type(&env, &event_type);
         env.storage()
             .instance()
             .set(&DataKey::EventCapSet(event_type.clone()), &true);
@@ -1634,6 +1677,43 @@ impl AuditLedger {
         removed
     }
     
+    /// Validate a `Symbol` used as an event type (issue #63).
+    ///
+    /// Rules:
+    /// - Minimum length: 1 character (rejects empty symbols).
+    /// - Maximum length: 32 bytes (Soroban's effective Symbol limit).
+    /// - Allowed characters: `[a-zA-Z0-9_]`; spaces and special chars are rejected.
+    /// Validate a `Symbol` used as an event type (issue #63).
+    ///
+    /// - Minimum length: 1 char; maximum 32 chars.
+    /// - Allowed characters: `[a-zA-Z0-9_]`.
+    ///
+    /// In WASM, `Symbol::new` already enforces both constraints at construction
+    /// time, so this function is a compile-time no-op in WASM and a full runtime
+    /// check on the host (test environment).
+    fn validate_event_type(env: &Env, event_type: &Symbol) {
+        // Only runs on host (test / simulation). In WASM the SDK itself enforces
+        // [a-zA-Z0-9_] and 1–32 chars at Symbol construction time.
+        #[cfg(not(target_family = "wasm"))]
+        {
+            extern crate std;
+            let s = std::string::ToString::to_string(event_type);
+            let len = s.len();
+            if len == 0 || len > 32 {
+                panic_with_error!(env, ContractError::InvalidEventTypeLength);
+            }
+            for b in s.bytes() {
+                let valid = (b >= b'a' && b <= b'z')
+                    || (b >= b'A' && b <= b'Z')
+                    || (b >= b'0' && b <= b'9')
+                    || b == b'_';
+                if !valid {
+                    panic_with_error!(env, ContractError::InvalidEventTypeChars);
+                }
+            }
+        }
+    }
+
     fn effective_low_cost_mode(env: &Env) -> bool {
         env.storage()
             .instance()
@@ -1925,19 +2005,19 @@ impl AuditLedger {
         }
         // perform the action
         match prop.action {
-            ProposalAction::TransferOwnership(new_owner) => {
-                env.storage().instance().set(&DataKey::Owner, &new_owner);
+            ProposalAction::TransferOwnership(ref new_owner) => {
+                env.storage().instance().set(&DataKey::Owner, new_owner);
             }
-            ProposalAction::AddOwner(addr) => {
+            ProposalAction::AddOwner(ref addr) => {
                 let mut owners = Self::get_owners(&env);
                 let mut exists = false;
-                for i in 0..owners.len() { if owners.get(i).unwrap() == addr { exists = true; } }
-                if !exists { owners.push_back(addr); env.storage().instance().set(&DataKey::Owners, &owners); }
+                for i in 0..owners.len() { if &owners.get(i).unwrap() == addr { exists = true; } }
+                if !exists { owners.push_back(addr.clone()); env.storage().instance().set(&DataKey::Owners, &owners); }
             }
-            ProposalAction::RemoveOwner(addr) => {
+            ProposalAction::RemoveOwner(ref addr) => {
                 let mut owners = Self::get_owners(&env);
                 let mut new_vec: Vec<Address> = Vec::new(&env);
-                for i in 0..owners.len() { let o = owners.get(i).unwrap(); if o != addr { new_vec.push_back(o.clone()); } }
+                for i in 0..owners.len() { let o = owners.get(i).unwrap(); if &o != addr { new_vec.push_back(o.clone()); } }
                 env.storage().instance().set(&DataKey::Owners, &new_vec);
             }
             ProposalAction::SetRequiredSignatures(req) => {
@@ -2110,22 +2190,22 @@ impl AuditLedger {
         for idx in 0..counts.len() {
             let pair: (Symbol, u32) = counts.get(idx).unwrap();
             if pair.0 == event_type {
-                counts.set(idx, &(event_type.clone(), pair.1 + 1));
+                counts.set(idx, (event_type.clone(), pair.1 + 1));
                 return;
             }
         }
-        counts.push_back(&(event_type, 1u32));
+        counts.push_back((event_type, 1u32));
     }
 
     fn increment_submitter_count(env: &Env, counts: &mut Vec<(Address, u32)>, submitter: Address) {
         for idx in 0..counts.len() {
             let pair: (Address, u32) = counts.get(idx).unwrap();
             if pair.0 == submitter {
-                counts.set(idx, &(submitter.clone(), pair.1 + 1));
+                counts.set(idx, (submitter.clone(), pair.1 + 1));
                 return;
             }
         }
-        counts.push_back(&(submitter, 1u32));
+        counts.push_back((submitter, 1u32));
     }
 
     fn increment_address_count(
@@ -2137,11 +2217,11 @@ impl AuditLedger {
             let pair: (Address, u32) = counts.get(idx).unwrap();
             if pair.0 == submitter {
                 let next = pair.1 + 1;
-                counts.set(idx, &(submitter.clone(), next));
+                counts.set(idx, (submitter.clone(), next));
                 return next;
             }
         }
-        counts.push_back(&(submitter, 1u32));
+        counts.push_back((submitter, 1u32));
         1
     }
 
@@ -2154,11 +2234,11 @@ impl AuditLedger {
             let pair: (Symbol, u32) = counts.get(idx).unwrap();
             if pair.0 == event_type {
                 let next = pair.1 + 1;
-                counts.set(idx, &(event_type.clone(), next));
+                counts.set(idx, (event_type.clone(), next));
                 return next;
             }
         }
-        counts.push_back(&(event_type, 1u32));
+        counts.push_back((event_type, 1u32));
         1
     }
 
