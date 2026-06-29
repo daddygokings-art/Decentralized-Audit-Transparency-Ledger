@@ -11,7 +11,7 @@ fn create_ledger() -> (Env, Address, AuditLedgerClient<'static>) {
     env.mock_all_auths();
     let mut owners = Vec::new(&env);
     owners.push_back(owner.clone());
-    client.initialize(&owners, &100);
+    client.initialize(&owners, &100, &4096);
     (env, owner, client)
 }
 
@@ -27,7 +27,7 @@ fn test_initialize() {
     env.mock_all_auths();
     let mut owners = Vec::new(&env);
     owners.push_back(owner.clone());
-    client.initialize(&owners, &100);
+    client.initialize(&owners, &100, &4096);
 
     assert_eq!(client.total_events(), 0);
 }
@@ -94,9 +94,9 @@ fn test_initialize_reinitialization_panics() {
     let client = AuditLedgerClient::new(&env, &contract_id);
 
     env.mock_all_auths();
-    client.initialize(&owner, &100);
+    client.initialize(&owner, &100, &4096);
     // Try to re-initialize — should fail with AlreadyInitialized (error #19)
-    client.initialize(&owner, &200);
+    client.initialize(&owner, &200, &4096);
 }
 
 #[test]
@@ -109,14 +109,14 @@ fn test_initialize_reinitialization_after_ownership_transfer_panics() {
     let client = AuditLedgerClient::new(&env, &contract_id);
 
     env.mock_all_auths();
-    client.initialize(&owner, &100);
+    client.initialize(&owner, &100, &4096);
     
     // Transfer ownership
     client.transfer_ownership(&owner, &new_owner);
     
     // Try to re-initialize with new owner — should still fail with AlreadyInitialized
     // (demonstrates that version counter protects against re-init even if owner changes)
-    client.initialize(&new_owner, &200);
+    client.initialize(&new_owner, &200, &4096);
 }
 
 #[test]
@@ -409,7 +409,7 @@ fn test_global_max_logs() {
     env.mock_all_auths();
     let mut owners = Vec::new(&env);
     owners.push_back(owner.clone());
-    client.initialize(&owners, &2);
+    client.initialize(&owners, &2, &4096);
 
     let payment = symbol_short!("payment");
     let refund = symbol_short!("refund");
@@ -550,7 +550,7 @@ fn test_zero_global_max_logs() {
     env.mock_all_auths();
     let mut owners = Vec::new(&env);
     owners.push_back(owner.clone());
-    client.initialize(&owners, &0);
+    client.initialize(&owners, &0, &4096);
 
     let result = client.try_log_event(
         &submitter,
@@ -626,14 +626,60 @@ fn test_event_was_emitted() {
 }
 
 #[test]
-fn test_log_event_with_empty_metadata() {
+fn test_log_event_metadata_limit_at_max() {
+    let (env, _owner, client) = create_ledger();
+    let submitter = Address::generate(&env);
+    let payment = symbol_short!("payment");
+    let max_meta = Bytes::from_slice(&env, &[0u8; 4096]);
+
+    env.mock_all_auths();
+    let id = client.log_event(&submitter, &payment, &max_meta, &None, &None, &false);
+    let evt = client.get_event(&id);
+    assert_eq!(evt.metadata.len(), 4096);
+}
+
+#[test]
+fn test_log_event_metadata_too_large_reverts() {
+    let (env, _owner, client) = create_ledger();
+    let submitter = Address::generate(&env);
+    let payment = symbol_short!("payment");
+    let mut meta_vec = vec![0u8; 4097];
+    let metadata = Bytes::from_slice(&env, &meta_vec);
+
+    env.mock_all_auths();
+    let result = client.try_log_event(&submitter, &payment, &metadata, &None, &None, &false);
+    assert!(result.is_err());
+}
+
+#[test]
+fn test_log_events_metadata_too_large_reverts() {
+    let (env, _owner, client) = create_ledger();
+    let submitter = Address::generate(&env);
+    let payment = symbol_short!("payment");
+    let mut meta_vec = vec![0u8; 4097];
+    let metadata = Bytes::from_slice(&env, &meta_vec);
+    let events = soroban_sdk::vec![
+        &env,
+        (
+            submitter.clone(),
+            payment.clone(),
+            metadata.clone(),
+        ),
+    ];
+
+    env.mock_all_auths();
+    let result = client.try_log_events(&events);
+    assert!(result.is_err());
+}
+
+#[test]
+fn test_log_event_with_empty_metadata_respects_limit() {
     let (env, _owner, client) = create_ledger();
     let submitter = Address::generate(&env);
     let payment = symbol_short!("payment");
 
     env.mock_all_auths();
     let id = client.log_event(&submitter, &payment, &Bytes::new(&env), &None, &None, &false);
-
     let evt = client.get_event(&id);
     assert_eq!(evt.metadata.len(), 0);
 }
@@ -759,7 +805,7 @@ fn test_log_event_rejects_total_events_overflow() {
     let client = AuditLedgerClient::new(&env, &contract_id);
 
     env.mock_all_auths();
-    client.initialize(&owner, &u32::MAX);
+    client.initialize(&owner, &u32::MAX, &4096);
     env.storage()
         .instance()
         .set(&super::DataKey::TotalEvents, &u32::MAX);

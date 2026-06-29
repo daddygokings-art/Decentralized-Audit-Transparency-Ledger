@@ -79,8 +79,8 @@ export class AuditLedgerClient {
     }
   }
 
-  async initialize(owner: string, globalMaxLogs: number) {
-    return this.callTransport('initialize', [owner, globalMaxLogs]);
+  async initialize(owner: string, globalMaxLogs: number, maxMetadataBytes: number = 4096) {
+    return this.callTransport('initialize', [owner, globalMaxLogs, maxMetadataBytes]);
   }
 
   async logEvent(submitter: string, eventType: string, metadata: string) : Promise<string> {

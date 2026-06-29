@@ -17,7 +17,7 @@ fn setup() -> (Env, Address, AuditLedgerClient<'static>) {
     let client = AuditLedgerClient::new(&env, &cid);
     let mut owners = Vec::new(&env);
     owners.push_back(owner.clone());
-    client.initialize(&owners, &1_000_000);
+    client.initialize(&owners, &1_000_000, &4096);
     (env, owner, client)
 }
 
@@ -44,7 +44,7 @@ fn fee_initialize() {
     reset(&env);
     let mut owners = Vec::new(&env);
     owners.push_back(owner.clone());
-    client.initialize(&owners, &100_000);
+    client.initialize(&owners, &100_000, &4096);
     let (cpu, mem) = budget(&env);
 
     assert!(cpu < MAX_CPU_INSNS, "initialize cpu {cpu} exceeds limit");

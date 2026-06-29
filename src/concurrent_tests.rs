@@ -13,7 +13,7 @@ fn create_ledger(global_max_logs: u32) -> (Env, Address, AuditLedgerClient<'stat
     env.mock_all_auths();
     let mut owners = Vec::new(&env);
     owners.push_back(owner.clone());
-    client.initialize(&owners, &global_max_logs);
+    client.initialize(&owners, &global_max_logs, &4096);
     (env, owner, client)
 }
 
