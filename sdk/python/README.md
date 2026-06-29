@@ -5,14 +5,14 @@ Python client library for the [AuditLedger](../..) Soroban smart contract on Ste
 ## Installation
 
 ```bash
-pip install audit-ledger-sdk
+pip install audit-ledger
 ```
 
 For pandas and analytics support:
 
 ```bash
-pip install "audit-ledger-sdk[pandas]"
-pip install "audit-ledger-sdk[analytics]"
+pip install "audit-ledger[pandas]"
+pip install "audit-ledger[analytics]"
 ```
 
 ## Quickstart

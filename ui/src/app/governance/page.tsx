@@ -9,7 +9,10 @@ export default function GovernancePage() {
       <main className="container" style={{ padding: "32px 24px" }}>
         <div style={{ display: "flex", alignItems: "center", justifyContent: "space-between", marginBottom: 8 }}>
           <h1 style={{ fontSize: 24, fontWeight: 700 }}>Governance</h1>
-          <Link href="/governance/history" style={{ fontSize: 13, color: "var(--accent)" }}>
+          <Link
+            href="/governance/history"
+            style={{ fontSize: 13, color: "var(--accent)" }}
+          >
             View History →
           </Link>
         </div>

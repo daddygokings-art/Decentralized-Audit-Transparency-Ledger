@@ -1,5 +1,5 @@
 {
-  "name": "@auditledger/sdk",
+  "name": "audit-ledger-sdk",
   "version": "0.1.0",
   "description": "AuditLedger JavaScript/TypeScript SDK (minimal)",
   "main": "dist/index.js",
