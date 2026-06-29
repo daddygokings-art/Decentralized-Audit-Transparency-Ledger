@@ -2072,3 +2072,234 @@ fn test_log_event_with_ttl_enabled() {
     let evt = client.get_event(&id);
     assert_eq!(evt.metadata, Bytes::from_slice(&env, b"ttl_test"));
 }
+
+// ── get_events_by_type pagination ──────────────────────────────────────────
+
+/// Helper: log `count` events of `event_type` with sequential single-byte metadata (0,1,2,…).
+fn log_n_events(
+    env: &Env,
+    client: &AuditLedgerClient,
+    submitter: &Address,
+    event_type: &soroban_sdk::Symbol,
+    count: u32,
+) {
+    for i in 0..count {
+        // Use the index as a single-byte payload so each event is distinct.
+        // Tests that inspect metadata values use the same byte encoding.
+        let meta = Bytes::from_slice(env, &[i as u8]);
+        client.log_event(submitter, event_type, &meta, &None, &None, &false);
+    }
+}
+
+/// Normal case: fetch second page (start=2, limit=2) from 5 events.
+#[test]
+fn test_get_events_by_type_normal_page() {
+    let (env, _owner, client) = create_ledger();
+    let submitter = Address::generate(&env);
+    let payment = symbol_short!("payment");
+
+    env.mock_all_auths();
+    log_n_events(&env, &client, &submitter, &payment, 5);
+
+    // page: events at type-indices 2 and 3
+    let page = client.get_events_by_type(&payment, &2, &2);
+    assert_eq!(page.len(), 2);
+    assert_eq!(page.get(0).unwrap().metadata, Bytes::from_slice(&env, &[2u8]));
+    assert_eq!(page.get(1).unwrap().metadata, Bytes::from_slice(&env, &[3u8]));
+}
+
+/// Partial last page: start=4, limit=5 with only 5 events → should return 1 event.
+#[test]
+fn test_get_events_by_type_partial_last_page() {
+    let (env, _owner, client) = create_ledger();
+    let submitter = Address::generate(&env);
+    let payment = symbol_short!("payment");
+
+    env.mock_all_auths();
+    log_n_events(&env, &client, &submitter, &payment, 5);
+
+    let page = client.get_events_by_type(&payment, &4, &5);
+    assert_eq!(page.len(), 1);
+    assert_eq!(page.get(0).unwrap().metadata, Bytes::from_slice(&env, &[4u8]));
+}
+
+/// First page: start=0, limit=3.
+#[test]
+fn test_get_events_by_type_first_page() {
+    let (env, _owner, client) = create_ledger();
+    let submitter = Address::generate(&env);
+    let payment = symbol_short!("payment");
+
+    env.mock_all_auths();
+    log_n_events(&env, &client, &submitter, &payment, 5);
+
+    let page = client.get_events_by_type(&payment, &0, &3);
+    assert_eq!(page.len(), 3);
+    assert_eq!(page.get(0).unwrap().metadata, Bytes::from_slice(&env, &[0u8]));
+    assert_eq!(page.get(1).unwrap().metadata, Bytes::from_slice(&env, &[1u8]));
+    assert_eq!(page.get(2).unwrap().metadata, Bytes::from_slice(&env, &[2u8]));
+}
+
+/// Exact page: limit equals the total number of events.
+#[test]
+fn test_get_events_by_type_exact_page() {
+    let (env, _owner, client) = create_ledger();
+    let submitter = Address::generate(&env);
+    let payment = symbol_short!("payment");
+
+    env.mock_all_auths();
+    log_n_events(&env, &client, &submitter, &payment, 3);
+
+    let page = client.get_events_by_type(&payment, &0, &3);
+    assert_eq!(page.len(), 3);
+}
+
+/// Empty case: event type has no events at all → empty vec.
+#[test]
+fn test_get_events_by_type_empty_type_returns_empty() {
+    let (_env, _owner, client) = create_ledger();
+    let payment = symbol_short!("payment");
+
+    // No events logged for this type
+    let page = client.get_events_by_type(&payment, &0, &10);
+    assert_eq!(page.len(), 0);
+}
+
+/// Boundary: start equals total count (one past end) → empty vec.
+#[test]
+fn test_get_events_by_type_start_at_boundary_returns_empty() {
+    let (env, _owner, client) = create_ledger();
+    let submitter = Address::generate(&env);
+    let payment = symbol_short!("payment");
+
+    env.mock_all_auths();
+    log_n_events(&env, &client, &submitter, &payment, 3);
+
+    // start == count (3) — out of range
+    let page = client.get_events_by_type(&payment, &3, &10);
+    assert_eq!(page.len(), 0);
+}
+
+/// Boundary: start beyond total count → empty vec.
+#[test]
+fn test_get_events_by_type_start_beyond_range_returns_empty() {
+    let (env, _owner, client) = create_ledger();
+    let submitter = Address::generate(&env);
+    let payment = symbol_short!("payment");
+
+    env.mock_all_auths();
+    log_n_events(&env, &client, &submitter, &payment, 3);
+
+    let page = client.get_events_by_type(&payment, &100, &10);
+    assert_eq!(page.len(), 0);
+}
+
+/// Boundary: limit=0 → empty vec (no panic).
+#[test]
+fn test_get_events_by_type_zero_limit_returns_empty() {
+    let (env, _owner, client) = create_ledger();
+    let submitter = Address::generate(&env);
+    let payment = symbol_short!("payment");
+
+    env.mock_all_auths();
+    log_n_events(&env, &client, &submitter, &payment, 3);
+
+    let page = client.get_events_by_type(&payment, &0, &0);
+    assert_eq!(page.len(), 0);
+}
+
+/// Boundary: limit=1 fetches exactly one event.
+#[test]
+fn test_get_events_by_type_limit_one() {
+    let (env, _owner, client) = create_ledger();
+    let submitter = Address::generate(&env);
+    let payment = symbol_short!("payment");
+
+    env.mock_all_auths();
+    log_n_events(&env, &client, &submitter, &payment, 3);
+
+    let page = client.get_events_by_type(&payment, &1, &1);
+    assert_eq!(page.len(), 1);
+    assert_eq!(page.get(0).unwrap().metadata, Bytes::from_slice(&env, &[1u8]));
+}
+
+/// Boundary: limit=100 (max allowed) works fine.
+#[test]
+fn test_get_events_by_type_max_limit() {
+    let (env, _owner, client) = create_ledger();
+    let submitter = Address::generate(&env);
+    let payment = symbol_short!("payment");
+
+    env.mock_all_auths();
+    log_n_events(&env, &client, &submitter, &payment, 5);
+
+    // limit=100 but only 5 events exist → should return 5
+    let page = client.get_events_by_type(&payment, &0, &100);
+    assert_eq!(page.len(), 5);
+}
+
+/// Exceeding max limit panics with InvalidPaginationParams (error #21).
+#[test]
+#[should_panic(expected = "HostError: Error(Contract, #21)")]
+fn test_get_events_by_type_limit_over_100_panics() {
+    let (env, _owner, client) = create_ledger();
+    let submitter = Address::generate(&env);
+    let payment = symbol_short!("payment");
+
+    env.mock_all_auths();
+    log_n_events(&env, &client, &submitter, &payment, 3);
+
+    // limit=101 should panic
+    client.get_events_by_type(&payment, &0, &101);
+}
+
+/// Mixed types: pagination for one type is independent of another type's events.
+#[test]
+fn test_get_events_by_type_independent_of_other_types() {
+    let (env, _owner, client) = create_ledger();
+    let submitter = Address::generate(&env);
+    let payment = symbol_short!("payment");
+    let refund = symbol_short!("refund");
+
+    env.mock_all_auths();
+    log_n_events(&env, &client, &submitter, &payment, 3);
+    log_n_events(&env, &client, &submitter, &refund, 2);
+
+    // payment has 3 events
+    let payment_page = client.get_events_by_type(&payment, &0, &10);
+    assert_eq!(payment_page.len(), 3);
+
+    // refund has 2 events, independent
+    let refund_page = client.get_events_by_type(&refund, &0, &10);
+    assert_eq!(refund_page.len(), 2);
+
+    // each page contains the right event_type
+    for i in 0..payment_page.len() {
+        assert_eq!(payment_page.get(i).unwrap().event_type, payment);
+    }
+    for i in 0..refund_page.len() {
+        assert_eq!(refund_page.get(i).unwrap().event_type, refund);
+    }
+}
+
+/// Verify ordering: events are returned in insertion order by type.
+#[test]
+fn test_get_events_by_type_preserves_insertion_order() {
+    let (env, _owner, client) = create_ledger();
+    let submitter = Address::generate(&env);
+    let payment = symbol_short!("payment");
+
+    env.mock_all_auths();
+    // Log interleaved events of different types; payment events should retain their own order
+    client.log_event(&submitter, &payment, &Bytes::from_slice(&env, b"first"), &None, &None, &false);
+    client.log_event(&submitter, &symbol_short!("other"), &Bytes::from_slice(&env, b"noise"), &None, &None, &false);
+    client.log_event(&submitter, &payment, &Bytes::from_slice(&env, b"second"), &None, &None, &false);
+    client.log_event(&submitter, &symbol_short!("other"), &Bytes::from_slice(&env, b"noise2"), &None, &None, &false);
+    client.log_event(&submitter, &payment, &Bytes::from_slice(&env, b"third"), &None, &None, &false);
+
+    let page = client.get_events_by_type(&payment, &0, &10);
+    assert_eq!(page.len(), 3);
+    assert_eq!(page.get(0).unwrap().metadata, Bytes::from_slice(&env, b"first"));
+    assert_eq!(page.get(1).unwrap().metadata, Bytes::from_slice(&env, b"second"));
+    assert_eq!(page.get(2).unwrap().metadata, Bytes::from_slice(&env, b"third"));
+}

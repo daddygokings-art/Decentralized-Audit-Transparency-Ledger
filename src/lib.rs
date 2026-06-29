@@ -1413,6 +1413,43 @@ impl AuditLedger {
         results
     }
 
+    /// Return a paginated slice of events for a given event type.
+    ///
+    /// * `event_type` — the type to filter by.
+    /// * `start`      — 0-based index into the per-type sub-ledger to begin reading from.
+    /// * `limit`      — maximum number of events to return (capped at 100).
+    ///
+    /// Returns an empty `Vec` when `start` is beyond the last index for the type,
+    /// or when the type has no events at all — no panics for out-of-range inputs.
+    /// A partial slice is returned when fewer than `limit` events remain after `start`.
+    pub fn get_events_by_type(
+        env: Env,
+        event_type: Symbol,
+        start: u32,
+        limit: u32,
+    ) -> Vec<Event> {
+        Self::require_initialized(&env);
+
+        if limit == 0 {
+            return Vec::new(&env);
+        }
+        if limit > 100 {
+            panic_with_error!(&env, ContractError::InvalidPaginationParams);
+        }
+
+        let total = Self::event_type_count(&env, event_type.clone());
+        if total == 0 || start >= total {
+            return Vec::new(&env);
+        }
+
+        let end = (start.saturating_add(limit)).min(total);
+        let mut results = Vec::new(&env);
+        for i in start..end {
+            results.push_back(Self::get_event_by_type(env.clone(), event_type.clone(), i));
+        }
+        results
+    }
+
     pub fn get_events_by_time_range(
         env: Env,
         start_time: u64,
