@@ -248,6 +248,9 @@ httpServer.listen(PORT, () => {
   console.log(`RPC:      ${RPC_URL}`);
 });
 
-// Initial scrape then poll
-scrape();
-setInterval(scrape, SCRAPE_INTERVAL_MS);
+// Initial scrape then poll at interval — both wrapped with retry
+scrapeWithRetry(scrape, retryState);
+setInterval(() => scrapeWithRetry(scrape, retryState), SCRAPE_INTERVAL_MS);
+
+// Export for unit tests
+module.exports = { scrapeWithRetry, BACKOFF_BASE_MS, BACKOFF_MAX_MS, FAILURE_THRESHOLD };
