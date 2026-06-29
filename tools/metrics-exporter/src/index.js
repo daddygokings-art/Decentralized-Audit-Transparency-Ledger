@@ -70,6 +70,57 @@ const avgGasCost = new client.Gauge({
   registers: [registry],
 });
 
+const scrapeError = new client.Gauge({
+  name: "audit_ledger_scrape_error",
+  help: "1 when the exporter has hit 10+ consecutive RPC failures",
+  registers: [registry],
+});
+
+// ── Retry state ─────────────────────────────────────────────────────────────
+
+const BACKOFF_BASE_MS = 1000;
+const BACKOFF_MAX_MS = 60000;
+const FAILURE_THRESHOLD = 10;
+
+function sleep(ms) {
+  return new Promise((resolve) => setTimeout(resolve, ms));
+}
+
+/**
+ * Run `fn` with exponential backoff on failure.
+ * Exported for unit testing.
+ *
+ * @param {() => Promise<void>} fn          - The scrape function to call.
+ * @param {{ consecutiveFailures: number }} state - Mutable failure counter shared with callers.
+ * @param {(ms: number) => Promise<void>}  sleepFn - Overridable sleep (injected in tests).
+ */
+async function scrapeWithRetry(fn, state, sleepFn = sleep) {
+  try {
+    await fn();
+    state.consecutiveFailures = 0;
+    scrapeError.set(0);
+  } catch (err) {
+    console.error("Scrape error:", err.message);
+    errorCount.inc();
+    state.consecutiveFailures += 1;
+
+    if (state.consecutiveFailures >= FAILURE_THRESHOLD) {
+      scrapeError.set(1);
+      console.error(`${state.consecutiveFailures} consecutive failures; audit_ledger_scrape_error=1`);
+    }
+
+    const backoffMs = Math.min(
+      BACKOFF_BASE_MS * Math.pow(2, state.consecutiveFailures - 1),
+      BACKOFF_MAX_MS
+    );
+    console.error(`Retrying in ${backoffMs}ms…`);
+    await sleepFn(backoffMs);
+    return scrapeWithRetry(fn, state, sleepFn);
+  }
+}
+
+const retryState = { consecutiveFailures: 0 };
+
 // ── Soroban RPC helpers ─────────────────────────────────────────────────────
 
 const networkPassphrase =
@@ -155,9 +206,6 @@ async function scrape() {
         // type not yet logged; ignore
       }
     }
-  } catch (err) {
-    console.error("Scrape error:", err.message);
-    errorCount.inc();
   }
 }
 
@@ -187,6 +235,9 @@ httpServer.listen(PORT, () => {
   console.log(`RPC:      ${RPC_URL}`);
 });
 
-// Initial scrape then poll
-scrape();
-setInterval(scrape, SCRAPE_INTERVAL_MS);
+// Initial scrape then poll at interval — both wrapped with retry
+scrapeWithRetry(scrape, retryState);
+setInterval(() => scrapeWithRetry(scrape, retryState), SCRAPE_INTERVAL_MS);
+
+// Export for unit tests
+module.exports = { scrapeWithRetry, BACKOFF_BASE_MS, BACKOFF_MAX_MS, FAILURE_THRESHOLD };
