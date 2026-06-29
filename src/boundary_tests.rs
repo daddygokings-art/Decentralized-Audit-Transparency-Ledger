@@ -27,15 +27,15 @@ fn boundary_event_at_max_index_minus_one() {
     client.initialize(&owner, &u32::MAX);
 
     let submitter = Address::generate(&env);
-    
+
     // Note: In practice, we cannot actually log u32::MAX events in a test
     // due to time/resource constraints. This test verifies the storage key
     // structure works correctly for high indices by testing the key generation.
-    
+
     // Test that DataKey::EventData can handle high indices
     let high_index = u32::MAX - 1;
     let test_key = DataKey::EventOrder(high_index);
-    
+
     // Verify the key can be created without panic
     // (actual storage test would require logging u32::MAX events)
     let _ = test_key;
@@ -44,11 +44,11 @@ fn boundary_event_at_max_index_minus_one() {
 #[test]
 fn boundary_event_data_key_max_index() {
     let env = Env::default();
-    
+
     // Test that DataKey::EventData can accept BytesN<32> at boundary
     let test_id = BytesN::from_array(&env, &[0u8; 32]);
     let key = DataKey::EventData(test_id);
-    
+
     // Verify key can be created
     let _ = key;
 }
@@ -58,10 +58,10 @@ fn boundary_event_data_key_max_index() {
 #[test]
 fn boundary_event_data_key_no_collision_with_owner() {
     let env = Env::default();
-    
+
     let owner_key = DataKey::Owner;
     let event_key = DataKey::EventData(BytesN::from_array(&env, &[0u8; 32]));
-    
+
     // These should be different enum variants
     // (Rust's enum discriminants ensure no collision)
     let _ = (owner_key, event_key);
@@ -70,10 +70,10 @@ fn boundary_event_data_key_no_collision_with_owner() {
 #[test]
 fn boundary_event_order_key_no_collision_with_event_data() {
     let env = Env::default();
-    
+
     let order_key = DataKey::EventOrder(100);
     let data_key = DataKey::EventData(BytesN::from_array(&env, &[0u8; 32]));
-    
+
     // Different variants should not collide
     let _ = (order_key, data_key);
 }
@@ -81,10 +81,10 @@ fn boundary_event_order_key_no_collision_with_event_data() {
 #[test]
 fn boundary_event_order_max_index_no_collision() {
     let env = Env::default();
-    
+
     let max_order_key = DataKey::EventOrder(u32::MAX);
     let zero_order_key = DataKey::EventOrder(0);
-    
+
     // Different indices should produce different keys
     let _ = (max_order_key, zero_order_key);
 }
@@ -101,7 +101,7 @@ fn boundary_global_max_logs_at_u32_max() {
     env.mock_all_auths();
     // Setting global_max_logs to u32::MAX should work
     client.initialize(&owner, &u32::MAX);
-    
+
     // Verify it was set
     // (cannot directly read, but initialization succeeded)
 }
@@ -128,7 +128,7 @@ fn boundary_total_events_near_overflow() {
     client.initialize(&owner, &1000);
 
     let submitter = Address::generate(&env);
-    
+
     // Log events to test increment logic
     for i in 0u32..10 {
         client.log_event(
@@ -163,7 +163,7 @@ fn boundary_log_event_near_capacity() {
     client.initialize(&owner, &5);
 
     let submitter = Address::generate(&env);
-    
+
     // Log up to capacity
     for i in 0u32..5 {
         client.log_event(
@@ -174,7 +174,7 @@ fn boundary_log_event_near_capacity() {
     }
 
     assert_eq!(client.total_events(), 5);
-    
+
     // Next event should fail
     let result = client.try_log_event(
         &submitter,
@@ -203,13 +203,9 @@ fn boundary_event_type_near_capacity() {
     }
 
     assert_eq!(client.event_count(&payment), 3);
-    
+
     // Next event of this type should fail
-    let result = client.try_log_event(
-        &submitter,
-        &payment,
-        &Bytes::from_slice(&env, b"overflow"),
-    );
+    let result = client.try_log_event(&submitter, &payment, &Bytes::from_slice(&env, b"overflow"));
     assert!(result.is_err());
 }
 
@@ -223,7 +219,7 @@ fn boundary_event_type_count_near_u32_max() {
     env.mock_all_auths();
     // Set a high cap
     client.set_event_max_logs(&owner, &payment, &u32::MAX);
-    
+
     // In practice, we cannot log u32::MAX events in a test
     // This verifies the storage structure can handle high counts
     let _ = payment;
@@ -292,11 +288,23 @@ fn boundary_event_order_index_increment() {
     let submitter = Address::generate(&env);
 
     env.mock_all_auths();
-    
+
     // Test index increment logic
-    let id0 = client.log_event(&submitter, &symbol_short!("test"), &Bytes::from_slice(&env, b"0"));
-    let id1 = client.log_event(&submitter, &symbol_short!("test"), &Bytes::from_slice(&env, b"1"));
-    let id2 = client.log_event(&submitter, &symbol_short!("test"), &Bytes::from_slice(&env, b"2"));
+    let id0 = client.log_event(
+        &submitter,
+        &symbol_short!("test"),
+        &Bytes::from_slice(&env, b"0"),
+    );
+    let id1 = client.log_event(
+        &submitter,
+        &symbol_short!("test"),
+        &Bytes::from_slice(&env, b"1"),
+    );
+    let id2 = client.log_event(
+        &submitter,
+        &symbol_short!("test"),
+        &Bytes::from_slice(&env, b"2"),
+    );
 
     let evt0 = client.get_event(&id0);
     let evt1 = client.get_event(&id1);
@@ -313,7 +321,7 @@ fn boundary_event_order_retrieval_at_high_index() {
     let submitter = Address::generate(&env);
 
     env.mock_all_auths();
-    
+
     // Log multiple events
     for i in 0u32..50 {
         client.log_event(
@@ -357,7 +365,7 @@ fn boundary_hash_chain_at_high_index() {
     let submitter = Address::generate(&env);
 
     env.mock_all_auths();
-    
+
     // Log multiple events to test hash chain
     for i in 0u32..20 {
         client.log_event(
@@ -369,7 +377,7 @@ fn boundary_hash_chain_at_high_index() {
 
     // Verify integrity across all events
     assert!(client.verify_integrity());
-    
+
     // Verify integrity of a range
     assert!(client.verify_integrity_range(&5, &15));
 }
@@ -380,7 +388,11 @@ fn boundary_zero_index_event() {
     let submitter = Address::generate(&env);
 
     env.mock_all_auths();
-    let id = client.log_event(&submitter, &symbol_short!("test"), &Bytes::from_slice(&env, b"first"));
+    let id = client.log_event(
+        &submitter,
+        &symbol_short!("test"),
+        &Bytes::from_slice(&env, b"first"),
+    );
 
     let evt = client.get_event(&id);
     assert_eq!(evt.index, 0);
@@ -433,7 +445,11 @@ fn boundary_global_max_logs_one() {
     client.initialize(&owner, &1);
 
     let submitter = Address::generate(&env);
-    client.log_event(&submitter, &symbol_short!("test"), &Bytes::from_slice(&env, b"first"));
+    client.log_event(
+        &submitter,
+        &symbol_short!("test"),
+        &Bytes::from_slice(&env, b"first"),
+    );
 
     assert_eq!(client.total_events(), 1);
 
@@ -458,10 +474,6 @@ fn boundary_event_max_logs_one() {
 
     assert_eq!(client.event_count(&payment), 1);
 
-    let result = client.try_log_event(
-        &submitter,
-        &payment,
-        &Bytes::from_slice(&env, b"second"),
-    );
+    let result = client.try_log_event(&submitter, &payment, &Bytes::from_slice(&env, b"second"));
     assert!(result.is_err());
 }

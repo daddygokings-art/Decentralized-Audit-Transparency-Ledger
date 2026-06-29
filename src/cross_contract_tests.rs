@@ -48,7 +48,7 @@ impl CallerContract {
         let client = AuditLedgerClient::new(&env, &audit_ledger);
         // First call
         client.log_event(&submitter, &event_type, &metadata);
-        
+
         // Attempt second call (reentrancy)
         // In a real scenario, this would be called from within a callback
         // For testing, we just make a second call
@@ -74,11 +74,11 @@ fn cross_contract_log_event_with_correct_submitter() {
     let env = Env::default();
     let owner = Address::generate(&env);
     let user = Address::generate(&env);
-    
+
     // Register both contracts
     let audit_ledger_id = env.register(AuditLedger, ());
     let caller_contract_id = env.register(CallerContract, ());
-    
+
     let audit_client = AuditLedgerClient::new(&env, &audit_ledger_id);
     let caller_client = CallerContractClient::new(&env, &caller_contract_id);
 
@@ -96,7 +96,7 @@ fn cross_contract_log_event_with_correct_submitter() {
 
     // Verify the event was logged
     assert_eq!(audit_client.total_events(), 1);
-    
+
     // Verify the submitter is the user, not the caller contract
     let evt = audit_client.get_event_by_order(&0);
     assert_eq!(evt.submitter, user);
@@ -109,10 +109,10 @@ fn cross_contract_multiple_logs_different_users() {
     let owner = Address::generate(&env);
     let user1 = Address::generate(&env);
     let user2 = Address::generate(&env);
-    
+
     let audit_ledger_id = env.register(AuditLedger, ());
     let caller_contract_id = env.register(CallerContract, ());
-    
+
     let audit_client = AuditLedgerClient::new(&env, &audit_ledger_id);
     let caller_client = CallerContractClient::new(&env, &caller_contract_id);
 
@@ -136,10 +136,10 @@ fn cross_contract_multiple_logs_different_users() {
     );
 
     assert_eq!(audit_client.total_events(), 2);
-    
+
     let evt0 = audit_client.get_event_by_order(&0);
     let evt1 = audit_client.get_event_by_order(&1);
-    
+
     assert_eq!(evt0.submitter, user1);
     assert_eq!(evt1.submitter, user2);
 }
@@ -151,10 +151,10 @@ fn cross_contract_governance_requires_owner() {
     let env = Env::default();
     let owner = Address::generate(&env);
     let attacker = Address::generate(&env);
-    
+
     let audit_ledger_id = env.register(AuditLedger, ());
     let caller_contract_id = env.register(CallerContract, ());
-    
+
     let audit_client = AuditLedgerClient::new(&env, &audit_ledger_id);
     let caller_client = CallerContractClient::new(&env, &caller_contract_id);
 
@@ -163,7 +163,7 @@ fn cross_contract_governance_requires_owner() {
 
     // Try to call governance from caller contract with non-owner
     let result = caller_client.try_try_governance_call(&audit_ledger_id, &attacker);
-    
+
     // Should fail because attacker is not owner
     assert!(result.is_err());
 }
@@ -172,10 +172,10 @@ fn cross_contract_governance_requires_owner() {
 fn cross_contract_governance_with_owner_succeeds() {
     let env = Env::default();
     let owner = Address::generate(&env);
-    
+
     let audit_ledger_id = env.register(AuditLedger, ());
     let caller_contract_id = env.register(CallerContract, ());
-    
+
     let audit_client = AuditLedgerClient::new(&env, &audit_ledger_id);
     let caller_client = CallerContractClient::new(&env, &caller_contract_id);
 
@@ -184,7 +184,7 @@ fn cross_contract_governance_with_owner_succeeds() {
 
     // Call governance from caller contract with owner
     caller_client.try_governance_call(&audit_ledger_id, &owner);
-    
+
     // Should succeed (no panic)
 }
 
@@ -193,9 +193,9 @@ fn cross_contract_transfer_ownership_across_contracts() {
     let env = Env::default();
     let owner = Address::generate(&env);
     let new_owner = Address::generate(&env);
-    
+
     let audit_ledger_id = env.register(AuditLedger, ());
-    
+
     let audit_client = AuditLedgerClient::new(&env, &audit_ledger_id);
 
     env.mock_all_auths();
@@ -215,10 +215,10 @@ fn cross_contract_global_max_logs_error_propagates() {
     let env = Env::default();
     let owner = Address::generate(&env);
     let submitter = Address::generate(&env);
-    
+
     let audit_ledger_id = env.register(AuditLedger, ());
     let caller_contract_id = env.register(CallerContract, ());
-    
+
     let audit_client = AuditLedgerClient::new(&env, &audit_ledger_id);
     let caller_client = CallerContractClient::new(&env, &caller_contract_id);
 
@@ -226,11 +226,15 @@ fn cross_contract_global_max_logs_error_propagates() {
     audit_client.initialize(&owner, &1); // Max 1 event
 
     // Log one event to reach capacity
-    audit_client.log_event(&submitter, &symbol_short!("test"), &Bytes::from_slice(&env, b"first"));
+    audit_client.log_event(
+        &submitter,
+        &symbol_short!("test"),
+        &Bytes::from_slice(&env, b"first"),
+    );
 
     // Try to log another event via caller contract
     let result = caller_client.try_trigger_global_max_error(&audit_ledger_id, &submitter);
-    
+
     // Error should propagate
     assert!(result.is_err());
 }
@@ -240,10 +244,10 @@ fn cross_contract_event_type_max_logs_error_propagates() {
     let env = Env::default();
     let owner = Address::generate(&env);
     let submitter = Address::generate(&env);
-    
+
     let audit_ledger_id = env.register(AuditLedger, ());
     let caller_contract_id = env.register(CallerContract, ());
-    
+
     let audit_client = AuditLedgerClient::new(&env, &audit_ledger_id);
     let caller_client = CallerContractClient::new(&env, &caller_contract_id);
 
@@ -252,7 +256,11 @@ fn cross_contract_event_type_max_logs_error_propagates() {
     audit_client.set_event_max_logs(&owner, &symbol_short!("payment"), &1);
 
     // Log one event of type payment
-    audit_client.log_event(&submitter, &symbol_short!("payment"), &Bytes::from_slice(&env, b"first"));
+    audit_client.log_event(
+        &submitter,
+        &symbol_short!("payment"),
+        &Bytes::from_slice(&env, b"first"),
+    );
 
     // Try to log another payment event via caller contract
     let result = caller_client.try_log_on_behalf(
@@ -261,7 +269,7 @@ fn cross_contract_event_type_max_logs_error_propagates() {
         &symbol_short!("payment"),
         &Bytes::from_slice(&env, b"second"),
     );
-    
+
     // Error should propagate
     assert!(result.is_err());
 }
@@ -271,10 +279,10 @@ fn cross_contract_metadata_too_large_error_propagates() {
     let env = Env::default();
     let owner = Address::generate(&env);
     let submitter = Address::generate(&env);
-    
+
     let audit_ledger_id = env.register(AuditLedger, ());
     let caller_contract_id = env.register(CallerContract, ());
-    
+
     let audit_client = AuditLedgerClient::new(&env, &audit_ledger_id);
     let caller_client = CallerContractClient::new(&env, &caller_contract_id);
 
@@ -289,7 +297,7 @@ fn cross_contract_metadata_too_large_error_propagates() {
         &symbol_short!("test"),
         &Bytes::from_slice(&env, &[0u8; 11]),
     );
-    
+
     // Error should propagate
     assert!(result.is_err());
 }
@@ -299,10 +307,10 @@ fn cross_contract_contract_paused_error_propagates() {
     let env = Env::default();
     let owner = Address::generate(&env);
     let submitter = Address::generate(&env);
-    
+
     let audit_ledger_id = env.register(AuditLedger, ());
     let caller_contract_id = env.register(CallerContract, ());
-    
+
     let audit_client = AuditLedgerClient::new(&env, &audit_ledger_id);
     let caller_client = CallerContractClient::new(&env, &caller_contract_id);
 
@@ -317,7 +325,7 @@ fn cross_contract_contract_paused_error_propagates() {
         &symbol_short!("test"),
         &Bytes::from_slice(&env, b"data"),
     );
-    
+
     // Error should propagate
     assert!(result.is_err());
 }
@@ -329,10 +337,10 @@ fn cross_contract_sequential_calls_work() {
     let env = Env::default();
     let owner = Address::generate(&env);
     let submitter = Address::generate(&env);
-    
+
     let audit_ledger_id = env.register(AuditLedger, ());
     let caller_contract_id = env.register(CallerContract, ());
-    
+
     let audit_client = AuditLedgerClient::new(&env, &audit_ledger_id);
     let caller_client = CallerContractClient::new(&env, &caller_contract_id);
 
@@ -357,9 +365,9 @@ fn cross_contract_caller_cannot_impersonate_user() {
     let owner = Address::generate(&env);
     let user = Address::generate(&env);
     let caller_contract_id = env.register(CallerContract, ());
-    
+
     let audit_ledger_id = env.register(AuditLedger, ());
-    
+
     let audit_client = AuditLedgerClient::new(&env, &audit_ledger_id);
     let caller_client = CallerContractClient::new(&env, &caller_contract_id);
 
@@ -374,7 +382,7 @@ fn cross_contract_caller_cannot_impersonate_user() {
         &symbol_short!("test"),
         &Bytes::from_slice(&env, b"data"),
     );
-    
+
     // Should fail without user auth
     assert!(result.is_err());
 }
@@ -384,10 +392,10 @@ fn cross_contract_event_integrity_preserved() {
     let env = Env::default();
     let owner = Address::generate(&env);
     let user = Address::generate(&env);
-    
+
     let audit_ledger_id = env.register(AuditLedger, ());
     let caller_contract_id = env.register(CallerContract, ());
-    
+
     let audit_client = AuditLedgerClient::new(&env, &audit_ledger_id);
     let caller_client = CallerContractClient::new(&env, &caller_contract_id);
 
@@ -411,11 +419,11 @@ fn cross_contract_multiple_caller_contracts() {
     let env = Env::default();
     let owner = Address::generate(&env);
     let user = Address::generate(&env);
-    
+
     let audit_ledger_id = env.register(AuditLedger, ());
     let caller1_id = env.register(CallerContract, ());
     let caller2_id = env.register(CallerContract, ());
-    
+
     let audit_client = AuditLedgerClient::new(&env, &audit_ledger_id);
     let caller1_client = CallerContractClient::new(&env, &caller1_id);
     let caller2_client = CallerContractClient::new(&env, &caller2_id);
@@ -440,10 +448,10 @@ fn cross_contract_multiple_caller_contracts() {
     );
 
     assert_eq!(audit_client.total_events(), 2);
-    
+
     let evt0 = audit_client.get_event_by_order(&0);
     let evt1 = audit_client.get_event_by_order(&1);
-    
+
     assert_eq!(evt0.submitter, user);
     assert_eq!(evt1.submitter, user);
     assert_eq!(evt0.metadata, Bytes::from_slice(&env, b"via-caller1"));

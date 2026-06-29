@@ -1,0 +1,157 @@
+openapi: 3.0.0
+info:
+  title: Audit Ledger REST API
+  description: REST adapter for Decentralized Audit & Transparency Ledger
+  version: 1.0.0
+servers:
+  - url: http://localhost:3002
+    description: Local development server
+
+paths:
+  /events:
+    get:
+      summary: List events with pagination
+      parameters:
+        - name: limit
+          in: query
+          schema:
+            type: integer
+            default: 50
+            maximum: 1000
+        - name: offset
+          in: query
+          schema:
+            type: integer
+            default: 0
+        - name: filter
+          in: query
+          schema:
+            type: object
+      responses:
+        "200":
+          description: List of events
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  data:
+                    type: array
+                    items:
+                      $ref: "#/components/schemas/Event"
+                  total:
+                    type: integer
+
+  /events/{index}:
+    get:
+      summary: Get event by index
+      parameters:
+        - name: index
+          in: path
+          required: true
+          schema:
+            type: integer
+      responses:
+        "200":
+          description: Event details
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  data:
+                    $ref: "#/components/schemas/Event"
+        "404":
+          description: Event not found
+
+  /events/type/{type}:
+    get:
+      summary: Get events by type
+      parameters:
+        - name: type
+          in: path
+          required: true
+          schema:
+            type: string
+        - name: limit
+          in: query
+          schema:
+            type: integer
+            default: 50
+        - name: offset
+          in: query
+          schema:
+            type: integer
+            default: 0
+      responses:
+        "200":
+          description: List of events by type
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  data:
+                    type: array
+                    items:
+                      $ref: "#/components/schemas/Event"
+                  total:
+                    type: integer
+
+  /stats:
+    get:
+      summary: Get statistics
+      responses:
+        "200":
+          description: Statistics
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  data:
+                    $ref: "#/components/schemas/Statistics"
+
+components:
+  schemas:
+    Event:
+      type: object
+      properties:
+        index:
+          type: integer
+        timestamp:
+          type: integer
+        event_type:
+          type: string
+        submitter:
+          type: string
+        metadata:
+          type: string
+        event_hash:
+          type: string
+        prev_hash:
+          type: string
+      required:
+        - index
+        - timestamp
+        - event_type
+        - submitter
+        - metadata
+        - event_hash
+        - prev_hash
+
+    Statistics:
+      type: object
+      properties:
+        totalEvents:
+          type: integer
+        globalMaxLogs:
+          type: integer
+        eventsByType:
+          type: object
+          additionalProperties:
+            type: integer
+      required:
+        - totalEvents
+        - globalMaxLogs
+        - eventsByType
