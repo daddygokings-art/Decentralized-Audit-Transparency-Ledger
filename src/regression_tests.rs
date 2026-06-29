@@ -37,7 +37,7 @@ fn regression_log_event_complete_happy_path() {
     let metadata = Bytes::from_slice(&env, b"transaction-data");
 
     env.mock_all_auths();
-    let id = client.log_event(&submitter, &event_type, &metadata);
+    let id = client.log_event(&submitter, &event_type, &metadata, &None, &None, &false);
 
     // Verify event was logged
     assert_eq!(client.total_events(), 1);
@@ -60,7 +60,7 @@ fn regression_retrieve_event_by_id() {
     let event_type = symbol_short!("audit");
 
     env.mock_all_auths();
-    let id = client.log_event(&submitter, &event_type, &Bytes::from_slice(&env, b"data"));
+    let id = client.log_event(&submitter, &event_type, &Bytes::from_slice(&env, b"data"), &None, &None, &false);
 
     let retrieved = client.get_event(&id);
     assert_eq!(retrieved.index, 0);
@@ -74,8 +74,8 @@ fn regression_retrieve_event_by_order() {
     let event_type = symbol_short!("log");
 
     env.mock_all_auths();
-    client.log_event(&submitter, &event_type, &Bytes::from_slice(&env, b"first"));
-    client.log_event(&submitter, &event_type, &Bytes::from_slice(&env, b"second"));
+    client.log_event(&submitter, &event_type, &Bytes::from_slice(&env, b"first"), &None, &None, &false);
+    client.log_event(&submitter, &event_type, &Bytes::from_slice(&env, b"second"), &None, &None, &false);
 
     let evt0 = client.get_event_by_order(&0);
     let evt1 = client.get_event_by_order(&1);
@@ -91,9 +91,9 @@ fn regression_retrieve_event_by_type() {
     let refund = symbol_short!("refund");
 
     env.mock_all_auths();
-    client.log_event(&submitter, &payment, &Bytes::from_slice(&env, b"pay1"));
-    client.log_event(&submitter, &payment, &Bytes::from_slice(&env, b"pay2"));
-    client.log_event(&submitter, &refund, &Bytes::from_slice(&env, b"ref1"));
+    client.log_event(&submitter, &payment, &Bytes::from_slice(&env, b"pay1"), &None, &None, &false);
+    client.log_event(&submitter, &payment, &Bytes::from_slice(&env, b"pay2"), &None, &None, &false);
+    client.log_event(&submitter, &refund, &Bytes::from_slice(&env, b"ref1"), &None, &None, &false);
 
     assert_eq!(client.event_count(&payment), 2);
     assert_eq!(client.event_count(&refund), 1);
@@ -114,7 +114,7 @@ fn regression_uninitialized_contract_panics() {
     // Try to log without initializing
     let submitter = Address::generate(&env);
     env.mock_all_auths();
-    client.log_event(&submitter, &symbol_short!("test"), &Bytes::new(&env));
+    client.log_event(&submitter, &symbol_short!("test"), &Bytes::new(&env), &None, &None, &false);
 }
 
 #[test]
@@ -150,7 +150,7 @@ fn regression_get_event_by_type_invalid_index_panics() {
     let payment = symbol_short!("payment");
 
     env.mock_all_auths();
-    client.log_event(&submitter, &payment, &Bytes::from_slice(&env, b"tx1"));
+    client.log_event(&submitter, &payment, &Bytes::from_slice(&env, b"tx1"), &None, &None, &false);
 
     client.get_event_by_type(&payment, &1); // Only index 0 exists
 }
@@ -194,9 +194,9 @@ fn regression_event_type_max_logs_reached_panics() {
     env.mock_all_auths();
     client.set_event_max_logs(&owner, &payment, &2);
 
-    client.log_event(&submitter, &payment, &Bytes::from_slice(&env, b"tx1"));
-    client.log_event(&submitter, &payment, &Bytes::from_slice(&env, b"tx2"));
-    client.log_event(&submitter, &payment, &Bytes::from_slice(&env, b"tx3"));
+    client.log_event(&submitter, &payment, &Bytes::from_slice(&env, b"tx1"), &None, &None, &false);
+    client.log_event(&submitter, &payment, &Bytes::from_slice(&env, b"tx2"), &None, &None, &false);
+    client.log_event(&submitter, &payment, &Bytes::from_slice(&env, b"tx3"), &None, &None, &false);
 }
 
 #[test]
@@ -229,7 +229,7 @@ fn regression_metadata_too_large_panics() {
     client.set_metadata_max_size(&owner, &10);
 
     let large_meta = Bytes::from_slice(&env, &[0u8; 11]);
-    client.log_event(&submitter, &symbol_short!("test"), &large_meta);
+    client.log_event(&submitter, &symbol_short!("test"), &large_meta, &None, &None, &false);
 }
 
 #[test]
@@ -241,7 +241,7 @@ fn regression_log_event_when_paused_panics() {
     env.mock_all_auths();
     client.pause(&owner);
 
-    client.log_event(&submitter, &symbol_short!("test"), &Bytes::new(&env));
+    client.log_event(&submitter, &symbol_short!("test"), &Bytes::new(&env), &None, &None, &false);
 }
 
 // ── Governance Tests ─────────────────────────────────────────────────────────────
@@ -340,7 +340,7 @@ fn regression_zero_global_max_logs() {
     let result = client.try_log_event(
         &Address::generate(&env),
         &symbol_short!("test"),
-        &Bytes::new(&env),
+        &Bytes::new(&env), &None, &None, &false,
     );
     assert!(result.is_err());
 }
@@ -363,7 +363,7 @@ fn regression_empty_metadata() {
     let submitter = Address::generate(&env);
 
     env.mock_all_auths();
-    let id = client.log_event(&submitter, &symbol_short!("test"), &Bytes::new(&env));
+    let id = client.log_event(&submitter, &symbol_short!("test"), &Bytes::new(&env), &None, &None, &false);
 
     let evt = client.get_event(&id);
     assert_eq!(evt.metadata.len(), 0);
@@ -378,7 +378,7 @@ fn regression_maximum_metadata_size() {
     client.set_metadata_max_size(&owner, &100);
 
     let meta = Bytes::from_slice(&env, &[0u8; 100]);
-    let id = client.log_event(&submitter, &symbol_short!("test"), &meta);
+    let id = client.log_event(&submitter, &symbol_short!("test"), &meta, &None, &None, &false);
 
     let evt = client.get_event(&id);
     assert_eq!(evt.metadata.len(), 100);
@@ -485,7 +485,7 @@ fn regression_event_emission_correct_topics() {
     let event_type = symbol_short!("payment");
 
     env.mock_all_auths();
-    client.log_event(&submitter, &event_type, &Bytes::from_slice(&env, b"tx1"));
+    client.log_event(&submitter, &event_type, &Bytes::from_slice(&env, b"tx1"), &None, &None, &false);
 
     let contract_events = env.events().all();
     let events = contract_events.events();
@@ -500,7 +500,7 @@ fn regression_event_emission_correct_data() {
     let metadata = Bytes::from_slice(&env, b"test-data");
 
     env.mock_all_auths();
-    client.log_event(&submitter, &symbol_short!("test"), &metadata);
+    client.log_event(&submitter, &symbol_short!("test"), &metadata, &None, &None, &false);
 
     let contract_events = env.events().all();
     let events = contract_events.events();
