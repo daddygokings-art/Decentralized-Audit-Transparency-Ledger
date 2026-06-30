@@ -1,4 +1,5 @@
-:root {
+:root,
+[data-theme="dark"] {
   --bg: #0f1117;
   --surface: #1a1d27;
   --border: #2a2d3e;
@@ -9,6 +10,19 @@
   --success: #34d399;
   --warn: #fbbf24;
   --error: #f87171;
+}
+
+[data-theme="light"] {
+  --bg: #f8fafc;
+  --surface: #ffffff;
+  --border: #e2e8f0;
+  --accent: #2563eb;
+  --accent-hover: #1d4ed8;
+  --text: #0f172a;
+  --text-muted: #64748b;
+  --success: #059669;
+  --warn: #d97706;
+  --error: #dc2626;
 }
 
 * {
@@ -58,7 +72,7 @@ a:hover {
   border-radius: 4px;
   font-size: 12px;
   font-weight: 600;
-  background: #1e3a5f;
+  background: color-mix(in srgb, var(--accent) 20%, transparent);
   color: var(--accent);
 }
 

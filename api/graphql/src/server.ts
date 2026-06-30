@@ -3,7 +3,7 @@ import { ApolloServer } from "@apollo/server";
 import { expressMiddleware } from "@apollo/server/express4";
 import express from "express";
 import { WebSocketServer } from "ws";
-import { useServer } from "graphql-ws/lib/use/ws";
+import { useServer } from "graphql-ws/dist/use/ws";
 import { makeExecutableSchema } from "@graphql-tools/schema";
 import { typeDefs } from "./schema";
 import { resolvers } from "./resolvers";

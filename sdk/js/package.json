@@ -1,14 +1,15 @@
 {
-  "name": "@auditledger/sdk",
+  "name": "audit-ledger-sdk",
   "version": "0.1.0",
   "description": "AuditLedger JavaScript/TypeScript SDK (minimal)",
   "main": "dist/index.js",
   "types": "dist/index.d.ts",
   "scripts": {
     "build": "tsc -p .",
-    "test": "vitest"
+    "test": "vitest run"
   },
   "devDependencies": {
+    "@types/node": "^20.12.12",
     "typescript": "^5.0.0",
     "vitest": "^1.0.0"
   }

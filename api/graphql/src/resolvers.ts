@@ -1,10 +1,11 @@
-import { PubSub } from "graphql-subscriptions";
+import { PubSub, withFilter } from "graphql-subscriptions";
 
 export const pubsub = new PubSub();
-const EVENT_LOGGED = "EVENT_LOGGED";
+export const EVENT_LOGGED = "EVENT_LOGGED";
 
 // In-memory mock store (replace with JS SDK calls in production)
 interface EventRecord {
+  id: string;
   index: number;
   timestamp: number;
   event_type: string;
@@ -14,7 +15,26 @@ interface EventRecord {
   prev_hash: string;
 }
 
+interface GovernanceEventRecord {
+  action: string;
+  caller: string;
+  oldValue?: string;
+  newValue?: string;
+  timestamp: number;
+}
+
 const events: EventRecord[] = [];
+const governanceEvents: GovernanceEventRecord[] = [];
+
+interface GovernanceEventRecord {
+  action: string;
+  caller: string;
+  oldValue?: string;
+  newValue?: string;
+  timestamp: number;
+}
+
+const governanceEvents: GovernanceEventRecord[] = [];
 
 function matchesFilter(e: EventRecord, filter: any): boolean {
   if (!filter) return true;
@@ -24,6 +44,14 @@ function matchesFilter(e: EventRecord, filter: any): boolean {
   if (filter.startTime && e.timestamp < filter.startTime) return false;
   if (filter.endTime && e.timestamp > filter.endTime) return false;
   return true;
+}
+
+export function resetEvents() {
+  events.length = 0;
+}
+
+export async function publishEventLogged(event: EventRecord) {
+  await pubsub.publish(EVENT_LOGGED, { eventLogged: event });
 }
 
 export const resolvers = {
@@ -49,6 +77,13 @@ export const resolvers = {
 
     searchEvents: (_: any, { query }: any) =>
       events.filter((e) => e.metadata.toLowerCase().includes(query.toLowerCase())),
+
+    governanceHistory: (_: any, { types, limit = 50, offset = 0 }: any) => {
+      const filtered = types && types.length > 0
+        ? governanceEvents.filter((g) => types.includes(g.action))
+        : governanceEvents;
+      return filtered.slice(offset, offset + limit);
+    },
   },
 
   Mutation: {
@@ -59,6 +94,7 @@ export const resolvers = {
       const prevHash = events.length > 0 ? events[events.length - 1].event_hash : "0".repeat(64);
       const hash = Buffer.from(`${idx}:${eventType}:${submitter}:${metadata}:${now}`).toString("hex").slice(0, 64).padEnd(64, "0");
       const ev: EventRecord = {
+        id: String(idx),
         index: idx,
         timestamp: now,
         event_type: eventType,
@@ -69,32 +105,32 @@ export const resolvers = {
       };
       events.push(ev);
       void pubsub.publish(EVENT_LOGGED, { eventLogged: ev });
+
+      // Track governance actions in the governance history
+      const GOVERNANCE_TYPES = new Set([
+        "transfer_ownership", "set_global_max_logs", "set_event_max_logs",
+        "remove_event_cap", "contract_paused", "contract_unpaused",
+      ]);
+      if (GOVERNANCE_TYPES.has(eventType)) {
+        governanceEvents.unshift({
+          action: eventType,
+          caller: submitter,
+          newValue: metadata || undefined,
+          timestamp: now,
+        });
+      }
+
       return ev;
     },
   },
 
   Subscription: {
     eventLogged: {
-      subscribe: (_: any, { type }: any) => {
-        const asyncIter = pubsub.asyncIterableIterator(EVENT_LOGGED);
-        if (!type) return asyncIter;
-        // Filter by event type
-        return {
-          [Symbol.asyncIterator]() {
-            return {
-              next: async () => {
-                for await (const payload of asyncIter) {
-                  if ((payload as any).eventLogged.event_type === type) {
-                    return { value: payload, done: false };
-                  }
-                }
-                return { value: undefined, done: true };
-              },
-              return: () => Promise.resolve({ value: undefined, done: true }),
-            };
-          },
-        };
-      },
+      subscribe: withFilter(
+        () => pubsub.asyncIterableIterator(EVENT_LOGGED),
+        (payload: { eventLogged: EventRecord } | undefined, variables: { type?: string } | undefined) =>
+          !!payload && (!variables?.type || payload.eventLogged.event_type === variables.type)
+      ),
     },
   },
 };
