@@ -333,6 +333,59 @@ pub struct Proposal {
 
 const NULL_ACCOUNT: &str = "GAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAWHF";
 
+// ── Additional type definitions ──────────────────────────────────────────────
+
+/// A versioned snapshot of an Event, stored when `update_event` is called.
+#[contracttype]
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct EventVersion {
+    /// 0-based version counter (0 = original).
+    pub version: u32,
+    /// Full event data at this version.
+    pub data: Event,
+    /// Ledger timestamp when this version was recorded.
+    pub updated_at: u64,
+    /// Address that triggered the update (or original submitter for version 0).
+    pub updated_by: Address,
+}
+
+/// Aggregate statistics returned by `get_statistics`.
+#[contracttype]
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct ContractStatistics {
+    pub total_events: u32,
+    pub events_by_type: Vec<(Symbol, u32)>,
+    pub events_last_hour: u32,
+    pub events_last_day: u32,
+    pub events_last_week: u32,
+    pub top_submitters: Vec<(Address, u32)>,
+}
+
+/// Governance action carried by a multisig proposal.
+#[contracttype]
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub enum ProposalAction {
+    TransferOwnership(Address),
+    AddOwner(Address),
+    RemoveOwner(Address),
+    SetRequiredSignatures(u32),
+    SetGlobalMaxLogs(u32),
+    Pause,
+    Unpause,
+}
+
+/// An on-chain governance proposal awaiting multisig approval.
+#[contracttype]
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct Proposal {
+    pub id: u32,
+    pub proposer: Address,
+    pub action: ProposalAction,
+    pub approvals: Vec<Address>,
+    pub expires_at: u64,
+    pub executed: bool,
+}
+
 #[contract]
 pub struct AuditLedger;
 
@@ -834,7 +887,7 @@ impl AuditLedger {
             index,
             timestamp,
             event_type: event_type.clone(),
-            category: cat.clone(),
+            category: Symbol::new(&env, "general"),
             submitter: submitter.clone(),
             metadata: metadata.clone(),
             sub_event_type: sub_event_type.clone(),
@@ -1704,6 +1757,8 @@ impl AuditLedger {
             .get(&DataKey::EventData(event_id))
             .unwrap();
 
+        let evt_timestamp = event.timestamp;
+        let evt_submitter = event.submitter.clone();
         let mut history = Vec::new(&env);
         let ts = event.timestamp;
         let sub = event.submitter.clone();
@@ -2314,8 +2369,6 @@ impl AuditLedger {
         submitter: Address,
         event_type: Symbol,
         metadata: Bytes,
-        category: Option<Symbol>,
-        sub_event_type: Option<Symbol>,
         signature_payload: Bytes,
     ) -> BytesN<32> {
         // Delegates auth to the inner log_event call.
@@ -2379,6 +2432,74 @@ impl AuditLedger {
     }
 
     // ── Private helpers ─────────────────────────────────────────────────────
+
+    /// Panic with `ContractNotInitialized` if the contract has not been initialized.
+    fn require_initialized(env: &Env) {
+        if !env.storage().instance().has(&DataKey::Owner) {
+            panic_with_error!(env, ContractError::ContractNotInitialized);
+        }
+    }
+
+    /// Increment the count for `addr` in a (Address, u32) accumulator Vec.
+    /// Returns the NEW count for that address in the batch.
+    fn increment_address_count(
+        _env: &Env,
+        counts: &mut Vec<(Address, u32)>,
+        addr: Address,
+    ) -> u32 {
+        for idx in 0..counts.len() {
+            let pair: (Address, u32) = counts.get(idx).unwrap();
+            if pair.0 == addr {
+                let new_count = pair.1 + 1;
+                counts.set(idx, &(addr.clone(), new_count));
+                return new_count;
+            }
+        }
+        counts.push_back(&(addr, 1u32));
+        1u32
+    }
+
+    /// Increment the count for `sym` in a (Symbol, u32) accumulator Vec.
+    /// Returns the NEW count for that symbol in the batch.
+    fn increment_symbol_count(
+        _env: &Env,
+        counts: &mut Vec<(Symbol, u32)>,
+        sym: Symbol,
+    ) -> u32 {
+        for idx in 0..counts.len() {
+            let pair: (Symbol, u32) = counts.get(idx).unwrap();
+            if pair.0 == sym {
+                let new_count = pair.1 + 1;
+                counts.set(idx, &(sym.clone(), new_count));
+                return new_count;
+            }
+        }
+        counts.push_back(&(sym, 1u32));
+        1u32
+    }
+
+    /// Validate that `metadata` conforms to `schema`.
+    ///
+    /// ## Schema format
+    /// The schema is a length-prefixed byte sequence: the first 4 bytes (LE u32)
+    /// encode the minimum required metadata length.  If `metadata.len() >= min_len`,
+    /// the validation passes.  A `min_len` of 0 accepts any metadata (including empty).
+    ///
+    /// This simple format is intentionally minimal to remain gas-efficient on-chain.
+    /// Off-chain consumers can apply richer validation (JSON Schema, Protobuf, etc.)
+    /// after retrieving the schema via `get_metadata_schema`.
+    fn validate_metadata_schema(metadata: &Bytes, schema: &Bytes) -> bool {
+        if schema.len() < 4 {
+            // Schema too short to contain the minimum-length prefix — treat as no constraint.
+            return true;
+        }
+        let b0 = schema.get(0).unwrap() as u32;
+        let b1 = schema.get(1).unwrap() as u32;
+        let b2 = schema.get(2).unwrap() as u32;
+        let b3 = schema.get(3).unwrap() as u32;
+        let min_len: u32 = b0 | (b1 << 8) | (b2 << 16) | (b3 << 24);
+        metadata.len() >= min_len
+    }
 
     // ── issue #54: packed-Bytes index storage helpers ────────────────────────
 
@@ -2664,7 +2785,10 @@ impl AuditLedger {
                     .set(&DataKey::RequiredSignatures, &req);
             }
             ProposalAction::SetGlobalMaxLogs(v) => {
-                env.storage().instance().set(&DataKey::GlobalMaxLogs, &v);
+                if let Some(mut c) = env.storage().instance().get::<_, Config>(&DataKey::Config) {
+                    c.global_max_logs = v;
+                    env.storage().instance().set(&DataKey::Config, &c);
+                }
             }
             ProposalAction::Pause => {
                 env.storage().instance().set(&DataKey::Paused, &true);
