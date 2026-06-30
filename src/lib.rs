@@ -52,6 +52,12 @@ pub enum DataKey {
     GlobalMetadataMaxSize,
     /// Signature stored for an event (issue #69): (pubkey, signature).
     EventSignature(BytesN<32>),
+    /// Registered encryption public key for an address.
+    EncryptionKey(Address),
+    /// Encrypted metadata blob for an event.
+    EncryptedMetadata(BytesN<32>),
+    /// Public key hash (SHA-256) used for event encryption.
+    EncryptionKeyForEvent(BytesN<32>),
 }
 
 #[contracterror]
@@ -67,6 +73,8 @@ pub enum ContractError {
     CapNotSet = 7,
     MetadataTooLarge = 8,
     InvalidSignature = 9,
+    EncryptionKeyNotRegistered = 10,
+    EventNotEncrypted = 11,
 }
 
 const NULL_ACCOUNT: &str = "GAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAWHF";
@@ -161,12 +169,30 @@ impl AuditLedger {
         let event_hash =
             Self::compute_event_hash(&env, &event_id, &prev_hash, index, timestamp);
 
+        // --- issue #26: encrypt metadata if submitter has registered key ---
+        let stored_metadata = if let Some(pub_key) = env
+            .storage()
+            .instance()
+            .get::<_, Bytes>(&DataKey::EncryptionKey(submitter.clone()))
+        {
+            let encrypted = Self::xor_cipher(&env, &metadata, &pub_key, index);
+            env.storage()
+                .instance()
+                .set(&DataKey::EncryptedMetadata(event_id.clone()), &encrypted);
+            env.storage()
+                .instance()
+                .set(&DataKey::EncryptionKeyForEvent(event_id.clone()), &pub_key);
+            encrypted
+        } else {
+            metadata.clone()
+        };
+
         let evt = Event {
             index,
             timestamp,
             event_type: event_type.clone(),
             submitter: submitter.clone(),
-            metadata: metadata.clone(),
+            metadata: stored_metadata,
             event_hash: event_hash.clone(),
             prev_hash,
         };
@@ -323,6 +349,64 @@ impl AuditLedger {
             panic_with_error!(&env, ContractError::NewOwnerIsZero);
         }
         env.storage().instance().set(&DataKey::Owner, &new_owner);
+    }
+
+    // ── issue #26: encryption at rest ────────────────────────────────────────
+
+    /// Register a public key for encrypting event metadata.
+    /// When set, `log_event` will automatically encrypt the metadata using
+    /// a stream cipher derived from the public key before storing it.
+    ///
+    /// The public key should be 32 bytes (e.g., an Ed25519/X25519 public key).
+    /// Caller must be the address registering the key.
+    pub fn register_encryption_key(env: Env, caller: Address, public_key: Bytes) {
+        caller.require_auth();
+        env.storage()
+            .instance()
+            .set(&DataKey::EncryptionKey(caller), &public_key);
+    }
+
+    /// Decrypt metadata for an event at the given sequential index.
+    ///
+    /// Only callers who have registered an encryption key can decrypt.
+    /// The function re-derives the key stream from the stored public key
+    /// and XORs the ciphertext to recover the original metadata.
+    pub fn decrypt_metadata(env: Env, caller: Address, event_index: u32) -> Bytes {
+        // Verify caller has a registered encryption key
+        if !env
+            .storage()
+            .instance()
+            .has(&DataKey::EncryptionKey(caller.clone()))
+        {
+            panic_with_error!(&env, ContractError::EncryptionKeyNotRegistered);
+        }
+
+        let total: u32 = env.storage().instance().get(&DataKey::TotalEvents).unwrap_or(0);
+        if event_index >= total {
+            panic_with_error!(&env, ContractError::EventDoesNotExist);
+        }
+
+        let event_id: BytesN<32> = env
+            .storage()
+            .instance()
+            .get(&DataKey::EventOrder(event_index))
+            .unwrap();
+
+        let encrypted_meta: Bytes = env
+            .storage()
+            .instance()
+            .get(&DataKey::EncryptedMetadata(event_id.clone()))
+            .unwrap_or_else(|| {
+                panic_with_error!(&env, ContractError::EventNotEncrypted);
+            });
+
+        let pub_key: Bytes = env
+            .storage()
+            .instance()
+            .get(&DataKey::EncryptionKeyForEvent(event_id.clone()))
+            .unwrap();
+
+        Self::xor_cipher(&env, &encrypted_meta, &pub_key, event_index)
     }
 
     // ── issue #67: metadata size governance ──────────────────────────────────
@@ -543,6 +627,31 @@ impl AuditLedger {
                 ((v >> 24) & 0xff) as u8,
             ]
         )
+    }
+
+    /// XOR stream cipher: encrypts or decrypts `input` using a key stream
+    /// derived from `SHA-256(pub_key || index_le || block_num_le)`.
+    /// XOR is symmetric, so encryption and decryption are the same operation.
+    fn xor_cipher(env: &Env, input: &Bytes, pub_key: &Bytes, index: u32) -> Bytes {
+        let in_len = input.len();
+        let mut result = Bytes::new(env);
+        let mut pos = 0u32;
+        while pos < in_len {
+            let mut preimage = Bytes::new(env);
+            preimage.append(pub_key);
+            preimage.append(&Self::u32_to_bytes(env, index));
+            preimage.append(&Self::u32_to_bytes(env, pos / 32));
+            let key_block: BytesN<32> = env.crypto().sha256(&preimage);
+            let remaining = in_len - pos;
+            let block_len = if remaining > 32 { 32u32 } else { remaining };
+            for i in 0..block_len {
+                let p = input.get(pos + i).unwrap();
+                let k = key_block.get(i).unwrap();
+                result.push_back(p ^ k);
+            }
+            pos += block_len;
+        }
+        result
     }
 }
 

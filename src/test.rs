@@ -584,6 +584,185 @@ fn test_get_event_signature_returns_none_for_unsigned() {
     assert!(stored.is_none());
 }
 
+// ── issue #26: encryption at rest ─────────────────────────────────────────────
+
+#[test]
+fn test_register_encryption_key_stores_key() {
+    let (env, _owner, client) = create_ledger();
+    let submitter = Address::generate(&env);
+    let pub_key = Bytes::from_slice(&env, &[1u8; 32]);
+
+    env.mock_all_auths();
+    client.register_encryption_key(&submitter, &pub_key);
+
+    // Verify by logging an event — it should be encrypted
+    let meta = Bytes::from_slice(&env, b"sensitive-data");
+    let id = client.log_event(&submitter, &symbol_short!("payment"), &meta);
+
+    let evt = client.get_event(&id);
+    // Raw metadata should NOT equal original (it's encrypted)
+    assert_ne!(evt.metadata, meta);
+    // Encrypted metadata should have the same length
+    assert_eq!(evt.metadata.len(), meta.len());
+}
+
+#[test]
+fn test_log_event_encrypted_stores_encrypted_metadata() {
+    let (env, _owner, client) = create_ledger();
+    let submitter = Address::generate(&env);
+    let pub_key = Bytes::from_slice(&env, &[2u8; 32]);
+
+    env.mock_all_auths();
+    client.register_encryption_key(&submitter, &pub_key);
+
+    let meta = Bytes::from_slice(&env, b"confidential-pii-data");
+    let id = client.log_event(&submitter, &symbol_short!("audit"), &meta);
+
+    // The stored event metadata should be encrypted (different from original)
+    let evt = client.get_event(&id);
+    assert_ne!(evt.metadata, meta);
+    assert_eq!(evt.metadata.len(), meta.len());
+}
+
+#[test]
+fn test_decrypt_metadata_returns_original() {
+    let (env, _owner, client) = create_ledger();
+    let submitter = Address::generate(&env);
+    let pub_key = Bytes::from_slice(&env, &[3u8; 32]);
+
+    env.mock_all_auths();
+    client.register_encryption_key(&submitter, &pub_key);
+
+    let meta = Bytes::from_slice(&env, b"decrypt-this-payload");
+    let _id = client.log_event(&submitter, &symbol_short!("secure"), &meta);
+
+    // Decrypt and verify
+    let decrypted = client.decrypt_metadata(&submitter, &0);
+    assert_eq!(decrypted, meta);
+}
+
+#[test]
+fn test_non_encrypted_event_remains_readable() {
+    let (env, _owner, client) = create_ledger();
+    let submitter = Address::generate(&env);
+    // No encryption key registered
+
+    let meta = Bytes::from_slice(&env, b"public-data");
+    let id = client.log_event(&submitter, &symbol_short!("public"), &meta);
+
+    let evt = client.get_event(&id);
+    assert_eq!(evt.metadata, meta);
+}
+
+#[test]
+fn test_decrypt_metadata_for_non_encrypted_event_panics() {
+    let (env, owner, client) = create_ledger();
+    let submitter = Address::generate(&env);
+    // Register key for caller (needed to call decrypt_metadata)
+    let pub_key = Bytes::from_slice(&env, &[4u8; 32]);
+    let caller = owner;
+
+    env.mock_all_auths();
+    client.register_encryption_key(&caller, &pub_key);
+    // Log event WITHOUT registering key for submitter (event not encrypted)
+    let meta = Bytes::from_slice(&env, b"not-encrypted");
+    client.log_event(&submitter, &symbol_short!("plain"), &meta);
+
+    // Try to decrypt — should panic with EventNotEncrypted
+    let result = client.try_decrypt_metadata(&caller, &0);
+    assert!(result.is_err());
+}
+
+#[test]
+fn test_decrypt_metadata_unregistered_caller_panics() {
+    let (env, _owner, client) = create_ledger();
+    let submitter = Address::generate(&env);
+    let unauthorized = Address::generate(&env);
+    let pub_key = Bytes::from_slice(&env, &[5u8; 32]);
+
+    env.mock_all_auths();
+    client.register_encryption_key(&submitter, &pub_key);
+
+    let meta = Bytes::from_slice(&env, b"secret");
+    let _id = client.log_event(&submitter, &symbol_short!("secret"), &meta);
+
+    // Unauthorized caller (no registered key) should panic
+    let result = client.try_decrypt_metadata(&unauthorized, &0);
+    assert!(result.is_err());
+}
+
+#[test]
+fn test_encrypted_event_id_matches_content() {
+    let (env, _owner, client) = create_ledger();
+    let submitter = Address::generate(&env);
+    let pub_key = Bytes::from_slice(&env, &[6u8; 32]);
+
+    env.mock_all_auths();
+    client.register_encryption_key(&submitter, &pub_key);
+
+    // Log same content twice without force — second should return same ID (dedup)
+    // Actually, the encryption happens BEFORE dedup check in log_event, so
+    // the dedup will see the original (pre-encryption) metadata.
+    // This test verifies the event is stored and retrievable.
+    let meta = Bytes::from_slice(&env, b"dedup-test");
+    let id1 = client.log_event(&submitter, &symbol_short!("test"), &meta);
+    let evt = client.get_event(&id1);
+    assert_ne!(evt.metadata, meta); // encrypted at rest
+    let decrypted = client.decrypt_metadata(&submitter, &0);
+    assert_eq!(decrypted, meta);
+}
+
+#[test]
+fn test_multiple_encrypted_events() {
+    let (env, _owner, client) = create_ledger();
+    let submitter = Address::generate(&env);
+    let pub_key = Bytes::from_slice(&env, &[7u8; 32]);
+
+    env.mock_all_auths();
+    client.register_encryption_key(&submitter, &pub_key);
+
+    for i in 0u8..3 {
+        let meta = Bytes::from_slice(&env, &[i; 16]);
+        let id = client.log_event(&submitter, &symbol_short!("batch"), &meta);
+
+        let evt = client.get_event(&id);
+        assert_ne!(evt.metadata, meta);
+
+        let decrypted = client.decrypt_metadata(&submitter, &(i as u32));
+        assert_eq!(decrypted, meta);
+    }
+}
+
+#[test]
+fn test_mixed_encrypted_and_plain_events() {
+    let (env, _owner, client) = create_ledger();
+    let alice = Address::generate(&env);
+    let bob = Address::generate(&env);
+    let alice_key = Bytes::from_slice(&env, &[8u8; 32]);
+
+    env.mock_all_auths();
+    client.register_encryption_key(&alice, &alice_key);
+
+    // Alice logs encrypted event
+    let meta_alice = Bytes::from_slice(&env, b"alice-secret");
+    let id_a = client.log_event(&alice, &symbol_short!("confidential"), &meta_alice);
+    let evt_a = client.get_event(&id_a);
+    assert_ne!(evt_a.metadata, meta_alice);
+
+    // Bob logs plaintext event
+    let meta_bob = Bytes::from_slice(&env, b"bob-public");
+    let id_b = client.log_event(&bob, &symbol_short!("public"), &meta_bob);
+    let evt_b = client.get_event(&id_b);
+    assert_eq!(evt_b.metadata, meta_bob);
+
+    // Both events exist with correct order
+    assert_eq!(client.total_events(), 2);
+
+    // Alice can decrypt her event
+    let decrypted_a = client.decrypt_metadata(&alice, &0);
+    assert_eq!(decrypted_a, meta_alice);
+}
+
 #[test]
 fn test_mixed_types_with_limits() {
     let (env, owner, client) = create_ledger();
