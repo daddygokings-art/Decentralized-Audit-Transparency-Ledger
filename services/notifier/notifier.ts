@@ -69,7 +69,7 @@ function render(template: string, event: AuditEvent): string {
 
 // ── Rule matching ─────────────────────────────────────────────────────────────
 
-function matches(rule: Rule, event: AuditEvent): boolean {
+export function matches(rule: Rule, event: AuditEvent): boolean {
   if (rule.event_type !== "*" && rule.event_type !== event.event_type) return false;
   const f = rule.filters ?? {};
   if (f.submitter_contains && !event.submitter.includes(f.submitter_contains)) return false;
