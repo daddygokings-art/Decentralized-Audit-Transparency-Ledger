@@ -13,7 +13,7 @@ fn create_ledger() -> (Env, Address, AuditLedgerClient<'static>) {
     let client = AuditLedgerClient::new(&env, &contract_id);
 
     env.mock_all_auths();
-    client.initialize(&owner, &100_000);
+    client.initialize(&owner, &100_000, &4096);
     (env, owner, client)
 }
 

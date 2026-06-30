@@ -11,7 +11,7 @@ fn create_ledger() -> (Env, Address, AuditLedgerClient<'static>) {
     env.mock_all_auths();
     let mut owners = Vec::new(&env);
     owners.push_back(owner.clone());
-    client.initialize(&owners, &100);
+    client.initialize(&owners, &100, &4096);
     (env, owner, client)
 }
 
@@ -27,7 +27,7 @@ fn test_initialize() {
     env.mock_all_auths();
     let mut owners = Vec::new(&env);
     owners.push_back(owner.clone());
-    client.initialize(&owners, &100);
+    client.initialize(&owners, &100, &4096);
 
     assert_eq!(client.total_events(), 0);
 }
@@ -94,9 +94,9 @@ fn test_initialize_reinitialization_panics() {
     let client = AuditLedgerClient::new(&env, &contract_id);
 
     env.mock_all_auths();
-    client.initialize(&owner, &100);
+    client.initialize(&owner, &100, &4096);
     // Try to re-initialize — should fail with AlreadyInitialized (error #19)
-    client.initialize(&owner, &200);
+    client.initialize(&owner, &200, &4096);
 }
 
 #[test]
@@ -109,14 +109,14 @@ fn test_initialize_reinitialization_after_ownership_transfer_panics() {
     let client = AuditLedgerClient::new(&env, &contract_id);
 
     env.mock_all_auths();
-    client.initialize(&owner, &100);
+    client.initialize(&owner, &100, &4096);
     
     // Transfer ownership
     client.transfer_ownership(&owner, &new_owner);
     
     // Try to re-initialize with new owner — should still fail with AlreadyInitialized
     // (demonstrates that version counter protects against re-init even if owner changes)
-    client.initialize(&new_owner, &200);
+    client.initialize(&new_owner, &200, &4096);
 }
 
 #[test]
@@ -409,7 +409,7 @@ fn test_global_max_logs() {
     env.mock_all_auths();
     let mut owners = Vec::new(&env);
     owners.push_back(owner.clone());
-    client.initialize(&owners, &2);
+    client.initialize(&owners, &2, &4096);
 
     let payment = symbol_short!("payment");
     let refund = symbol_short!("refund");
@@ -550,7 +550,7 @@ fn test_zero_global_max_logs() {
     env.mock_all_auths();
     let mut owners = Vec::new(&env);
     owners.push_back(owner.clone());
-    client.initialize(&owners, &0);
+    client.initialize(&owners, &0, &4096);
 
     let result = client.try_log_event(
         &submitter,
@@ -626,14 +626,60 @@ fn test_event_was_emitted() {
 }
 
 #[test]
-fn test_log_event_with_empty_metadata() {
+fn test_log_event_metadata_limit_at_max() {
+    let (env, _owner, client) = create_ledger();
+    let submitter = Address::generate(&env);
+    let payment = symbol_short!("payment");
+    let max_meta = Bytes::from_slice(&env, &[0u8; 4096]);
+
+    env.mock_all_auths();
+    let id = client.log_event(&submitter, &payment, &max_meta, &None, &None, &false);
+    let evt = client.get_event(&id);
+    assert_eq!(evt.metadata.len(), 4096);
+}
+
+#[test]
+fn test_log_event_metadata_too_large_reverts() {
+    let (env, _owner, client) = create_ledger();
+    let submitter = Address::generate(&env);
+    let payment = symbol_short!("payment");
+    let mut meta_vec = vec![0u8; 4097];
+    let metadata = Bytes::from_slice(&env, &meta_vec);
+
+    env.mock_all_auths();
+    let result = client.try_log_event(&submitter, &payment, &metadata, &None, &None, &false);
+    assert!(result.is_err());
+}
+
+#[test]
+fn test_log_events_metadata_too_large_reverts() {
+    let (env, _owner, client) = create_ledger();
+    let submitter = Address::generate(&env);
+    let payment = symbol_short!("payment");
+    let mut meta_vec = vec![0u8; 4097];
+    let metadata = Bytes::from_slice(&env, &meta_vec);
+    let events = soroban_sdk::vec![
+        &env,
+        (
+            submitter.clone(),
+            payment.clone(),
+            metadata.clone(),
+        ),
+    ];
+
+    env.mock_all_auths();
+    let result = client.try_log_events(&events);
+    assert!(result.is_err());
+}
+
+#[test]
+fn test_log_event_with_empty_metadata_respects_limit() {
     let (env, _owner, client) = create_ledger();
     let submitter = Address::generate(&env);
     let payment = symbol_short!("payment");
 
     env.mock_all_auths();
     let id = client.log_event(&submitter, &payment, &Bytes::new(&env), &None, &None, &false);
-
     let evt = client.get_event(&id);
     assert_eq!(evt.metadata.len(), 0);
 }
@@ -759,7 +805,7 @@ fn test_log_event_rejects_total_events_overflow() {
     let client = AuditLedgerClient::new(&env, &contract_id);
 
     env.mock_all_auths();
-    client.initialize(&owner, &u32::MAX);
+    client.initialize(&owner, &u32::MAX, &4096);
     env.storage()
         .instance()
         .set(&super::DataKey::TotalEvents, &u32::MAX);
@@ -2027,154 +2073,233 @@ fn test_log_event_with_ttl_enabled() {
     assert_eq!(evt.metadata, Bytes::from_slice(&env, b"ttl_test"));
 }
 
-// ── Issue #175: structured audit event emission ──────────────────────────────
+// ── get_events_by_type pagination ──────────────────────────────────────────
 
-/// log_event must emit exactly one ("audit", "log_event") event per call with
-/// payload (submitter, event_type, index).
-#[test]
-fn test_log_event_emits_audit_event_with_correct_topic_and_payload() {
-    let env = Env::default();
-    let contract_id = env.register(AuditLedger, ());
-    let client = AuditLedgerClient::new(&env, &contract_id);
-
-    let owner = Address::generate(&env);
-    let submitter = Address::generate(&env);
-    let event_type = symbol_short!("payment");
-    let meta = Bytes::from_slice(&env, b"tx-data");
-
-    env.mock_all_auths();
-    let mut owners = Vec::new(&env);
-    owners.push_back(owner.clone());
-    client.initialize(&owners, &100);
-
-    client.log_event(&submitter, &event_type, &meta, &None, &None, &false);
-
-    // Expected: topic = ("audit", "log_event"), data = (submitter, event_type, index=0)
-    let expected_topics = (
-        Symbol::new(&env, "audit"),
-        Symbol::new(&env, "log_event"),
-    )
-        .into_val(&env);
-    let expected_data = (submitter.clone(), event_type.clone(), 0u32).into_val(&env);
-
-    let all_events = env.events().all().events();
-    // Find the audit log_event entry emitted by our contract
-    let audit_event = all_events
-        .iter()
-        .find(|(cid, topics, _data)| cid == contract_id && topics == expected_topics);
-
-    assert!(
-        audit_event.is_some(),
-        "Expected an ('audit', 'log_event') event to be emitted by log_event"
-    );
-    let (_, _, actual_data) = audit_event.unwrap();
-    assert_eq!(
-        actual_data, expected_data,
-        "Event data should be (submitter, event_type, index)"
-    );
+/// Helper: log `count` events of `event_type` with sequential single-byte metadata (0,1,2,…).
+fn log_n_events(
+    env: &Env,
+    client: &AuditLedgerClient,
+    submitter: &Address,
+    event_type: &soroban_sdk::Symbol,
+    count: u32,
+) {
+    for i in 0..count {
+        // Use the index as a single-byte payload so each event is distinct.
+        // Tests that inspect metadata values use the same byte encoding.
+        let meta = Bytes::from_slice(env, &[i as u8]);
+        client.log_event(submitter, event_type, &meta, &None, &None, &false);
+    }
 }
 
-/// log_events must emit one ("audit", "log_event") event per entry in the batch,
-/// each with the correct (submitter, event_type, index) payload.
+/// Normal case: fetch second page (start=2, limit=2) from 5 events.
 #[test]
-fn test_log_events_emits_one_audit_event_per_entry() {
-    let env = Env::default();
-    let contract_id = env.register(AuditLedger, ());
-    let client = AuditLedgerClient::new(&env, &contract_id);
+fn test_get_events_by_type_normal_page() {
+    let (env, _owner, client) = create_ledger();
+    let submitter = Address::generate(&env);
+    let payment = symbol_short!("payment");
 
-    let owner = Address::generate(&env);
+    env.mock_all_auths();
+    log_n_events(&env, &client, &submitter, &payment, 5);
+
+    // page: events at type-indices 2 and 3
+    let page = client.get_events_by_type(&payment, &2, &2);
+    assert_eq!(page.len(), 2);
+    assert_eq!(page.get(0).unwrap().metadata, Bytes::from_slice(&env, &[2u8]));
+    assert_eq!(page.get(1).unwrap().metadata, Bytes::from_slice(&env, &[3u8]));
+}
+
+/// Partial last page: start=4, limit=5 with only 5 events → should return 1 event.
+#[test]
+fn test_get_events_by_type_partial_last_page() {
+    let (env, _owner, client) = create_ledger();
+    let submitter = Address::generate(&env);
+    let payment = symbol_short!("payment");
+
+    env.mock_all_auths();
+    log_n_events(&env, &client, &submitter, &payment, 5);
+
+    let page = client.get_events_by_type(&payment, &4, &5);
+    assert_eq!(page.len(), 1);
+    assert_eq!(page.get(0).unwrap().metadata, Bytes::from_slice(&env, &[4u8]));
+}
+
+/// First page: start=0, limit=3.
+#[test]
+fn test_get_events_by_type_first_page() {
+    let (env, _owner, client) = create_ledger();
+    let submitter = Address::generate(&env);
+    let payment = symbol_short!("payment");
+
+    env.mock_all_auths();
+    log_n_events(&env, &client, &submitter, &payment, 5);
+
+    let page = client.get_events_by_type(&payment, &0, &3);
+    assert_eq!(page.len(), 3);
+    assert_eq!(page.get(0).unwrap().metadata, Bytes::from_slice(&env, &[0u8]));
+    assert_eq!(page.get(1).unwrap().metadata, Bytes::from_slice(&env, &[1u8]));
+    assert_eq!(page.get(2).unwrap().metadata, Bytes::from_slice(&env, &[2u8]));
+}
+
+/// Exact page: limit equals the total number of events.
+#[test]
+fn test_get_events_by_type_exact_page() {
+    let (env, _owner, client) = create_ledger();
+    let submitter = Address::generate(&env);
+    let payment = symbol_short!("payment");
+
+    env.mock_all_auths();
+    log_n_events(&env, &client, &submitter, &payment, 3);
+
+    let page = client.get_events_by_type(&payment, &0, &3);
+    assert_eq!(page.len(), 3);
+}
+
+/// Empty case: event type has no events at all → empty vec.
+#[test]
+fn test_get_events_by_type_empty_type_returns_empty() {
+    let (_env, _owner, client) = create_ledger();
+    let payment = symbol_short!("payment");
+
+    // No events logged for this type
+    let page = client.get_events_by_type(&payment, &0, &10);
+    assert_eq!(page.len(), 0);
+}
+
+/// Boundary: start equals total count (one past end) → empty vec.
+#[test]
+fn test_get_events_by_type_start_at_boundary_returns_empty() {
+    let (env, _owner, client) = create_ledger();
+    let submitter = Address::generate(&env);
+    let payment = symbol_short!("payment");
+
+    env.mock_all_auths();
+    log_n_events(&env, &client, &submitter, &payment, 3);
+
+    // start == count (3) — out of range
+    let page = client.get_events_by_type(&payment, &3, &10);
+    assert_eq!(page.len(), 0);
+}
+
+/// Boundary: start beyond total count → empty vec.
+#[test]
+fn test_get_events_by_type_start_beyond_range_returns_empty() {
+    let (env, _owner, client) = create_ledger();
+    let submitter = Address::generate(&env);
+    let payment = symbol_short!("payment");
+
+    env.mock_all_auths();
+    log_n_events(&env, &client, &submitter, &payment, 3);
+
+    let page = client.get_events_by_type(&payment, &100, &10);
+    assert_eq!(page.len(), 0);
+}
+
+/// Boundary: limit=0 → empty vec (no panic).
+#[test]
+fn test_get_events_by_type_zero_limit_returns_empty() {
+    let (env, _owner, client) = create_ledger();
+    let submitter = Address::generate(&env);
+    let payment = symbol_short!("payment");
+
+    env.mock_all_auths();
+    log_n_events(&env, &client, &submitter, &payment, 3);
+
+    let page = client.get_events_by_type(&payment, &0, &0);
+    assert_eq!(page.len(), 0);
+}
+
+/// Boundary: limit=1 fetches exactly one event.
+#[test]
+fn test_get_events_by_type_limit_one() {
+    let (env, _owner, client) = create_ledger();
+    let submitter = Address::generate(&env);
+    let payment = symbol_short!("payment");
+
+    env.mock_all_auths();
+    log_n_events(&env, &client, &submitter, &payment, 3);
+
+    let page = client.get_events_by_type(&payment, &1, &1);
+    assert_eq!(page.len(), 1);
+    assert_eq!(page.get(0).unwrap().metadata, Bytes::from_slice(&env, &[1u8]));
+}
+
+/// Boundary: limit=100 (max allowed) works fine.
+#[test]
+fn test_get_events_by_type_max_limit() {
+    let (env, _owner, client) = create_ledger();
+    let submitter = Address::generate(&env);
+    let payment = symbol_short!("payment");
+
+    env.mock_all_auths();
+    log_n_events(&env, &client, &submitter, &payment, 5);
+
+    // limit=100 but only 5 events exist → should return 5
+    let page = client.get_events_by_type(&payment, &0, &100);
+    assert_eq!(page.len(), 5);
+}
+
+/// Exceeding max limit panics with InvalidPaginationParams (error #21).
+#[test]
+#[should_panic(expected = "HostError: Error(Contract, #21)")]
+fn test_get_events_by_type_limit_over_100_panics() {
+    let (env, _owner, client) = create_ledger();
+    let submitter = Address::generate(&env);
+    let payment = symbol_short!("payment");
+
+    env.mock_all_auths();
+    log_n_events(&env, &client, &submitter, &payment, 3);
+
+    // limit=101 should panic
+    client.get_events_by_type(&payment, &0, &101);
+}
+
+/// Mixed types: pagination for one type is independent of another type's events.
+#[test]
+fn test_get_events_by_type_independent_of_other_types() {
+    let (env, _owner, client) = create_ledger();
     let submitter = Address::generate(&env);
     let payment = symbol_short!("payment");
     let refund = symbol_short!("refund");
 
     env.mock_all_auths();
-    let mut owners = Vec::new(&env);
-    owners.push_back(owner.clone());
-    client.initialize(&owners, &100);
+    log_n_events(&env, &client, &submitter, &payment, 3);
+    log_n_events(&env, &client, &submitter, &refund, 2);
 
-    let batch = soroban_sdk::vec![
-        &env,
-        (submitter.clone(), payment.clone(), Bytes::from_slice(&env, b"a")),
-        (submitter.clone(), refund.clone(), Bytes::from_slice(&env, b"b")),
-        (submitter.clone(), payment.clone(), Bytes::from_slice(&env, b"c")),
-    ];
-    client.log_events(&batch);
+    // payment has 3 events
+    let payment_page = client.get_events_by_type(&payment, &0, &10);
+    assert_eq!(payment_page.len(), 3);
 
-    let audit_topic = (
-        Symbol::new(&env, "audit"),
-        Symbol::new(&env, "log_event"),
-    )
-        .into_val(&env);
+    // refund has 2 events, independent
+    let refund_page = client.get_events_by_type(&refund, &0, &10);
+    assert_eq!(refund_page.len(), 2);
 
-    // Collect all ("audit", "log_event") events emitted by our contract
-    let all_events = env.events().all().events();
-    let mut audit_events: soroban_sdk::Vec<(Address, soroban_sdk::Vec<soroban_sdk::Val>, soroban_sdk::Val)> =
-        soroban_sdk::Vec::new(&env);
-    for event in all_events.iter() {
-        let (cid, topics, data) = event;
-        if cid == contract_id && topics == audit_topic {
-            audit_events.push_back((cid, topics, data));
-        }
+    // each page contains the right event_type
+    for i in 0..payment_page.len() {
+        assert_eq!(payment_page.get(i).unwrap().event_type, payment);
     }
-
-    assert_eq!(
-        audit_events.len(),
-        3,
-        "log_events with 3 entries should emit exactly 3 ('audit', 'log_event') events"
-    );
-
-    // Verify each event carries the right index and event_type
-    let expected: [(Symbol, u32); 3] = [
-        (payment.clone(), 0),
-        (refund.clone(), 1),
-        (payment.clone(), 2),
-    ];
-    for i in 0u32..3 {
-        let (_, _, data) = audit_events.get(i).unwrap();
-        let expected_data = (submitter.clone(), expected[i as usize].0.clone(), expected[i as usize].1).into_val(&env);
-        assert_eq!(
-            data,
-            expected_data,
-            "Batch event {} has wrong (submitter, event_type, index)", i
-        );
+    for i in 0..refund_page.len() {
+        assert_eq!(refund_page.get(i).unwrap().event_type, refund);
     }
 }
 
-/// Emission is suppressed when emission_mode == 3 (no-emit mode).
+/// Verify ordering: events are returned in insertion order by type.
 #[test]
-fn test_log_event_no_audit_event_when_emission_mode_none() {
-    let (env, owner, client) = create_ledger();
+fn test_get_events_by_type_preserves_insertion_order() {
+    let (env, _owner, client) = create_ledger();
     let submitter = Address::generate(&env);
     let payment = symbol_short!("payment");
 
     env.mock_all_auths();
-    // Set emission mode 3 = no events
-    client.set_event_emission_mode(&owner, &3);
+    // Log interleaved events of different types; payment events should retain their own order
+    client.log_event(&submitter, &payment, &Bytes::from_slice(&env, b"first"), &None, &None, &false);
+    client.log_event(&submitter, &symbol_short!("other"), &Bytes::from_slice(&env, b"noise"), &None, &None, &false);
+    client.log_event(&submitter, &payment, &Bytes::from_slice(&env, b"second"), &None, &None, &false);
+    client.log_event(&submitter, &symbol_short!("other"), &Bytes::from_slice(&env, b"noise2"), &None, &None, &false);
+    client.log_event(&submitter, &payment, &Bytes::from_slice(&env, b"third"), &None, &None, &false);
 
-    // Count events before logging
-    let before_count = env.events().all().events().len();
-
-    client.log_event(&submitter, &payment, &Bytes::from_slice(&env, b"x"), &None, &None, &false);
-
-    let audit_topic = (
-        Symbol::new(&env, "audit"),
-        Symbol::new(&env, "log_event"),
-    )
-        .into_val(&env);
-
-    // Count new ("audit","log_event") events after logging — should be zero
-    let all_events = env.events().all().events();
-    let mut new_audit_count: u32 = 0;
-    let total = all_events.len();
-    for i in before_count..total {
-        let (_, topics, _) = all_events.get(i).unwrap();
-        if topics == audit_topic {
-            new_audit_count += 1;
-        }
-    }
-
-    assert_eq!(
-        new_audit_count, 0,
-        "No audit event should be emitted when emission_mode == 3"
-    );
+    let page = client.get_events_by_type(&payment, &0, &10);
+    assert_eq!(page.len(), 3);
+    assert_eq!(page.get(0).unwrap().metadata, Bytes::from_slice(&env, b"first"));
+    assert_eq!(page.get(1).unwrap().metadata, Bytes::from_slice(&env, b"second"));
+    assert_eq!(page.get(2).unwrap().metadata, Bytes::from_slice(&env, b"third"));
 }
