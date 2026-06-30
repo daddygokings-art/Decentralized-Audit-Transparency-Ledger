@@ -1,6 +1,6 @@
 use super::*;
 use soroban_sdk::testutils::{Address as _, Events, Ledger};
-use soroban_sdk::{symbol_short, Bytes, BytesN, Env, Vec};
+use soroban_sdk::{symbol_short, Bytes, BytesN, Env, IntoVal, Symbol, Vec};
 
 fn create_ledger() -> (Env, Address, AuditLedgerClient<'static>) {
     let env = Env::default();
@@ -2025,4 +2025,156 @@ fn test_log_event_with_ttl_enabled() {
     );
     let evt = client.get_event(&id);
     assert_eq!(evt.metadata, Bytes::from_slice(&env, b"ttl_test"));
+}
+
+// ── Issue #175: structured audit event emission ──────────────────────────────
+
+/// log_event must emit exactly one ("audit", "log_event") event per call with
+/// payload (submitter, event_type, index).
+#[test]
+fn test_log_event_emits_audit_event_with_correct_topic_and_payload() {
+    let env = Env::default();
+    let contract_id = env.register(AuditLedger, ());
+    let client = AuditLedgerClient::new(&env, &contract_id);
+
+    let owner = Address::generate(&env);
+    let submitter = Address::generate(&env);
+    let event_type = symbol_short!("payment");
+    let meta = Bytes::from_slice(&env, b"tx-data");
+
+    env.mock_all_auths();
+    let mut owners = Vec::new(&env);
+    owners.push_back(owner.clone());
+    client.initialize(&owners, &100);
+
+    client.log_event(&submitter, &event_type, &meta, &None, &None, &false);
+
+    // Expected: topic = ("audit", "log_event"), data = (submitter, event_type, index=0)
+    let expected_topics = (
+        Symbol::new(&env, "audit"),
+        Symbol::new(&env, "log_event"),
+    )
+        .into_val(&env);
+    let expected_data = (submitter.clone(), event_type.clone(), 0u32).into_val(&env);
+
+    let all_events = env.events().all().events();
+    // Find the audit log_event entry emitted by our contract
+    let audit_event = all_events
+        .iter()
+        .find(|(cid, topics, _data)| cid == contract_id && topics == expected_topics);
+
+    assert!(
+        audit_event.is_some(),
+        "Expected an ('audit', 'log_event') event to be emitted by log_event"
+    );
+    let (_, _, actual_data) = audit_event.unwrap();
+    assert_eq!(
+        actual_data, expected_data,
+        "Event data should be (submitter, event_type, index)"
+    );
+}
+
+/// log_events must emit one ("audit", "log_event") event per entry in the batch,
+/// each with the correct (submitter, event_type, index) payload.
+#[test]
+fn test_log_events_emits_one_audit_event_per_entry() {
+    let env = Env::default();
+    let contract_id = env.register(AuditLedger, ());
+    let client = AuditLedgerClient::new(&env, &contract_id);
+
+    let owner = Address::generate(&env);
+    let submitter = Address::generate(&env);
+    let payment = symbol_short!("payment");
+    let refund = symbol_short!("refund");
+
+    env.mock_all_auths();
+    let mut owners = Vec::new(&env);
+    owners.push_back(owner.clone());
+    client.initialize(&owners, &100);
+
+    let batch = soroban_sdk::vec![
+        &env,
+        (submitter.clone(), payment.clone(), Bytes::from_slice(&env, b"a")),
+        (submitter.clone(), refund.clone(), Bytes::from_slice(&env, b"b")),
+        (submitter.clone(), payment.clone(), Bytes::from_slice(&env, b"c")),
+    ];
+    client.log_events(&batch);
+
+    let audit_topic = (
+        Symbol::new(&env, "audit"),
+        Symbol::new(&env, "log_event"),
+    )
+        .into_val(&env);
+
+    // Collect all ("audit", "log_event") events emitted by our contract
+    let all_events = env.events().all().events();
+    let mut audit_events: soroban_sdk::Vec<(Address, soroban_sdk::Vec<soroban_sdk::Val>, soroban_sdk::Val)> =
+        soroban_sdk::Vec::new(&env);
+    for event in all_events.iter() {
+        let (cid, topics, data) = event;
+        if cid == contract_id && topics == audit_topic {
+            audit_events.push_back((cid, topics, data));
+        }
+    }
+
+    assert_eq!(
+        audit_events.len(),
+        3,
+        "log_events with 3 entries should emit exactly 3 ('audit', 'log_event') events"
+    );
+
+    // Verify each event carries the right index and event_type
+    let expected: [(Symbol, u32); 3] = [
+        (payment.clone(), 0),
+        (refund.clone(), 1),
+        (payment.clone(), 2),
+    ];
+    for i in 0u32..3 {
+        let (_, _, data) = audit_events.get(i).unwrap();
+        let expected_data = (submitter.clone(), expected[i as usize].0.clone(), expected[i as usize].1).into_val(&env);
+        assert_eq!(
+            data,
+            expected_data,
+            "Batch event {} has wrong (submitter, event_type, index)", i
+        );
+    }
+}
+
+/// Emission is suppressed when emission_mode == 3 (no-emit mode).
+#[test]
+fn test_log_event_no_audit_event_when_emission_mode_none() {
+    let (env, owner, client) = create_ledger();
+    let submitter = Address::generate(&env);
+    let payment = symbol_short!("payment");
+
+    env.mock_all_auths();
+    // Set emission mode 3 = no events
+    client.set_event_emission_mode(&owner, &3);
+
+    // Count events before logging
+    let before_count = env.events().all().events().len();
+
+    client.log_event(&submitter, &payment, &Bytes::from_slice(&env, b"x"), &None, &None, &false);
+
+    let audit_topic = (
+        Symbol::new(&env, "audit"),
+        Symbol::new(&env, "log_event"),
+    )
+        .into_val(&env);
+
+    // Count new ("audit","log_event") events after logging — should be zero
+    let all_events = env.events().all().events();
+    let mut new_audit_count: u32 = 0;
+    let total = all_events.len();
+    for i in before_count..total {
+        let (_, topics, _) = all_events.get(i).unwrap();
+        if topics == audit_topic {
+            new_audit_count += 1;
+        }
+    }
+
+    assert_eq!(
+        new_audit_count, 0,
+        "No audit event should be emitted when emission_mode == 3"
+    );
 }

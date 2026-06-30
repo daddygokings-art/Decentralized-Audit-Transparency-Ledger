@@ -526,13 +526,12 @@ impl AuditLedger {
                     .set(&DataKey::EventTypeCount(event_type.clone()), &count);
             }
 
-            // #179: emit canonical ("log", event_type) event with (index, submitter, metadata_hash)
+            // #175: emit structured ("audit", "log_event") event with (submitter, event_type, index)
             let emission_mode = Self::effective_event_emission_mode(&env);
             if emission_mode != 3 {
-                let metadata_hash: BytesN<32> = env.crypto().sha256(&metadata).into();
                 env.events().publish(
-                    (Symbol::new(&env, "log"), event_type.clone()),
-                    (index, submitter.clone(), metadata_hash),
+                    (Symbol::new(&env, "audit"), Symbol::new(&env, "log_event")),
+                    (submitter.clone(), event_type.clone(), index),
                 );
             }
 
@@ -874,12 +873,11 @@ impl AuditLedger {
             .instance()
             .set(&DataKey::TotalEvents, &cfg.total_events);
 
-        // #179: emit canonical ("log", event_type) event with (index, submitter, metadata_hash)
+        // #175: emit structured ("audit", "log_event") event with (submitter, event_type, index)
         if emission_mode != 3 {
-            let metadata_hash: BytesN<32> = env.crypto().sha256(&metadata).into();
             env.events().publish(
-                (Symbol::new(&env, "log"), event_type),
-                (index, submitter, metadata_hash),
+                (Symbol::new(&env, "audit"), Symbol::new(&env, "log_event")),
+                (submitter, event_type, index),
             );
         }
 
