@@ -19,26 +19,31 @@ fn wasm_hash(env: &Env, byte: u8) -> BytesN<32> {
     BytesN::from_array(env, &[byte; 32])
 }
 
-fn log_sample_events(
-    env: &Env,
-    client: &AuditLedgerClient,
-    submitter: &Address,
-) -> Vec<BytesN<32>> {
+fn log_sample_events(env: &Env, client: &AuditLedgerClient, submitter: &Address) -> Vec<BytesN<32>> {
     let mut ids = Vec::new(env);
     ids.push_back(client.log_event(
         submitter,
         &symbol_short!("payment"),
         &Bytes::from_slice(env, b"{\"reference\":\"INV-001\"}"),
+        &None,
+        &None,
+        &false,
     ));
     ids.push_back(client.log_event(
         submitter,
         &symbol_short!("refund"),
         &Bytes::from_slice(env, b"{\"reference\":\"RF-001\"}"),
+        &None,
+        &None,
+        &false,
     ));
     ids.push_back(client.log_event(
         submitter,
         &symbol_short!("audit"),
         &Bytes::from_slice(env, b"{\"reference\":\"AUD-001\"}"),
+        &None,
+        &None,
+        &false,
     ));
     ids
 }
@@ -51,11 +56,7 @@ fn event_hashes(env: &Env, client: &AuditLedgerClient, ids: &Vec<BytesN<32>>) ->
     hashes
 }
 
-fn assert_events_preserved(
-    client: &AuditLedgerClient,
-    ids: &Vec<BytesN<32>>,
-    before_hashes: &Vec<BytesN<32>>,
-) {
+fn assert_events_preserved(client: &AuditLedgerClient, ids: &Vec<BytesN<32>>, before_hashes: &Vec<BytesN<32>>) {
     assert_eq!(client.total_events(), ids.len());
 
     for i in 0..ids.len() {
@@ -84,6 +85,9 @@ fn successful_upgrade_preserves_events_and_allows_new_behavior() {
         &submitter,
         &symbol_short!("payment"),
         &Bytes::from_slice(&env, b"{\"reference\":\"INV-002\"}"),
+        &None,
+        &None,
+        &false,
     );
     let new_event = client.get_event(&new_id);
     assert_eq!(new_event.index, 3);
@@ -162,9 +166,18 @@ fn storage_key_compatibility_preserves_order_and_type_indexes() {
     client.upgrade_contract(&owner, &wasm_hash(&env, 9));
 
     assert_eq!(client.get_event_by_order(&0).event_hash, hashes.get(0).unwrap());
-    assert_eq!(client.get_event_by_type(&symbol_short!("payment"), &0).event_hash, hashes.get(0).unwrap());
-    assert_eq!(client.get_event_by_type(&symbol_short!("refund"), &0).event_hash, hashes.get(1).unwrap());
-    assert_eq!(client.get_event_by_type(&symbol_short!("audit"), &0).event_hash, hashes.get(2).unwrap());
+    assert_eq!(
+        client.get_event_by_type(&symbol_short!("payment"), &0).event_hash,
+        hashes.get(0).unwrap()
+    );
+    assert_eq!(
+        client.get_event_by_type(&symbol_short!("refund"), &0).event_hash,
+        hashes.get(1).unwrap()
+    );
+    assert_eq!(
+        client.get_event_by_type(&symbol_short!("audit"), &0).event_hash,
+        hashes.get(2).unwrap()
+    );
 
     assert_events_preserved(&client, &ids, &hashes);
 }
@@ -189,6 +202,9 @@ fn rollback_upgrade_preserves_existing_data() {
         &submitter,
         &symbol_short!("audit"),
         &Bytes::from_slice(&env, b"{\"reference\":\"AUD-002\"}"),
+        &None,
+        &None,
+        &false,
     );
     assert_eq!(client.get_event(&post_rollback_id).index, 3);
     assert_eq!(client.total_events(), 4);

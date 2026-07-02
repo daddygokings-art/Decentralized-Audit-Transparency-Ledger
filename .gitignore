@@ -1,6 +1,7 @@
 # Rust
 target/
-Cargo.lock
+# Application crates should track Cargo.lock for reproducible builds
+!Cargo.lock
 
 # Build outputs
 *.wasm

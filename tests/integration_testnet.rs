@@ -13,11 +13,13 @@
 //      - TESTNET_SECRET_KEY: Funded account secret key
 //   2. Run: cargo test --test integration_testnet -- --ignored --test-threads=1
 
+extern crate std;
+
 use audit_ledger::{AuditLedger, AuditLedgerClient};
 use soroban_sdk::{
     symbol_short,
     testutils::{Address as _, Ledger},
-    Address, Bytes, Env,
+    Address, Bytes, Env, Vec,
 };
 
 // ── Standalone Network Tests ───────────────────────────────────────────────────────
@@ -57,9 +59,9 @@ fn standalone_log_and_retrieve_events() {
     let medium_meta = Bytes::from_slice(&env, &[0u8; 500]);
     let large_meta = Bytes::from_slice(&env, &[0u8; 1000]);
 
-    let id1 = client.log_event(&submitter, &symbol_short!("small"), &small_meta);
-    let id2 = client.log_event(&submitter, &symbol_short!("medium"), &medium_meta);
-    let id3 = client.log_event(&submitter, &symbol_short!("large"), &large_meta);
+    let id1 = client.log_event(&submitter, &symbol_short!("small"), &small_meta, &None, &None, &false);
+    let id2 = client.log_event(&submitter, &symbol_short!("medium"), &medium_meta, &None, &None, &false);
+    let id3 = client.log_event(&submitter, &symbol_short!("large"), &large_meta, &None, &None, &false);
 
     // Retrieve and verify
     let evt1 = client.get_event(&id1);
@@ -122,7 +124,14 @@ fn standalone_cap_management() {
 
     // Log events up to cap
     for _ in 0..5 {
-        client.log_event(&submitter, &payment, &Bytes::from_slice(&env, b"tx"));
+        client.log_event(
+            &submitter,
+            &payment,
+            &Bytes::from_slice(&env, b"tx"),
+            &None,
+            &None,
+            &false,
+        );
     }
 
     assert_eq!(client.event_count(&payment), 5);
@@ -131,7 +140,14 @@ fn standalone_cap_management() {
     client.remove_event_cap(&owner, &payment);
 
     // Should be able to log more events
-    client.log_event(&submitter, &payment, &Bytes::from_slice(&env, b"tx6"));
+    client.log_event(
+        &submitter,
+        &payment,
+        &Bytes::from_slice(&env, b"tx6"),
+        &None,
+        &None,
+        &false,
+    );
     assert_eq!(client.event_count(&payment), 6);
 }
 
@@ -178,14 +194,28 @@ fn standalone_pause_unpause() {
     client.pause(&owner);
 
     // Should not be able to log while paused
-    let result = client.try_log_event(&submitter, &symbol_short!("test"), &Bytes::new(&env));
+    let result = client.try_log_event(
+        &submitter,
+        &symbol_short!("test"),
+        &Bytes::new(&env),
+        &None,
+        &None,
+        &false,
+    );
     assert!(result.is_err());
 
     // Unpause contract
     client.unpause(&owner);
 
     // Should be able to log again
-    client.log_event(&submitter, &symbol_short!("test"), &Bytes::new(&env));
+    client.log_event(
+        &submitter,
+        &symbol_short!("test"),
+        &Bytes::new(&env),
+        &None,
+        &None,
+        &false,
+    );
     assert_eq!(client.total_events(), 1);
 }
 
@@ -209,6 +239,9 @@ fn standalone_hash_chain_integrity() {
             &submitter,
             &symbol_short!("test"),
             &Bytes::from_slice(&env, &[i]),
+            &None,
+            &None,
+            &false,
         );
     }
 
@@ -270,6 +303,9 @@ fn standalone_low_cost_mode() {
         &submitter,
         &symbol_short!("test"),
         &Bytes::from_slice(&env, b"data"),
+        &None,
+        &None,
+        &false,
     );
     assert_eq!(client.total_events(), 1);
 
@@ -298,6 +334,8 @@ fn standalone_event_signatures() {
         &submitter,
         &symbol_short!("signed"),
         &Bytes::from_slice(&env, b"data"),
+        &None,
+        &None,
         &sig_payload,
     );
 

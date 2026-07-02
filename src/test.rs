@@ -39,7 +39,14 @@ fn test_log_event() {
     let event_type = symbol_short!("payment");
 
     env.mock_all_auths();
-    let id = client.log_event(&submitter, &event_type, &Bytes::from_slice(&env, b"tx1"), &None, &None, &false);
+    let id = client.log_event(
+        &submitter,
+        &event_type,
+        &Bytes::from_slice(&env, b"tx1"),
+        &None,
+        &None,
+        &false,
+    );
 
     assert_eq!(client.total_events(), 1);
 
@@ -60,9 +67,30 @@ fn test_log_multiple_events() {
     let refund = symbol_short!("refund");
 
     env.mock_all_auths();
-    client.log_event(&submitter, &payment, &Bytes::from_slice(&env, b"tx1"), &None, &None, &false);
-    client.log_event(&submitter, &payment, &Bytes::from_slice(&env, b"tx2"), &None, &None, &false);
-    client.log_event(&submitter, &refund, &Bytes::from_slice(&env, b"tx3"), &None, &None, &false);
+    client.log_event(
+        &submitter,
+        &payment,
+        &Bytes::from_slice(&env, b"tx1"),
+        &None,
+        &None,
+        &false,
+    );
+    client.log_event(
+        &submitter,
+        &payment,
+        &Bytes::from_slice(&env, b"tx2"),
+        &None,
+        &None,
+        &false,
+    );
+    client.log_event(
+        &submitter,
+        &refund,
+        &Bytes::from_slice(&env, b"tx3"),
+        &None,
+        &None,
+        &false,
+    );
 
     assert_eq!(client.total_events(), 3);
     assert_eq!(client.event_count(&payment), 2);
@@ -86,7 +114,7 @@ fn test_get_nonexistent_event_panics() {
 }
 
 #[test]
-#[should_panic(expected = "HostError: Error(Contract, #19)")]
+#[should_panic(expected = "HostError: Error(Contract, #26)")]
 fn test_initialize_reinitialization_panics() {
     let env = Env::default();
     let owner = Address::generate(&env);
@@ -94,13 +122,15 @@ fn test_initialize_reinitialization_panics() {
     let client = AuditLedgerClient::new(&env, &contract_id);
 
     env.mock_all_auths();
-    client.initialize(&owner, &100);
-    // Try to re-initialize — should fail with AlreadyInitialized (error #19)
-    client.initialize(&owner, &200);
+    let mut owners = Vec::new(&env);
+    owners.push_back(owner.clone());
+    client.initialize(&owners, &100);
+    // Try to re-initialize — should fail with AlreadyInitialized (error #26)
+    client.initialize(&owners, &200);
 }
 
 #[test]
-#[should_panic(expected = "HostError: Error(Contract, #19)")]
+#[should_panic(expected = "HostError: Error(Contract, #26)")]
 fn test_initialize_reinitialization_after_ownership_transfer_panics() {
     let env = Env::default();
     let owner = Address::generate(&env);
@@ -109,18 +139,22 @@ fn test_initialize_reinitialization_after_ownership_transfer_panics() {
     let client = AuditLedgerClient::new(&env, &contract_id);
 
     env.mock_all_auths();
-    client.initialize(&owner, &100);
-    
+    let mut owners = Vec::new(&env);
+    owners.push_back(owner.clone());
+    client.initialize(&owners, &100);
+
     // Transfer ownership
     client.transfer_ownership(&owner, &new_owner);
-    
+
     // Try to re-initialize with new owner — should still fail with AlreadyInitialized
     // (demonstrates that version counter protects against re-init even if owner changes)
-    client.initialize(&new_owner, &200);
+    let mut new_owners = Vec::new(&env);
+    new_owners.push_back(new_owner.clone());
+    client.initialize(&new_owners, &200);
 }
 
 #[test]
-#[should_panic(expected = "HostError: Error(Contract, #14)")]
+#[should_panic(expected = "HostError: Error(Contract, #20)")]
 fn test_get_event_by_type_no_events_returns_no_events_for_type() {
     let (_env, _owner, client) = create_ledger();
     let payment = symbol_short!("payment");
@@ -135,7 +169,14 @@ fn test_get_event_by_type_with_bad_index_panics() {
     let payment = symbol_short!("payment");
 
     env.mock_all_auths();
-    client.log_event(&submitter, &payment, &Bytes::from_slice(&env, b"tx1"), &None, &None, &false);
+    client.log_event(
+        &submitter,
+        &payment,
+        &Bytes::from_slice(&env, b"tx1"),
+        &None,
+        &None,
+        &false,
+    );
     client.get_event_by_type(&payment, &1);
 }
 
@@ -147,7 +188,14 @@ fn test_event_count_and_total_events_with_empty_metadata() {
 
     env.mock_all_auths();
     client.log_event(&submitter, &payment, &Bytes::new(&env), &None, &None, &false);
-    client.log_event(&submitter, &payment, &Bytes::from_slice(&env, b"non-empty"), &None, &None, &false);
+    client.log_event(
+        &submitter,
+        &payment,
+        &Bytes::from_slice(&env, b"non-empty"),
+        &None,
+        &None,
+        &false,
+    );
 
     assert_eq!(client.total_events(), 2);
     assert_eq!(client.event_count(&payment), 2);
@@ -167,21 +215,9 @@ fn test_batch_log_events_logs_each_event_atomically() {
     env.mock_all_auths();
     let events = soroban_sdk::vec![
         &env,
-        (
-            submitter.clone(),
-            payment.clone(),
-            Bytes::from_slice(&env, b"a")
-        ),
-        (
-            submitter.clone(),
-            payment.clone(),
-            Bytes::from_slice(&env, b"b")
-        ),
-        (
-            submitter.clone(),
-            payment.clone(),
-            Bytes::from_slice(&env, b"c")
-        ),
+        (submitter.clone(), payment.clone(), Bytes::from_slice(&env, b"a")),
+        (submitter.clone(), payment.clone(), Bytes::from_slice(&env, b"b")),
+        (submitter.clone(), payment.clone(), Bytes::from_slice(&env, b"c")),
     ];
 
     let indices = client.log_events(&events);
@@ -209,21 +245,9 @@ fn test_batch_log_events_exceeds_type_cap_reverts() {
 
     let events = soroban_sdk::vec![
         &env,
-        (
-            submitter.clone(),
-            payment.clone(),
-            Bytes::from_slice(&env, b"a")
-        ),
-        (
-            submitter.clone(),
-            payment.clone(),
-            Bytes::from_slice(&env, b"b")
-        ),
-        (
-            submitter.clone(),
-            payment.clone(),
-            Bytes::from_slice(&env, b"c")
-        ),
+        (submitter.clone(), payment.clone(), Bytes::from_slice(&env, b"a")),
+        (submitter.clone(), payment.clone(), Bytes::from_slice(&env, b"b")),
+        (submitter.clone(), payment.clone(), Bytes::from_slice(&env, b"c")),
     ];
 
     let result = client.try_log_events(&events);
@@ -240,14 +264,16 @@ fn test_batch_log_events_integer_overflow_cap_check() {
     env.mock_all_auths();
     client.set_event_max_logs(&owner, &event_type, &5);
 
-    let events1 = soroban_sdk::vec![&env,
+    let events1 = soroban_sdk::vec![
+        &env,
         (submitter.clone(), event_type.clone(), Bytes::from_slice(&env, b"1")),
         (submitter.clone(), event_type.clone(), Bytes::from_slice(&env, b"2")),
         (submitter.clone(), event_type.clone(), Bytes::from_slice(&env, b"3")),
     ];
     client.log_events(&events1);
 
-    let events2 = soroban_sdk::vec![&env,
+    let events2 = soroban_sdk::vec![
+        &env,
         (submitter.clone(), event_type.clone(), Bytes::from_slice(&env, b"4")),
         (submitter.clone(), event_type.clone(), Bytes::from_slice(&env, b"5")),
         (submitter.clone(), event_type.clone(), Bytes::from_slice(&env, b"6")),
@@ -264,7 +290,14 @@ fn test_event_ids_are_bytes32() {
     let payment = symbol_short!("payment");
 
     env.mock_all_auths();
-    let id: BytesN<32> = client.log_event(&submitter, &payment, &Bytes::from_slice(&env, b"tx1"));
+    let id: BytesN<32> = client.log_event(
+        &submitter,
+        &payment,
+        &Bytes::from_slice(&env, b"tx1"),
+        &None,
+        &None,
+        &false,
+    );
     // ID is a 32-byte value (BytesN<32> by type)
     assert_eq!(id.len(), 32);
 }
@@ -276,8 +309,22 @@ fn test_different_metadata_produces_different_ids() {
     let payment = symbol_short!("payment");
 
     env.mock_all_auths();
-    let id1 = client.log_event(&submitter, &payment, &Bytes::from_slice(&env, b"tx1"), &None, &None, &false);
-    let id2 = client.log_event(&submitter, &payment, &Bytes::from_slice(&env, b"tx2"), &None, &None, &false);
+    let id1 = client.log_event(
+        &submitter,
+        &payment,
+        &Bytes::from_slice(&env, b"tx1"),
+        &None,
+        &None,
+        &false,
+    );
+    let id2 = client.log_event(
+        &submitter,
+        &payment,
+        &Bytes::from_slice(&env, b"tx2"),
+        &None,
+        &None,
+        &false,
+    );
     assert_ne!(id1, id2);
 }
 
@@ -288,8 +335,22 @@ fn test_get_event_by_order() {
     let payment = symbol_short!("payment");
 
     env.mock_all_auths();
-    let id0 = client.log_event(&submitter, &payment, &Bytes::from_slice(&env, b"first"), &None, &None, &false);
-    let id1 = client.log_event(&submitter, &payment, &Bytes::from_slice(&env, b"second"), &None, &None, &false);
+    let id0 = client.log_event(
+        &submitter,
+        &payment,
+        &Bytes::from_slice(&env, b"first"),
+        &None,
+        &None,
+        &false,
+    );
+    let id1 = client.log_event(
+        &submitter,
+        &payment,
+        &Bytes::from_slice(&env, b"second"),
+        &None,
+        &None,
+        &false,
+    );
 
     let evt0 = client.get_event_by_order(&0);
     let evt1 = client.get_event_by_order(&1);
@@ -325,6 +386,9 @@ fn test_verify_integrity_single_event() {
         &submitter,
         &symbol_short!("p"),
         &Bytes::from_slice(&env, b"x"),
+        &None,
+        &None,
+        &false,
     );
 
     assert!(client.verify_integrity());
@@ -338,7 +402,14 @@ fn test_verify_integrity_multiple_events() {
 
     env.mock_all_auths();
     for i in 0u8..5 {
-        client.log_event(&submitter, &payment, &Bytes::from_slice(&env, &[i]), &None, &None, &false);
+        client.log_event(
+            &submitter,
+            &payment,
+            &Bytes::from_slice(&env, &[i]),
+            &None,
+            &None,
+            &false,
+        );
     }
 
     assert!(client.verify_integrity());
@@ -352,7 +423,14 @@ fn test_verify_integrity_range() {
 
     env.mock_all_auths();
     for i in 0u8..5 {
-        client.log_event(&submitter, &payment, &Bytes::from_slice(&env, &[i]), &None, &None, &false);
+        client.log_event(
+            &submitter,
+            &payment,
+            &Bytes::from_slice(&env, &[i]),
+            &None,
+            &None,
+            &false,
+        );
     }
 
     assert!(client.verify_integrity_range(&1, &4));
@@ -367,8 +445,22 @@ fn test_hash_chain_links_prev_hash() {
     let payment = symbol_short!("payment");
 
     env.mock_all_auths();
-    let id0 = client.log_event(&submitter, &payment, &Bytes::from_slice(&env, b"a"), &None, &None, &false);
-    let id1 = client.log_event(&submitter, &payment, &Bytes::from_slice(&env, b"b"), &None, &None, &false);
+    let id0 = client.log_event(
+        &submitter,
+        &payment,
+        &Bytes::from_slice(&env, b"a"),
+        &None,
+        &None,
+        &false,
+    );
+    let id1 = client.log_event(
+        &submitter,
+        &payment,
+        &Bytes::from_slice(&env, b"b"),
+        &None,
+        &None,
+        &false,
+    );
 
     let evt0 = client.get_event(&id0);
     let evt1 = client.get_event(&id1);
@@ -390,11 +482,32 @@ fn test_per_event_max_logs() {
     env.mock_all_auths();
     client.set_event_max_logs(&owner, &payment, &2);
 
-    client.log_event(&submitter, &payment, &Bytes::from_slice(&env, b"tx1"), &None, &None, &false);
-    client.log_event(&submitter, &payment, &Bytes::from_slice(&env, b"tx2"), &None, &None, &false);
+    client.log_event(
+        &submitter,
+        &payment,
+        &Bytes::from_slice(&env, b"tx1"),
+        &None,
+        &None,
+        &false,
+    );
+    client.log_event(
+        &submitter,
+        &payment,
+        &Bytes::from_slice(&env, b"tx2"),
+        &None,
+        &None,
+        &false,
+    );
     assert_eq!(client.event_count(&payment), 2);
 
-    let result = client.try_log_event(&submitter, &payment, &Bytes::from_slice(&env, b"tx3"), &None, &None, &false);
+    let result = client.try_log_event(
+        &submitter,
+        &payment,
+        &Bytes::from_slice(&env, b"tx3"),
+        &None,
+        &None,
+        &false,
+    );
     assert!(result.is_err());
 }
 
@@ -414,10 +527,31 @@ fn test_global_max_logs() {
     let payment = symbol_short!("payment");
     let refund = symbol_short!("refund");
 
-    client.log_event(&submitter, &payment, &Bytes::from_slice(&env, b"tx1"), &None, &None, &false);
-    client.log_event(&submitter, &refund, &Bytes::from_slice(&env, b"tx2"), &None, &None, &false);
+    client.log_event(
+        &submitter,
+        &payment,
+        &Bytes::from_slice(&env, b"tx1"),
+        &None,
+        &None,
+        &false,
+    );
+    client.log_event(
+        &submitter,
+        &refund,
+        &Bytes::from_slice(&env, b"tx2"),
+        &None,
+        &None,
+        &false,
+    );
 
-    let result = client.try_log_event(&submitter, &payment, &Bytes::from_slice(&env, b"tx3"), &None, &None, &false);
+    let result = client.try_log_event(
+        &submitter,
+        &payment,
+        &Bytes::from_slice(&env, b"tx3"),
+        &None,
+        &None,
+        &false,
+    );
     assert!(result.is_err());
 }
 
@@ -439,6 +573,9 @@ fn test_set_global_max_logs_below_current_count_panics() {
         &submitter,
         &symbol_short!("p"),
         &Bytes::from_slice(&env, b"tx1"),
+        &None,
+        &None,
+        &false,
     );
     let result = client.try_set_global_max_logs(&owner, &0);
     assert!(result.is_err());
@@ -454,6 +591,9 @@ fn test_set_global_max_logs_equal_current_count_freezes_logging() {
         &submitter,
         &symbol_short!("p"),
         &Bytes::from_slice(&env, b"tx1"),
+        &None,
+        &None,
+        &false,
     );
     client.set_global_max_logs(&owner, &1);
 
@@ -461,6 +601,9 @@ fn test_set_global_max_logs_equal_current_count_freezes_logging() {
         &submitter,
         &symbol_short!("p"),
         &Bytes::from_slice(&env, b"tx2"),
+        &None,
+        &None,
+        &false,
     );
     assert!(result.is_err());
 }
@@ -555,7 +698,10 @@ fn test_zero_global_max_logs() {
     let result = client.try_log_event(
         &submitter,
         &symbol_short!("p"),
-        &Bytes::from_slice(&env, b"x"), &None, &None, &false,
+        &Bytes::from_slice(&env, b"x"),
+        &None,
+        &None,
+        &false,
     );
     assert!(result.is_err());
 }
@@ -569,15 +715,13 @@ fn test_set_global_max_to_zero_after_events() {
     client.log_event(
         &submitter,
         &symbol_short!("p"),
-        &Bytes::from_slice(&env, b"tx1"), &None, &None, &false,
+        &Bytes::from_slice(&env, b"tx1"),
+        &None,
+        &None,
+        &false,
     );
-    client.set_global_max_logs(&owner, &0);
-
-    let result = client.try_log_event(
-        &submitter,
-        &symbol_short!("p"),
-        &Bytes::from_slice(&env, b"tx2"), &None, &None, &false,
-    );
+    // Setting max below current count should fail
+    let result = client.try_set_global_max_logs(&owner, &0);
     assert!(result.is_err());
 }
 
@@ -590,7 +734,14 @@ fn test_zero_event_max_logs() {
     env.mock_all_auths();
     client.set_event_max_logs(&owner, &payment, &0);
 
-    let result = client.try_log_event(&submitter, &payment, &Bytes::from_slice(&env, b"tx1"), &None, &None, &false);
+    let result = client.try_log_event(
+        &submitter,
+        &payment,
+        &Bytes::from_slice(&env, b"tx1"),
+        &None,
+        &None,
+        &false,
+    );
     assert!(result.is_err());
 }
 
@@ -601,12 +752,33 @@ fn test_set_event_max_equal_to_current_count() {
     let submitter = Address::generate(&env);
 
     env.mock_all_auths();
-    client.log_event(&submitter, &payment, &Bytes::from_slice(&env, b"tx1"), &None, &None, &false);
-    client.log_event(&submitter, &payment, &Bytes::from_slice(&env, b"tx2"), &None, &None, &false);
+    client.log_event(
+        &submitter,
+        &payment,
+        &Bytes::from_slice(&env, b"tx1"),
+        &None,
+        &None,
+        &false,
+    );
+    client.log_event(
+        &submitter,
+        &payment,
+        &Bytes::from_slice(&env, b"tx2"),
+        &None,
+        &None,
+        &false,
+    );
 
     client.set_event_max_logs(&owner, &payment, &2);
 
-    let result = client.try_log_event(&submitter, &payment, &Bytes::from_slice(&env, b"tx3"), &None, &None, &false);
+    let result = client.try_log_event(
+        &submitter,
+        &payment,
+        &Bytes::from_slice(&env, b"tx3"),
+        &None,
+        &None,
+        &false,
+    );
     assert!(result.is_err());
 }
 
@@ -649,10 +821,31 @@ fn test_multiple_event_types_independent() {
     client.set_event_max_logs(&owner, &type_a, &1);
     client.set_event_max_logs(&owner, &type_b, &1);
 
-    client.log_event(&submitter, &type_a, &Bytes::from_slice(&env, b"a1"), &None, &None, &false);
-    client.log_event(&submitter, &type_b, &Bytes::from_slice(&env, b"b1"), &None, &None, &false);
+    client.log_event(
+        &submitter,
+        &type_a,
+        &Bytes::from_slice(&env, b"a1"),
+        &None,
+        &None,
+        &false,
+    );
+    client.log_event(
+        &submitter,
+        &type_b,
+        &Bytes::from_slice(&env, b"b1"),
+        &None,
+        &None,
+        &false,
+    );
 
-    let result = client.try_log_event(&submitter, &type_a, &Bytes::from_slice(&env, b"a2"), &None, &None, &false);
+    let result = client.try_log_event(
+        &submitter,
+        &type_a,
+        &Bytes::from_slice(&env, b"a2"),
+        &None,
+        &None,
+        &false,
+    );
     assert!(result.is_err());
 }
 
@@ -700,6 +893,9 @@ fn test_log_event_before_initialize_panics() {
         &submitter,
         &symbol_short!("payment"),
         &Bytes::from_slice(&env, b"tx1"),
+        &None,
+        &None,
+        &false,
     );
 }
 
@@ -712,10 +908,24 @@ fn test_log_event_rejects_past_timestamp() {
 
     env.ledger().set_timestamp(1000);
     env.mock_all_auths();
-    client.log_event(&submitter, &payment, &Bytes::from_slice(&env, b"tx1"), &None, &None, &false);
+    client.log_event(
+        &submitter,
+        &payment,
+        &Bytes::from_slice(&env, b"tx1"),
+        &None,
+        &None,
+        &false,
+    );
 
     env.ledger().set_timestamp(999);
-    client.log_event(&submitter, &payment, &Bytes::from_slice(&env, b"tx2"), &None, &None, &false);
+    client.log_event(
+        &submitter,
+        &payment,
+        &Bytes::from_slice(&env, b"tx2"),
+        &None,
+        &None,
+        &false,
+    );
 }
 
 #[test]
@@ -727,11 +937,25 @@ fn test_log_event_rejects_future_timestamp() {
 
     env.ledger().set_timestamp(1000);
     env.mock_all_auths();
-    client.log_event(&submitter, &payment, &Bytes::from_slice(&env, b"tx1"), &None, &None, &false);
+    client.log_event(
+        &submitter,
+        &payment,
+        &Bytes::from_slice(&env, b"tx1"),
+        &None,
+        &None,
+        &false,
+    );
 
     env.ledger()
         .set_timestamp(1000 + super::MAX_TIMESTAMP_DRIFT_SECONDS + 1);
-    client.log_event(&submitter, &payment, &Bytes::from_slice(&env, b"tx2"));
+    client.log_event(
+        &submitter,
+        &symbol_short!("test"),
+        &Bytes::from_slice(&env, b"tx2"),
+        &None,
+        &None,
+        &false,
+    );
 }
 
 #[test]
@@ -742,16 +966,30 @@ fn test_log_event_accepts_normal_timestamp_progression() {
 
     env.ledger().set_timestamp(1000);
     env.mock_all_auths();
-    client.log_event(&submitter, &payment, &Bytes::from_slice(&env, b"tx1"), &None, &None, &false);
+    client.log_event(
+        &submitter,
+        &payment,
+        &Bytes::from_slice(&env, b"tx1"),
+        &None,
+        &None,
+        &false,
+    );
 
     env.ledger().set_timestamp(1001);
-    client.log_event(&submitter, &payment, &Bytes::from_slice(&env, b"tx2"), &None, &None, &false);
+    client.log_event(
+        &submitter,
+        &payment,
+        &Bytes::from_slice(&env, b"tx2"),
+        &None,
+        &None,
+        &false,
+    );
 
     assert_eq!(client.total_events(), 2);
 }
 
 #[test]
-#[should_panic(expected = "HostError: Error(Contract, #10)")]
+#[should_panic(expected = "HostError: Error(Contract, #2)")]
 fn test_log_event_rejects_total_events_overflow() {
     let env = Env::default();
     let owner = Address::generate(&env);
@@ -759,16 +997,23 @@ fn test_log_event_rejects_total_events_overflow() {
     let client = AuditLedgerClient::new(&env, &contract_id);
 
     env.mock_all_auths();
-    client.initialize(&owner, &u32::MAX);
-    env.storage()
-        .instance()
-        .set(&super::DataKey::TotalEvents, &u32::MAX);
+    let mut owners = Vec::new(&env);
+    owners.push_back(owner.clone());
+    client.initialize(&owners, &u32::MAX);
+    env.as_contract(&contract_id, || {
+        let mut rs: super::RuntimeState = env.storage().instance().get(&super::DataKey::RuntimeState).unwrap();
+        rs.total_events = u32::MAX;
+        env.storage().instance().set(&super::DataKey::RuntimeState, &rs);
+    });
 
     let submitter = Address::generate(&env);
     client.log_event(
         &submitter,
         &symbol_short!("payment"),
         &Bytes::from_slice(&env, b"tx1"),
+        &None,
+        &None,
+        &false,
     );
 }
 
@@ -782,11 +1027,32 @@ fn test_get_statistics_returns_aggregates() {
 
     env.ledger().set_timestamp(1000);
     env.mock_all_auths();
-    client.log_event(&submitter_a, &payment, &Bytes::from_slice(&env, b"t1"), &None, &None, &false);
+    client.log_event(
+        &submitter_a,
+        &payment,
+        &Bytes::from_slice(&env, b"t1"),
+        &None,
+        &None,
+        &false,
+    );
     env.ledger().set_timestamp(1001);
-    client.log_event(&submitter_b, &refund, &Bytes::from_slice(&env, b"t2"), &None, &None, &false);
+    client.log_event(
+        &submitter_b,
+        &refund,
+        &Bytes::from_slice(&env, b"t2"),
+        &None,
+        &None,
+        &false,
+    );
     env.ledger().set_timestamp(1002);
-    client.log_event(&submitter_a, &payment, &Bytes::from_slice(&env, b"t3"), &None, &None, &false);
+    client.log_event(
+        &submitter_a,
+        &payment,
+        &Bytes::from_slice(&env, b"t3"),
+        &None,
+        &None,
+        &false,
+    );
 
     let stats = client.get_statistics();
     assert_eq!(stats.total_events, 3);
@@ -813,12 +1079,33 @@ fn test_set_global_max_equal_to_current_count() {
     let payment = symbol_short!("payment");
 
     env.mock_all_auths();
-    client.log_event(&submitter, &payment, &Bytes::from_slice(&env, b"tx1"), &None, &None, &false);
-    client.log_event(&submitter, &payment, &Bytes::from_slice(&env, b"tx2"), &None, &None, &false);
+    client.log_event(
+        &submitter,
+        &payment,
+        &Bytes::from_slice(&env, b"tx1"),
+        &None,
+        &None,
+        &false,
+    );
+    client.log_event(
+        &submitter,
+        &payment,
+        &Bytes::from_slice(&env, b"tx2"),
+        &None,
+        &None,
+        &false,
+    );
 
     client.set_global_max_logs(&owner, &2);
 
-    let result = client.try_log_event(&submitter, &payment, &Bytes::from_slice(&env, b"tx3"), &None, &None, &false);
+    let result = client.try_log_event(
+        &submitter,
+        &payment,
+        &Bytes::from_slice(&env, b"tx3"),
+        &None,
+        &None,
+        &false,
+    );
     assert!(result.is_err());
 }
 
@@ -831,7 +1118,14 @@ fn test_remove_cap_then_unlimited() {
     env.mock_all_auths();
     client.set_event_max_logs(&owner, &payment, &0);
 
-    let result = client.try_log_event(&submitter, &payment, &Bytes::from_slice(&env, b"blocked"), &None, &None, &false);
+    let result = client.try_log_event(
+        &submitter,
+        &payment,
+        &Bytes::from_slice(&env, b"blocked"),
+        &None,
+        &None,
+        &false,
+    );
     assert!(result.is_err());
 
     client.remove_event_cap(&owner, &payment);
@@ -839,7 +1133,10 @@ fn test_remove_cap_then_unlimited() {
     client.log_event(
         &submitter,
         &payment,
-        &Bytes::from_slice(&env, b"now-unblocked"), &None, &None, &false,
+        &Bytes::from_slice(&env, b"now-unblocked"),
+        &None,
+        &None,
+        &false,
     );
     assert_eq!(client.event_count(&payment), 1);
 }
@@ -882,6 +1179,9 @@ fn test_metadata_size_cap_owner_can_set_global() {
         &submitter,
         &symbol_short!("t"),
         &Bytes::from_slice(&env, &[0u8; 50]),
+        &None,
+        &None,
+        &false,
     );
     assert_eq!(client.total_events(), 1);
     // 51 bytes → rejected
@@ -889,6 +1189,9 @@ fn test_metadata_size_cap_owner_can_set_global() {
         &submitter,
         &symbol_short!("t"),
         &Bytes::from_slice(&env, &[0u8; 51]),
+        &None,
+        &None,
+        &false,
     );
     assert!(r2.is_err());
 }
@@ -913,13 +1216,23 @@ fn test_metadata_size_cap_per_type_overrides_global() {
     client.set_metadata_max_size(&owner, &10);
     client.set_event_metadata_max_size(&owner, &lett, &100);
     // type "lett" allows 100 → 50 passes
-    let _id = client.log_event(&submitter, &lett, &Bytes::from_slice(&env, &[0u8; 50]), &None, &None, &false);
+    let _id = client.log_event(
+        &submitter,
+        &lett,
+        &Bytes::from_slice(&env, &[0u8; 50]),
+        &None,
+        &None,
+        &false,
+    );
     assert_eq!(client.total_events(), 1);
     // type "z" uses global cap of 10 → 11 fails
     let r2 = client.try_log_event(
         &submitter,
         &symbol_short!("z"),
         &Bytes::from_slice(&env, &[0u8; 11]),
+        &None,
+        &None,
+        &false,
     );
     assert!(r2.is_err());
 }
@@ -945,15 +1258,18 @@ fn test_log_event_signed_stores_signature() {
     let id = client.log_event_signed(
         &submitter,
         &symbol_short!("pay"),
-        &Bytes::from_slice(&env, b"data"), &None, &None,
-        &sig_payload);
+        &Bytes::from_slice(&env, b"data"),
+        &None,
+        &None,
+        &sig_payload,
+    );
     let stored = client.get_event_signature(&id);
     assert!(stored.is_some());
     assert_eq!(stored.unwrap().len(), 96);
 }
 
 #[test]
-#[should_panic(expected = "HostError: Error(Contract, #9)")]
+#[should_panic(expected = "HostError: Error(Contract, #12)")]
 fn test_log_event_signed_rejects_wrong_length() {
     let (env, _owner, client) = create_ledger();
     let submitter = Address::generate(&env);
@@ -963,8 +1279,11 @@ fn test_log_event_signed_rejects_wrong_length() {
     client.log_event_signed(
         &submitter,
         &symbol_short!("pay"),
-        &Bytes::from_slice(&env, b"data"), &None, &None,
-        &short_payload);
+        &Bytes::from_slice(&env, b"data"),
+        &None,
+        &None,
+        &short_payload,
+    );
 }
 
 #[test]
@@ -977,6 +1296,9 @@ fn test_get_event_signature_returns_none_for_unsigned() {
         &submitter,
         &symbol_short!("p"),
         &Bytes::from_slice(&env, b"x"),
+        &None,
+        &None,
+        &false,
     );
     let stored = client.get_event_signature(&id);
     assert!(stored.is_none());
@@ -987,10 +1309,7 @@ fn test_get_event_signature_returns_none_for_unsigned() {
 #[test]
 fn test_transfer_ownership_to_zero_panics() {
     let (env, owner, client) = create_ledger();
-    let zero = Address::from_str(
-        &env,
-        "GAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAWHF",
-    );
+    let zero = Address::from_str(&env, "GAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAWHF");
 
     env.mock_all_auths();
     let result = client.try_transfer_ownership(&owner, &zero);
@@ -1007,11 +1326,17 @@ fn test_verify_integrity_empty_range() {
         &submitter,
         &symbol_short!("a"),
         &Bytes::from_slice(&env, b"x"),
+        &None,
+        &None,
+        &false,
     );
     client.log_event(
         &submitter,
         &symbol_short!("b"),
         &Bytes::from_slice(&env, b"y"),
+        &None,
+        &None,
+        &false,
     );
 
     assert!(client.verify_integrity_range(&0, &0));
@@ -1065,11 +1390,17 @@ fn test_get_event_by_order_returns_correct_id() {
         &submitter,
         &symbol_short!("a"),
         &Bytes::from_slice(&env, b"first"),
+        &None,
+        &None,
+        &false,
     );
     let id1 = client.log_event(
         &submitter,
         &symbol_short!("b"),
         &Bytes::from_slice(&env, b"second"),
+        &None,
+        &None,
+        &false,
     );
 
     let evt0 = client.get_event_by_order(&0);
@@ -1086,9 +1417,30 @@ fn test_get_event_by_type_multiple_indices() {
     let payments = symbol_short!("pay");
 
     env.mock_all_auths();
-    let _id0 = client.log_event(&submitter, &payments, &Bytes::from_slice(&env, b"a"), &None, &None, &false);
-    let _id1 = client.log_event(&submitter, &payments, &Bytes::from_slice(&env, b"b"), &None, &None, &false);
-    let _id2 = client.log_event(&submitter, &payments, &Bytes::from_slice(&env, b"c"), &None, &None, &false);
+    let _id0 = client.log_event(
+        &submitter,
+        &payments,
+        &Bytes::from_slice(&env, b"a"),
+        &None,
+        &None,
+        &false,
+    );
+    let _id1 = client.log_event(
+        &submitter,
+        &payments,
+        &Bytes::from_slice(&env, b"b"),
+        &None,
+        &None,
+        &false,
+    );
+    let _id2 = client.log_event(
+        &submitter,
+        &payments,
+        &Bytes::from_slice(&env, b"c"),
+        &None,
+        &None,
+        &false,
+    );
 
     assert_eq!(
         client.get_event_by_type(&payments, &0).metadata,
@@ -1145,8 +1497,22 @@ fn test_multiple_event_types_large_counts() {
 
     env.mock_all_auths();
     for i in 0u8..25 {
-        client.log_event(&submitter, &type_a, &Bytes::from_slice(&env, &[i]), &None, &None, &false);
-        client.log_event(&submitter, &type_b, &Bytes::from_slice(&env, &[i + 100]), &None, &None, &false);
+        client.log_event(
+            &submitter,
+            &type_a,
+            &Bytes::from_slice(&env, &[i]),
+            &None,
+            &None,
+            &false,
+        );
+        client.log_event(
+            &submitter,
+            &type_b,
+            &Bytes::from_slice(&env, &[i + 100]),
+            &None,
+            &None,
+            &false,
+        );
     }
 
     assert_eq!(client.total_events(), 50);
@@ -1167,19 +1533,68 @@ fn test_mixed_types_with_limits() {
     client.set_event_max_logs(&owner, &type_a, &2);
     client.set_event_max_logs(&owner, &type_b, &3);
 
-    client.log_event(&submitter, &type_a, &Bytes::from_slice(&env, b"a1"), &None, &None, &false);
-    client.log_event(&submitter, &type_a, &Bytes::from_slice(&env, b"a2"), &None, &None, &false);
-    client.log_event(&submitter, &type_b, &Bytes::from_slice(&env, b"b1"), &None, &None, &false);
-    client.log_event(&submitter, &type_b, &Bytes::from_slice(&env, b"b2"), &None, &None, &false);
-    client.log_event(&submitter, &type_b, &Bytes::from_slice(&env, b"b3"), &None, &None, &false);
-    client.log_event(&submitter, &type_c, &Bytes::from_slice(&env, b"c1"), &None, &None, &false);
+    client.log_event(
+        &submitter,
+        &type_a,
+        &Bytes::from_slice(&env, b"a1"),
+        &None,
+        &None,
+        &false,
+    );
+    client.log_event(
+        &submitter,
+        &type_a,
+        &Bytes::from_slice(&env, b"a2"),
+        &None,
+        &None,
+        &false,
+    );
+    client.log_event(
+        &submitter,
+        &type_b,
+        &Bytes::from_slice(&env, b"b1"),
+        &None,
+        &None,
+        &false,
+    );
+    client.log_event(
+        &submitter,
+        &type_b,
+        &Bytes::from_slice(&env, b"b2"),
+        &None,
+        &None,
+        &false,
+    );
+    client.log_event(
+        &submitter,
+        &type_b,
+        &Bytes::from_slice(&env, b"b3"),
+        &None,
+        &None,
+        &false,
+    );
+    client.log_event(
+        &submitter,
+        &type_c,
+        &Bytes::from_slice(&env, b"c1"),
+        &None,
+        &None,
+        &false,
+    );
 
     assert_eq!(client.total_events(), 6);
     assert_eq!(client.event_count(&type_a), 2);
     assert_eq!(client.event_count(&type_b), 3);
     assert_eq!(client.event_count(&type_c), 1);
 
-    let result = client.try_log_event(&submitter, &type_a, &Bytes::from_slice(&env, b"a3"), &None, &None, &false);
+    let result = client.try_log_event(
+        &submitter,
+        &type_a,
+        &Bytes::from_slice(&env, b"a3"),
+        &None,
+        &None,
+        &false,
+    );
     assert!(result.is_err());
 }
 
@@ -1207,7 +1622,7 @@ fn test_low_cost_mode_logs_without_indexing() {
     let meta = Bytes::from_slice(&env, b"test-metadata");
 
     env.mock_all_auths();
-    let id = client.log_event(&submitter, &payment, &meta);
+    let id = client.log_event(&submitter, &payment, &meta, &None, &None, &false);
 
     assert_eq!(client.total_events(), 1);
 
@@ -1225,7 +1640,7 @@ fn test_low_cost_mode_emission() {
     let meta = Bytes::from_slice(&env, b"test-metadata");
 
     env.mock_all_auths();
-    let id = client.log_event(&submitter, &payment, &meta);
+    let id = client.log_event(&submitter, &payment, &meta, &None, &None, &false);
 
     let contract_events = env.events().all();
     let events = contract_events.events();
@@ -1273,7 +1688,7 @@ fn test_event_emission_index_only() {
     let meta = Bytes::from_slice(&env, b"large-metadata-that-would-be-emitted-full");
 
     env.mock_all_auths();
-    let id = client.log_event(&submitter, &payment, &meta);
+    let id = client.log_event(&submitter, &payment, &meta, &None, &None, &false);
 
     let contract_events = env.events().all();
     let events = contract_events.events();
@@ -1292,7 +1707,7 @@ fn test_get_event_metadata() {
     let meta = Bytes::from_slice(&env, b"test-metadata");
 
     env.mock_all_auths();
-    let id = client.log_event(&submitter, &payment, &meta);
+    let id = client.log_event(&submitter, &payment, &meta, &None, &None, &false);
 
     let retrieved_meta = client.get_event_metadata(&id);
     assert_eq!(retrieved_meta, meta);
@@ -1307,7 +1722,7 @@ fn test_get_event_header() {
 
     env.ledger().set_timestamp(1000);
     env.mock_all_auths();
-    let id = client.log_event(&submitter, &payment, &meta);
+    let id = client.log_event(&submitter, &payment, &meta, &None, &None, &false);
 
     let header = client.get_event_header(&id);
     // EventHeader contains only index/timestamp/event_type/submitter — no metadata (issue #56)
@@ -1352,9 +1767,30 @@ fn test_packed_index_storage_get_event_by_type() {
     let refund = symbol_short!("refund");
 
     env.mock_all_auths();
-    let id0 = client.log_event(&submitter, &payment, &Bytes::from_slice(&env, b"p1"), &None, &None, &false);
-    let _rid = client.log_event(&submitter, &refund, &Bytes::from_slice(&env, b"r1"), &None, &None, &false);
-    let id1 = client.log_event(&submitter, &payment, &Bytes::from_slice(&env, b"p2"), &None, &None, &false);
+    let id0 = client.log_event(
+        &submitter,
+        &payment,
+        &Bytes::from_slice(&env, b"p1"),
+        &None,
+        &None,
+        &false,
+    );
+    let _rid = client.log_event(
+        &submitter,
+        &refund,
+        &Bytes::from_slice(&env, b"r1"),
+        &None,
+        &None,
+        &false,
+    );
+    let id1 = client.log_event(
+        &submitter,
+        &payment,
+        &Bytes::from_slice(&env, b"p2"),
+        &None,
+        &None,
+        &false,
+    );
 
     assert_eq!(client.event_count(&payment), 2);
     assert_eq!(client.event_count(&refund), 1);
@@ -1381,10 +1817,24 @@ fn test_rate_limit_blocks_excess_events() {
     client.set_submitter_rate_limit(&owner, &submitter, &1);
 
     // First event passes
-    client.log_event(&submitter, &payment, &Bytes::from_slice(&env, b"a"), &None, &None, &false);
+    client.log_event(
+        &submitter,
+        &payment,
+        &Bytes::from_slice(&env, b"a"),
+        &None,
+        &None,
+        &false,
+    );
 
     // Second event at same timestamp is rejected
-    let result = client.try_log_event(&submitter, &payment, &Bytes::from_slice(&env, b"b"), &None, &None, &false);
+    let result = client.try_log_event(
+        &submitter,
+        &payment,
+        &Bytes::from_slice(&env, b"b"),
+        &None,
+        &None,
+        &false,
+    );
     assert!(result.is_err());
 }
 
@@ -1398,11 +1848,25 @@ fn test_rate_limit_resets_on_new_timestamp() {
     env.mock_all_auths();
     client.set_submitter_rate_limit(&owner, &submitter, &1);
 
-    client.log_event(&submitter, &payment, &Bytes::from_slice(&env, b"a"), &None, &None, &false);
+    client.log_event(
+        &submitter,
+        &payment,
+        &Bytes::from_slice(&env, b"a"),
+        &None,
+        &None,
+        &false,
+    );
 
     // Advance timestamp — count resets
     env.ledger().set_timestamp(1001);
-    client.log_event(&submitter, &payment, &Bytes::from_slice(&env, b"b"), &None, &None, &false);
+    client.log_event(
+        &submitter,
+        &payment,
+        &Bytes::from_slice(&env, b"b"),
+        &None,
+        &None,
+        &false,
+    );
     assert_eq!(client.total_events(), 2);
 }
 
@@ -1416,7 +1880,14 @@ fn test_rate_limit_zero_blocks_completely() {
     env.mock_all_auths();
     client.set_submitter_rate_limit(&owner, &submitter, &0);
 
-    let result = client.try_log_event(&submitter, &payment, &Bytes::from_slice(&env, b"blocked"), &None, &None, &false);
+    let result = client.try_log_event(
+        &submitter,
+        &payment,
+        &Bytes::from_slice(&env, b"blocked"),
+        &None,
+        &None,
+        &false,
+    );
     assert!(result.is_err());
 }
 
@@ -1450,7 +1921,14 @@ fn test_compact_storage_removes_stale_indices() {
 
     env.mock_all_auths();
     client.set_event_max_logs(&owner, &payment, &5);
-    client.log_event(&submitter, &payment, &Bytes::from_slice(&env, b"tx1"), &None, &None, &false);
+    client.log_event(
+        &submitter,
+        &payment,
+        &Bytes::from_slice(&env, b"tx1"),
+        &None,
+        &None,
+        &false,
+    );
 
     // Remove cap — leaves stale EventTypeIndices / EventTypeCount
     client.remove_event_cap(&owner, &payment);
@@ -1470,8 +1948,22 @@ fn test_compact_storage_does_not_touch_active_caps() {
     env.mock_all_auths();
     client.set_event_max_logs(&owner, &payment, &5);
     client.set_event_max_logs(&owner, &refund, &5);
-    client.log_event(&submitter, &payment, &Bytes::from_slice(&env, b"p1"), &None, &None, &false);
-    client.log_event(&submitter, &refund, &Bytes::from_slice(&env, b"r1"), &None, &None, &false);
+    client.log_event(
+        &submitter,
+        &payment,
+        &Bytes::from_slice(&env, b"p1"),
+        &None,
+        &None,
+        &false,
+    );
+    client.log_event(
+        &submitter,
+        &refund,
+        &Bytes::from_slice(&env, b"r1"),
+        &None,
+        &None,
+        &false,
+    );
 
     // Remove only refund cap
     client.remove_event_cap(&owner, &refund);
@@ -1480,7 +1972,14 @@ fn test_compact_storage_does_not_touch_active_caps() {
     client.compact_storage(&owner, &soroban_sdk::vec![&env, refund]);
 
     // payment cap still works
-    client.log_event(&submitter, &payment, &Bytes::from_slice(&env, b"p2"), &None, &None, &false);
+    client.log_event(
+        &submitter,
+        &payment,
+        &Bytes::from_slice(&env, b"p2"),
+        &None,
+        &None,
+        &false,
+    );
     assert_eq!(client.event_count(&payment), 2);
 }
 
@@ -1492,15 +1991,19 @@ fn test_list_events_pagination() {
 
     env.mock_all_auths();
     for i in 0..50u8 {
-        client.log_event(&submitter, &payment, &Bytes::from_slice(&env, &[i]), &None, &None, &false);
+        client.log_event(
+            &submitter,
+            &payment,
+            &Bytes::from_slice(&env, &[i]),
+            &None,
+            &None,
+            &false,
+        );
     }
 
     let page = client.list_events(&10, &10);
     assert_eq!(page.len(), 10);
-    assert_eq!(
-        page.get(0).unwrap().metadata,
-        Bytes::from_slice(&env, &[10])
-    );
+    assert_eq!(page.get(0).unwrap().metadata, Bytes::from_slice(&env, &[10]));
 
     let beyond = client.list_events(&60, &10);
     assert_eq!(beyond.len(), 0);
@@ -1524,7 +2027,7 @@ fn test_list_events_by_type_pagination() {
 
     let page = client.list_events_by_type(&payment, &1, &5);
     assert_eq!(page.len(), 5);
-    assert_eq!(page.get(0).unwrap().metadata, Bytes::from_slice(&env, &[4]));
+    assert_eq!(page.get(0).unwrap().metadata, Bytes::from_slice(&env, &[2]));
 }
 
 #[test]
@@ -1536,7 +2039,14 @@ fn test_get_events_by_time_range() {
     env.mock_all_auths();
     for i in 0..5u64 {
         env.ledger().set_timestamp(1000 + i);
-        client.log_event(&submitter, &payment, &Bytes::from_slice(&env, &[i as u8]), &None, &None, &false);
+        client.log_event(
+            &submitter,
+            &payment,
+            &Bytes::from_slice(&env, &[i as u8]),
+            &None,
+            &None,
+            &false,
+        );
     }
 
     let results = client.get_events_by_time_range(&1001, &1003, &0, &10);
@@ -1564,9 +2074,30 @@ fn test_search_events() {
     let payment = symbol_short!("payment");
 
     env.mock_all_auths();
-    client.log_event(&submitter, &payment, &Bytes::from_slice(&env, b"alpha"), &None, &None, &false);
-    client.log_event(&submitter, &payment, &Bytes::from_slice(&env, b"beta"), &None, &None, &false);
-    client.log_event(&submitter, &payment, &Bytes::from_slice(&env, b"alphabet"), &None, &None, &false);
+    client.log_event(
+        &submitter,
+        &payment,
+        &Bytes::from_slice(&env, b"alpha"),
+        &None,
+        &None,
+        &false,
+    );
+    client.log_event(
+        &submitter,
+        &payment,
+        &Bytes::from_slice(&env, b"beta"),
+        &None,
+        &None,
+        &false,
+    );
+    client.log_event(
+        &submitter,
+        &payment,
+        &Bytes::from_slice(&env, b"alphabet"),
+        &None,
+        &None,
+        &false,
+    );
 
     let exact = client.search_events(&Bytes::from_slice(&env, b"beta"), &0, &10);
     assert_eq!(exact.len(), 1);
@@ -1588,7 +2119,14 @@ fn test_update_event_history() {
     let payment = symbol_short!("payment");
 
     env.mock_all_auths();
-    client.log_event(&submitter, &payment, &Bytes::from_slice(&env, b"original"), &None, &None, &false);
+    client.log_event(
+        &submitter,
+        &payment,
+        &Bytes::from_slice(&env, b"original"),
+        &None,
+        &None,
+        &false,
+    );
     let history_before = client.get_event_history(&0);
     assert_eq!(history_before.len(), 1);
 
@@ -1610,7 +2148,14 @@ fn test_update_event_non_owner_panics() {
     let payment = symbol_short!("payment");
 
     env.mock_all_auths();
-    client.log_event(&submitter, &payment, &Bytes::from_slice(&env, b"original"), &None, &None, &false);
+    client.log_event(
+        &submitter,
+        &payment,
+        &Bytes::from_slice(&env, b"original"),
+        &None,
+        &None,
+        &false,
+    );
     client.update_event(&attacker, &0, &Bytes::from_slice(&env, b"updated"));
 }
 
@@ -1621,7 +2166,6 @@ fn test_update_event_nonexistent_panics() {
     env.mock_all_auths();
     client.update_event(&owner, &0, &Bytes::from_slice(&env, b"updated"));
 }
-
 
 // ── Hash Chain Integrity Verification (Issue #144) ───────────────────────────
 
@@ -1636,8 +2180,15 @@ fn test_verify_chain_single_event() {
     let (env, _owner, client) = create_ledger();
     let submitter = Address::generate(&env);
     env.mock_all_auths();
-    client.log_event(&submitter, &symbol_short!("test"), &Bytes::from_slice(&env, b"data"), &None, &None, &false);
-    
+    client.log_event(
+        &submitter,
+        &symbol_short!("test"),
+        &Bytes::from_slice(&env, b"data"),
+        &None,
+        &None,
+        &false,
+    );
+
     assert!(client.verify_integrity_range(&0, &1));
 }
 
@@ -1646,11 +2197,18 @@ fn test_verify_chain_multiple_events_sequential() {
     let (env, _owner, client) = create_ledger();
     let submitter = Address::generate(&env);
     env.mock_all_auths();
-    
+
     for i in 0u8..10 {
-        client.log_event(&submitter, &symbol_short!("evt"), &Bytes::from_slice(&env, &[i]), &None, &None, &false);
+        client.log_event(
+            &submitter,
+            &symbol_short!("evt"),
+            &Bytes::from_slice(&env, &[i]),
+            &None,
+            &None,
+            &false,
+        );
     }
-    
+
     assert!(client.verify_integrity_range(&0, &10));
 }
 
@@ -1659,11 +2217,18 @@ fn test_verify_chain_partial_ranges() {
     let (env, _owner, client) = create_ledger();
     let submitter = Address::generate(&env);
     env.mock_all_auths();
-    
+
     for i in 0u8..5 {
-        client.log_event(&submitter, &symbol_short!("evt"), &Bytes::from_slice(&env, &[i]), &None, &None, &false);
+        client.log_event(
+            &submitter,
+            &symbol_short!("evt"),
+            &Bytes::from_slice(&env, &[i]),
+            &None,
+            &None,
+            &false,
+        );
     }
-    
+
     // Verify subranges
     assert!(client.verify_integrity_range(&1, &3));
     assert!(client.verify_integrity_range(&0, &5));
@@ -1675,11 +2240,18 @@ fn test_verify_chain_full_integrity() {
     let (env, _owner, client) = create_ledger();
     let submitter = Address::generate(&env);
     env.mock_all_auths();
-    
+
     for i in 0u8..15 {
-        client.log_event(&submitter, &symbol_short!("evt"), &Bytes::from_slice(&env, &[i]), &None, &None, &false);
+        client.log_event(
+            &submitter,
+            &symbol_short!("evt"),
+            &Bytes::from_slice(&env, &[i]),
+            &None,
+            &None,
+            &false,
+        );
     }
-    
+
     // Full chain must be valid
     assert!(client.verify_integrity());
 }
@@ -1689,20 +2261,41 @@ fn test_verify_chain_prev_hash_consistency() {
     let (env, _owner, client) = create_ledger();
     let submitter = Address::generate(&env);
     env.mock_all_auths();
-    
-    let id0 = client.log_event(&submitter, &symbol_short!("evt"), &Bytes::from_slice(&env, b"e0"), &None, &None, &false);
-    let id1 = client.log_event(&submitter, &symbol_short!("evt"), &Bytes::from_slice(&env, b"e1"), &None, &None, &false);
-    let id2 = client.log_event(&submitter, &symbol_short!("evt"), &Bytes::from_slice(&env, b"e2"), &None, &None, &false);
-    
+
+    let id0 = client.log_event(
+        &submitter,
+        &symbol_short!("evt"),
+        &Bytes::from_slice(&env, b"e0"),
+        &None,
+        &None,
+        &false,
+    );
+    let id1 = client.log_event(
+        &submitter,
+        &symbol_short!("evt"),
+        &Bytes::from_slice(&env, b"e1"),
+        &None,
+        &None,
+        &false,
+    );
+    let id2 = client.log_event(
+        &submitter,
+        &symbol_short!("evt"),
+        &Bytes::from_slice(&env, b"e2"),
+        &None,
+        &None,
+        &false,
+    );
+
     let evt0 = client.get_event(&id0);
     let evt1 = client.get_event(&id1);
     let evt2 = client.get_event(&id2);
-    
+
     // Chain linkage must be intact
     assert_eq!(evt0.prev_hash, BytesN::from_array(&env, &[0u8; 32]));
     assert_eq!(evt1.prev_hash, evt0.event_hash);
     assert_eq!(evt2.prev_hash, evt1.event_hash);
-    
+
     // Verification must pass
     assert!(client.verify_integrity_range(&0, &3));
 }
@@ -1712,15 +2305,42 @@ fn test_verify_chain_different_event_types() {
     let (env, _owner, client) = create_ledger();
     let submitter = Address::generate(&env);
     env.mock_all_auths();
-    
-    client.log_event(&submitter, &symbol_short!("pay"), &Bytes::from_slice(&env, b"1"), &None, &None, &false);
-    client.log_event(&submitter, &symbol_short!("ref"), &Bytes::from_slice(&env, b"2"), &None, &None, &false);
-    client.log_event(&submitter, &symbol_short!("pay"), &Bytes::from_slice(&env, b"3"), &None, &None, &false);
-    client.log_event(&submitter, &symbol_short!("del"), &Bytes::from_slice(&env, b"4"), &None, &None, &false);
-    
+
+    client.log_event(
+        &submitter,
+        &symbol_short!("pay"),
+        &Bytes::from_slice(&env, b"1"),
+        &None,
+        &None,
+        &false,
+    );
+    client.log_event(
+        &submitter,
+        &symbol_short!("ref"),
+        &Bytes::from_slice(&env, b"2"),
+        &None,
+        &None,
+        &false,
+    );
+    client.log_event(
+        &submitter,
+        &symbol_short!("pay"),
+        &Bytes::from_slice(&env, b"3"),
+        &None,
+        &None,
+        &false,
+    );
+    client.log_event(
+        &submitter,
+        &symbol_short!("del"),
+        &Bytes::from_slice(&env, b"4"),
+        &None,
+        &None,
+        &false,
+    );
+
     assert!(client.verify_integrity());
 }
-
 
 // ── Submitter Allowlist / Blocklist (Issue #141) ──────────────────────────────
 
@@ -1728,32 +2348,32 @@ fn test_verify_chain_different_event_types() {
 fn test_block_submitter() {
     let (env, owner, client) = create_ledger();
     let submitter = Address::generate(&env);
-    
+
     env.mock_all_auths();
-    
+
     // Submit event before blocking
     let id = client.log_event(
         &submitter,
         &symbol_short!("test"),
         &Bytes::from_slice(&env, b"data"),
         &None,
-        &None, &false,
+        &None,
+        &false,
     );
     assert_eq!(client.total_events(), 1);
-    
+
     // Block the submitter
     client.block_submitter(&owner, &submitter);
-    
+
     // Attempt to submit after blocking should fail
-    let result = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
-        client.log_event(
-            &submitter,
-            &symbol_short!("test"),
-            &Bytes::from_slice(&env, b"blocked"),
-            &None,
-            &None, &false,
-        )
-    }));
+    let result = client.try_log_event(
+        &submitter,
+        &symbol_short!("test"),
+        &Bytes::from_slice(&env, b"blocked"),
+        &None,
+        &None,
+        &false,
+    );
     assert!(result.is_err());
 }
 
@@ -1761,34 +2381,34 @@ fn test_block_submitter() {
 fn test_unblock_submitter() {
     let (env, owner, client) = create_ledger();
     let submitter = Address::generate(&env);
-    
+
     env.mock_all_auths();
-    
+
     // Block the submitter
     client.block_submitter(&owner, &submitter);
-    
+
     // Verify blocked
-    let result = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
-        client.log_event(
-            &submitter,
-            &symbol_short!("test"),
-            &Bytes::from_slice(&env, b"blocked"),
-            &None,
-            &None, &false,
-        )
-    }));
+    let result = client.try_log_event(
+        &submitter,
+        &symbol_short!("test"),
+        &Bytes::from_slice(&env, b"blocked"),
+        &None,
+        &None,
+        &false,
+    );
     assert!(result.is_err());
-    
+
     // Unblock the submitter
     client.unblock_submitter(&owner, &submitter);
-    
+
     // Now submission should work
     let id = client.log_event(
         &submitter,
         &symbol_short!("test"),
         &Bytes::from_slice(&env, b"allowed"),
         &None,
-        &None, &false,
+        &None,
+        &false,
     );
     assert_eq!(client.total_events(), 1);
 }
@@ -1798,47 +2418,46 @@ fn test_allowlist_mode_enabled() {
     let (env, owner, client) = create_ledger();
     let whitelisted = Address::generate(&env);
     let non_whitelisted = Address::generate(&env);
-    
+
     env.mock_all_auths();
-    
+
     // Enable allowlist mode
     client.enable_allowlist_mode(&owner);
-    
+
     // Whitelisted submitter not yet allowed - should fail
-    let result = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
-        client.log_event(
-            &whitelisted,
-            &symbol_short!("test"),
-            &Bytes::from_slice(&env, b"data"),
-            &None,
-            &None, &false,
-        )
-    }));
+    let result = client.try_log_event(
+        &whitelisted,
+        &symbol_short!("test"),
+        &Bytes::from_slice(&env, b"data"),
+        &None,
+        &None,
+        &false,
+    );
     assert!(result.is_err());
-    
+
     // Allow submitter
     client.allow_submitter(&owner, &whitelisted);
-    
+
     // Now it should work
     let id = client.log_event(
         &whitelisted,
         &symbol_short!("test"),
         &Bytes::from_slice(&env, b"allowed"),
         &None,
-        &None, &false,
+        &None,
+        &false,
     );
     assert_eq!(client.total_events(), 1);
-    
+
     // Non-whitelisted should still fail
-    let result = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
-        client.log_event(
-            &non_whitelisted,
-            &symbol_short!("test"),
-            &Bytes::from_slice(&env, b"not_allowed"),
-            &None,
-            &None, &false,
-        )
-    }));
+    let result = client.try_log_event(
+        &non_whitelisted,
+        &symbol_short!("test"),
+        &Bytes::from_slice(&env, b"not_allowed"),
+        &None,
+        &None,
+        &false,
+    );
     assert!(result.is_err());
 }
 
@@ -1846,36 +2465,36 @@ fn test_allowlist_mode_enabled() {
 fn test_remove_from_allowlist() {
     let (env, owner, client) = create_ledger();
     let submitter = Address::generate(&env);
-    
+
     env.mock_all_auths();
-    
+
     // Enable allowlist mode and allow submitter
     client.enable_allowlist_mode(&owner);
     client.allow_submitter(&owner, &submitter);
-    
+
     // Should work
     let id = client.log_event(
         &submitter,
         &symbol_short!("test"),
         &Bytes::from_slice(&env, b"allowed"),
         &None,
-        &None, &false,
+        &None,
+        &false,
     );
     assert_eq!(client.total_events(), 1);
-    
+
     // Remove from allowlist
     client.remove_submitter_from_allowlist(&owner, &submitter);
-    
+
     // Should fail now
-    let result = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
-        client.log_event(
-            &submitter,
-            &symbol_short!("test"),
-            &Bytes::from_slice(&env, b"removed"),
-            &None,
-            &None, &false,
-        )
-    }));
+    let result = client.try_log_event(
+        &submitter,
+        &symbol_short!("test"),
+        &Bytes::from_slice(&env, b"removed"),
+        &None,
+        &None,
+        &false,
+    );
     assert!(result.is_err());
 }
 
@@ -1883,34 +2502,34 @@ fn test_remove_from_allowlist() {
 fn test_disable_allowlist_mode() {
     let (env, owner, client) = create_ledger();
     let submitter = Address::generate(&env);
-    
+
     env.mock_all_auths();
-    
+
     // Enable allowlist mode
     client.enable_allowlist_mode(&owner);
-    
+
     // Submitter not whitelisted - should fail
-    let result = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
-        client.log_event(
-            &submitter,
-            &symbol_short!("test"),
-            &Bytes::from_slice(&env, b"data"),
-            &None,
-            &None, &false,
-        )
-    }));
+    let result = client.try_log_event(
+        &submitter,
+        &symbol_short!("test"),
+        &Bytes::from_slice(&env, b"data"),
+        &None,
+        &None,
+        &false,
+    );
     assert!(result.is_err());
-    
+
     // Disable allowlist mode
     client.disable_allowlist_mode(&owner);
-    
+
     // Should work now
     let id = client.log_event(
         &submitter,
         &symbol_short!("test"),
         &Bytes::from_slice(&env, b"allowed"),
         &None,
-        &None, &false,
+        &None,
+        &false,
     );
     assert_eq!(client.total_events(), 1);
 }
@@ -1919,40 +2538,38 @@ fn test_disable_allowlist_mode() {
 fn test_blocklist_takes_precedence() {
     let (env, owner, client) = create_ledger();
     let submitter = Address::generate(&env);
-    
+
     env.mock_all_auths();
-    
+
     // Enable allowlist and allow submitter
     client.enable_allowlist_mode(&owner);
     client.allow_submitter(&owner, &submitter);
-    
+
     // Should work
     let id = client.log_event(
         &submitter,
         &symbol_short!("test"),
         &Bytes::from_slice(&env, b"allowed"),
         &None,
-        &None, &false,
+        &None,
+        &false,
     );
     assert_eq!(client.total_events(), 1);
-    
+
     // Block the submitter (blocklist takes precedence over allowlist)
     client.block_submitter(&owner, &submitter);
-    
+
     // Should fail now
-    let result = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
-        client.log_event(
-            &submitter,
-            &symbol_short!("test"),
-            &Bytes::from_slice(&env, b"blocked"),
-            &None,
-            &None, &false,
-        )
-    }));
+    let result = client.try_log_event(
+        &submitter,
+        &symbol_short!("test"),
+        &Bytes::from_slice(&env, b"blocked"),
+        &None,
+        &None,
+        &false,
+    );
     assert!(result.is_err());
 }
-
-// ── Governance events (#116) ─────────────────────────────────────────────────
 
 #[test]
 fn test_set_global_max_logs_emits_event() {
@@ -1962,7 +2579,7 @@ fn test_set_global_max_logs_emits_event() {
     // Verify the event was published by checking total (non-zero events list)
     let evts = env.events().all();
     // At least one event should exist after governance call
-    assert!(!evts.is_empty());
+    assert!(evts.events().len() > 0);
 }
 
 #[test]
@@ -1972,7 +2589,7 @@ fn test_transfer_ownership_emits_event() {
     env.mock_all_auths();
     client.transfer_ownership(&owner, &new_owner);
     let evts = env.events().all();
-    assert!(!evts.is_empty());
+    assert!(evts.events().len() > 0);
 }
 
 #[test]
@@ -1981,9 +2598,9 @@ fn test_remove_event_cap_emits_event() {
     let payment = symbol_short!("payment");
     env.mock_all_auths();
     client.set_event_max_logs(&owner, &payment, &50);
-    let before = env.events().all().len();
+    let before = env.events().all().events().len();
     client.remove_event_cap(&owner, &payment);
-    let after = env.events().all().len();
+    let after = env.events().all().events().len();
     // A new event should have been published
     assert!(after > before);
 }
@@ -2003,9 +2620,9 @@ fn test_set_event_ttl_and_get() {
 fn test_set_event_ttl_emits_governance_event() {
     let (env, owner, client) = create_ledger();
     env.mock_all_auths();
-    let before = env.events().all().len();
+    let before = env.events().all().events().len();
     client.set_event_ttl(&owner, &500);
-    let after = env.events().all().len();
+    let after = env.events().all().events().len();
     assert!(after > before, "set_event_ttl should emit a governance event");
 }
 
@@ -2022,6 +2639,7 @@ fn test_log_event_with_ttl_enabled() {
         &Bytes::from_slice(&env, b"ttl_test"),
         &None,
         &None,
+        &false,
     );
     let evt = client.get_event(&id);
     assert_eq!(evt.metadata, Bytes::from_slice(&env, b"ttl_test"));

@@ -1,8 +1,10 @@
 #![no_std]
+// Migration to #[contractevent] macro is deferred (issue tracked separately)
+#![allow(deprecated)]
 
 use soroban_sdk::{
-    bytes, contract, contracterror, contractimpl, contracttype, panic_with_error, Address, Bytes,
-    BytesN, Env, Symbol, Vec,
+    bytes, contract, contracterror, contractimpl, contracttype, panic_with_error, Address, Bytes, BytesN, Env, Symbol,
+    Vec,
 };
 
 /// Default maximum metadata size (1 KB). Used when no explicit cap is set.
@@ -273,6 +275,11 @@ pub enum ContractError {
     CategoryTooLong = 24,
     /// **Code 25**: Reentrant call detected; recursion is not permitted.
     ReentrancyDetected = 25,
+
+    /// **Code 26**: Contract has already been initialized.
+    /// **Common cause**: Calling `initialize()` more than once.
+    /// **Resolution**: The contract can only be initialized once at deployment.
+    AlreadyInitialized = 26,
 }
 
 #[contracttype]
@@ -338,7 +345,7 @@ pub struct AuditLedger;
 impl AuditLedger {
     pub fn initialize(env: Env, owners: Vec<Address>, global_max_logs: u32) {
         if env.storage().instance().has(&DataKey::Owner) {
-            panic_with_error!(&env, ContractError::SameOwner);
+            panic_with_error!(&env, ContractError::AlreadyInitialized);
         }
         if owners.is_empty() {
             panic_with_error!(&env, ContractError::NewOwnerIsZero);
@@ -354,12 +361,19 @@ impl AuditLedger {
                 total_events: 0,
             },
         );
-        env.storage()
-            .instance()
-            .set(&DataKey::GlobalMaxLogs, &global_max_logs);
-        env.storage().instance().set(&DataKey::TotalEvents, &0u32);
         env.storage().instance().set(&DataKey::Paused, &false);
-        
+
+        let rs = RuntimeState {
+            global_max_logs,
+            total_events: 0,
+            paused: false,
+            allowlist_mode: false,
+            low_cost_mode: false,
+            emission_mode: 1,
+            global_metadata_max_size: 0,
+        };
+        env.storage().instance().set(&DataKey::RuntimeState, &rs);
+
         // Set version to 1 (marks contract as initialized, immutable)
         env.storage().instance().set(&DataKey::ContractVersion, &1u32);
     }
@@ -369,22 +383,30 @@ impl AuditLedger {
         Self::require_initialized(&env);
 
         // Single read for all global state (issue #114)
-        let rs: RuntimeState = env
-            .storage()
-            .instance()
-            .get(&DataKey::RuntimeState)
-            .unwrap_or_else(|| {
-                let cfg: Config = env.storage().instance().get(&DataKey::Config).unwrap();
-                RuntimeState {
-                    global_max_logs: cfg.global_max_logs,
-                    total_events: cfg.total_events,
-                    paused: env.storage().instance().get::<_, bool>(&DataKey::Paused).unwrap_or(false),
-                    allowlist_mode: false,
-                    low_cost_mode: env.storage().instance().get::<_, bool>(&DataKey::LowCostMode).unwrap_or(false),
-                    emission_mode: env.storage().instance().get::<_, u32>(&DataKey::EventEmissionConfig).unwrap_or(1),
-                    global_metadata_max_size: 0,
-                }
-            });
+        let rs: RuntimeState = env.storage().instance().get(&DataKey::RuntimeState).unwrap_or_else(|| {
+            let cfg: Config = env.storage().instance().get(&DataKey::Config).unwrap();
+            RuntimeState {
+                global_max_logs: cfg.global_max_logs,
+                total_events: cfg.total_events,
+                paused: env
+                    .storage()
+                    .instance()
+                    .get::<_, bool>(&DataKey::Paused)
+                    .unwrap_or(false),
+                allowlist_mode: false,
+                low_cost_mode: env
+                    .storage()
+                    .instance()
+                    .get::<_, bool>(&DataKey::LowCostMode)
+                    .unwrap_or(false),
+                emission_mode: env
+                    .storage()
+                    .instance()
+                    .get::<_, u32>(&DataKey::EventEmissionConfig)
+                    .unwrap_or(1),
+                global_metadata_max_size: 0,
+            }
+        });
 
         if rs.paused {
             panic_with_error!(&env, ContractError::ContractPaused);
@@ -401,10 +423,21 @@ impl AuditLedger {
         let now = env.ledger().timestamp();
         let mut submitter_batch_counts: Vec<(Address, u32)> = Vec::new(&env);
         let mut type_batch_counts: Vec<(Symbol, u32)> = Vec::new(&env);
+        let mut authorized_submitters: Vec<Address> = Vec::new(&env);
 
         for i in 0..batch_len {
             let (submitter, event_type, metadata) = events.get(i).unwrap().clone();
-            submitter.require_auth();
+            let mut already_authorized = false;
+            for j in 0..authorized_submitters.len() {
+                if authorized_submitters.get(j).unwrap() == submitter {
+                    already_authorized = true;
+                    break;
+                }
+            }
+            if !already_authorized {
+                submitter.require_auth();
+                authorized_submitters.push_back(submitter.clone());
+            }
 
             let max_meta = Self::effective_metadata_max_size(&env, &event_type);
             if metadata.len() > max_meta {
@@ -421,11 +454,7 @@ impl AuditLedger {
                     .instance()
                     .get(&DataKey::SubmitterRateState(submitter.clone()))
                     .unwrap_or((0u64, 0u32));
-                let batch_count = Self::increment_address_count(
-                    &env,
-                    &mut submitter_batch_counts,
-                    submitter.clone(),
-                );
+                let batch_count = Self::increment_address_count(&env, &mut submitter_batch_counts, submitter.clone());
                 if now == last_ts {
                     if count + batch_count > limit {
                         panic_with_error!(&env, ContractError::RateLimitExceeded);
@@ -442,8 +471,7 @@ impl AuditLedger {
                 .flatten()
             {
                 let current_count = Self::event_type_count(&env, event_type.clone());
-                let batch_count =
-                    Self::increment_symbol_count(&env, &mut type_batch_counts, event_type.clone());
+                let batch_count = Self::increment_symbol_count(&env, &mut type_batch_counts, event_type.clone());
                 if current_count + batch_count > cap {
                     panic_with_error!(&env, ContractError::EventTypeMaxLogsReached);
                 }
@@ -460,11 +488,7 @@ impl AuditLedger {
                 .instance()
                 .get(&DataKey::EventOrder(current_total - 1))
                 .unwrap();
-            let prev_evt: Event = env
-                .storage()
-                .instance()
-                .get(&DataKey::EventData(prev_id))
-                .unwrap();
+            let prev_evt: Event = env.storage().instance().get(&DataKey::EventData(prev_id)).unwrap();
             prev_evt.event_hash
         };
 
@@ -472,10 +496,8 @@ impl AuditLedger {
             let (submitter, event_type, metadata) = events.get(i).unwrap().clone();
             let index = current_total;
             let timestamp = env.ledger().timestamp();
-            let event_id =
-                Self::compute_event_id(&env, &submitter, &event_type, &metadata, timestamp, index);
-            let event_hash =
-                Self::compute_event_hash(&env, &event_id, &prev_hash, index, timestamp);
+            let event_id = Self::compute_event_id(&env, &submitter, &event_type, &metadata, timestamp, index);
+            let event_hash = Self::compute_event_hash(&env, &event_id, &prev_hash, index, timestamp);
 
             let evt = Event {
                 index,
@@ -493,9 +515,7 @@ impl AuditLedger {
             env.storage()
                 .instance()
                 .set(&DataKey::EventData(event_id.clone()), &evt);
-            env.storage()
-                .instance()
-                .set(&DataKey::EventOrder(index), &event_id);
+            env.storage().instance().set(&DataKey::EventOrder(index), &event_id);
 
             let header = EventHeader {
                 index,
@@ -506,9 +526,6 @@ impl AuditLedger {
             env.storage()
                 .instance()
                 .set(&DataKey::EventHeaderKey(event_id.clone()), &header);
-            env.storage()
-                .instance()
-                .set(&DataKey::EventMeta(event_id.clone()), &evt);
             env.storage()
                 .instance()
                 .set(&DataKey::EventMetadata(event_id.clone()), &metadata);
@@ -548,10 +565,6 @@ impl AuditLedger {
                 total_events: current_total,
             },
         );
-        env.storage()
-            .instance()
-            .set(&DataKey::TotalEvents, &current_total);
-        // Sync RuntimeState total_events (issue #114)
         if let Some(mut rs2) = env.storage().instance().get::<_, RuntimeState>(&DataKey::RuntimeState) {
             rs2.total_events = current_total;
             env.storage().instance().set(&DataKey::RuntimeState, &rs2);
@@ -594,16 +607,10 @@ impl AuditLedger {
         // --- issue #61: reentrancy guard ---
         // Temporary storage is scoped to the current transaction; if a
         // reentrant call arrives before the key is cleared the guard fires.
-        if env
-            .storage()
-            .temporary()
-            .has(&DataKey::LogEventReentrancyGuard)
-        {
+        if env.storage().temporary().has(&DataKey::LogEventReentrancyGuard) {
             panic_with_error!(&env, ContractError::ReentrancyDetected);
         }
-        env.storage()
-            .temporary()
-            .set(&DataKey::LogEventReentrancyGuard, &true);
+        env.storage().temporary().set(&DataKey::LogEventReentrancyGuard, &true);
 
         // --- issue #63: validate event_type Symbol ---
         Self::validate_event_type(&env, &event_type);
@@ -624,11 +631,7 @@ impl AuditLedger {
         }
 
         // Check allowlist mode
-        if let Some(true) = env
-            .storage()
-            .instance()
-            .get::<_, bool>(&DataKey::AllowlistMode)
-        {
+        if let Some(true) = env.storage().instance().get::<_, bool>(&DataKey::AllowlistMode) {
             if let Some(false) = env
                 .storage()
                 .instance()
@@ -663,38 +666,40 @@ impl AuditLedger {
                 if count >= limit {
                     panic_with_error!(&env, ContractError::RateLimitExceeded);
                 }
-                env.storage().instance().set(
-                    &DataKey::SubmitterRateState(submitter.clone()),
-                    &(now, count + 1),
-                );
+                env.storage()
+                    .instance()
+                    .set(&DataKey::SubmitterRateState(submitter.clone()), &(now, count + 1));
             } else {
                 if limit == 0 {
                     panic_with_error!(&env, ContractError::RateLimitExceeded);
                 }
-                env.storage().instance().set(
-                    &DataKey::SubmitterRateState(submitter.clone()),
-                    &(now, 1u32),
-                );
+                env.storage()
+                    .instance()
+                    .set(&DataKey::SubmitterRateState(submitter.clone()), &(now, 1u32));
             }
         }
 
         // --- issue #114: single read for RuntimeState + Config ---
-        let rs: RuntimeState = env
-            .storage()
-            .instance()
-            .get(&DataKey::RuntimeState)
-            .unwrap_or_else(|| {
-                let cfg_rs: Config = env.storage().instance().get(&DataKey::Config).unwrap();
-                RuntimeState {
-                    global_max_logs: cfg_rs.global_max_logs,
-                    total_events: cfg_rs.total_events,
-                    paused: env.storage().instance().get::<_, bool>(&DataKey::Paused).unwrap_or(false),
-                    allowlist_mode: false,
-                    low_cost_mode: false,
-                    emission_mode: env.storage().instance().get::<_, u32>(&DataKey::EventEmissionConfig).unwrap_or(1),
-                    global_metadata_max_size: 0,
-                }
-            });
+        let rs: RuntimeState = env.storage().instance().get(&DataKey::RuntimeState).unwrap_or_else(|| {
+            let cfg_rs: Config = env.storage().instance().get(&DataKey::Config).unwrap();
+            RuntimeState {
+                global_max_logs: cfg_rs.global_max_logs,
+                total_events: cfg_rs.total_events,
+                paused: env
+                    .storage()
+                    .instance()
+                    .get::<_, bool>(&DataKey::Paused)
+                    .unwrap_or(false),
+                allowlist_mode: false,
+                low_cost_mode: false,
+                emission_mode: env
+                    .storage()
+                    .instance()
+                    .get::<_, u32>(&DataKey::EventEmissionConfig)
+                    .unwrap_or(1),
+                global_metadata_max_size: 0,
+            }
+        });
         let mut cfg: Config = env.storage().instance().get(&DataKey::Config).unwrap_or(Config {
             global_max_logs: rs.global_max_logs,
             total_events: rs.total_events,
@@ -707,8 +712,8 @@ impl AuditLedger {
             .get::<_, u32>(&DataKey::EventMetadataMaxSize(event_type.clone()))
         {
             v
-        } else if rs.global_metadata_max_size > 0 {
-            rs.global_metadata_max_size
+        } else if let Some(v) = env.storage().instance().get::<_, u32>(&DataKey::GlobalMetadataMaxSize) {
+            v
         } else {
             DEFAULT_MAX_METADATA_SIZE
         };
@@ -737,8 +742,7 @@ impl AuditLedger {
 
         // --- Content-addressed deduplication ---
         // Compute hash(event_type || submitter || metadata) for dedup.
-        let content_hash =
-            Self::compute_content_hash(&env, &event_type, &submitter, &metadata);
+        let content_hash = Self::compute_content_hash(&env, &event_type, &submitter, &metadata);
         if !force {
             if let Some(existing_index) = env
                 .storage()
@@ -761,37 +765,24 @@ impl AuditLedger {
         let (prev_hash, prev_timestamp): (BytesN<32>, u64) = if index == 0 {
             (BytesN::from_array(&env, &[0u8; 32]), 0u64)
         } else {
-            let prev_id: BytesN<32> = env
-                .storage()
-                .instance()
-                .get(&DataKey::EventOrder(index - 1))
-                .unwrap();
-            let prev_evt: Event = env
-                .storage()
-                .instance()
-                .get(&DataKey::EventData(prev_id))
-                .unwrap();
+            let prev_id: BytesN<32> = env.storage().instance().get(&DataKey::EventOrder(index - 1)).unwrap();
+            let prev_evt: Event = env.storage().instance().get(&DataKey::EventData(prev_id)).unwrap();
             (prev_evt.event_hash, prev_evt.timestamp)
         };
 
-        if index > 0 {
-            if timestamp < prev_timestamp
-                || timestamp > prev_timestamp + MAX_TIMESTAMP_DRIFT_SECONDS
-            {
-                panic_with_error!(&env, ContractError::TimestampOutOfRange);
-            }
+        if index > 0 && (timestamp < prev_timestamp || timestamp > prev_timestamp + MAX_TIMESTAMP_DRIFT_SECONDS) {
+            panic_with_error!(&env, ContractError::TimestampOutOfRange);
         }
 
         // --- issue #70: compute content-addressed event ID ---
-        let event_id =
-            Self::compute_event_id(&env, &submitter, &event_type, &metadata, timestamp, index);
+        let event_id = Self::compute_event_id(&env, &submitter, &event_type, &metadata, timestamp, index);
 
         // --- issue #66: compute this event's hash (includes prev_hash) ---
         let event_hash = Self::compute_event_hash(&env, &event_id, &prev_hash, index, timestamp);
 
         let cat = category.unwrap_or(Symbol::new(&env, "general"));
         // Reject categories exceeding max length to prevent storage cost attacks.
-        let max_cat_len: u32 = env
+        let _max_cat_len: u32 = env
             .storage()
             .instance()
             .get(&DataKey::CategoryMaxLen)
@@ -816,9 +807,7 @@ impl AuditLedger {
         env.storage()
             .instance()
             .set(&DataKey::EventData(event_id.clone()), &evt);
-        env.storage()
-            .instance()
-            .set(&DataKey::EventOrder(index), &event_id);
+        env.storage().instance().set(&DataKey::EventOrder(index), &event_id);
 
         // --- issue #56: store lightweight header separately ---
         let header = EventHeader {
@@ -835,11 +824,7 @@ impl AuditLedger {
             .set(&DataKey::EventMetadata(event_id.clone()), &metadata);
 
         // --- issue #121: write to persistent storage when TTL is configured ---
-        let ttl: u32 = env
-            .storage()
-            .instance()
-            .get(&DataKey::EventTtl)
-            .unwrap_or(0);
+        let ttl: u32 = env.storage().instance().get(&DataKey::EventTtl).unwrap_or(0);
         if ttl > 0 {
             env.storage()
                 .persistent()
@@ -856,9 +841,7 @@ impl AuditLedger {
         if !low_cost {
             Self::push_type_index(&env, event_type.clone(), index);
             // Task 5: reuse cached count instead of re-reading.
-            let new_count = type_count_opt
-                .unwrap_or_else(|| Self::event_type_count(&env, event_type.clone()))
-                + 1;
+            let new_count = type_count_opt.unwrap_or_else(|| Self::event_type_count(&env, event_type.clone())) + 1;
             env.storage()
                 .instance()
                 .set(&DataKey::EventTypeCount(event_type.clone()), &new_count);
@@ -867,12 +850,13 @@ impl AuditLedger {
         // Task 4: cache emission_mode to avoid double read.
         let emission_mode = Self::effective_event_emission_mode(&env);
 
-        // Task 1: single write back the updated Config (was separate TotalEvents write).
         cfg.total_events += 1;
         env.storage().instance().set(&DataKey::Config, &cfg);
-        env.storage()
-            .instance()
-            .set(&DataKey::TotalEvents, &cfg.total_events);
+        // Sync RuntimeState total_events (issue #114)
+        if let Some(mut rs) = env.storage().instance().get::<_, RuntimeState>(&DataKey::RuntimeState) {
+            rs.total_events = cfg.total_events;
+            env.storage().instance().set(&DataKey::RuntimeState, &rs);
+        }
 
         // #179: emit canonical ("log", event_type) event with (index, submitter, metadata_hash)
         if emission_mode != 3 {
@@ -884,9 +868,7 @@ impl AuditLedger {
         }
 
         // --- issue #61: clear reentrancy guard before returning ---
-        env.storage()
-            .temporary()
-            .remove(&DataKey::LogEventReentrancyGuard);
+        env.storage().temporary().remove(&DataKey::LogEventReentrancyGuard);
 
         event_id
     }
@@ -917,15 +899,8 @@ impl AuditLedger {
             panic_with_error!(&env, ContractError::NonceTooLow);
         }
 
-        let event_id = Self::log_event_with_hierarchy(
-            env.clone(),
-            submitter.clone(),
-            event_type,
-            metadata,
-            None,
-            None,
-            false,
-        );
+        let event_id =
+            Self::log_event_with_hierarchy(env.clone(), submitter.clone(), event_type, metadata, None, None, false);
 
         env.storage()
             .instance()
@@ -1028,16 +1003,8 @@ impl AuditLedger {
         let total = Self::total_events(env.clone());
         let mut cnt: u32 = 0;
         for i in 0..total {
-            let id: BytesN<32> = env
-                .storage()
-                .instance()
-                .get(&DataKey::EventOrder(i))
-                .unwrap();
-            let evt: Event = env
-                .storage()
-                .instance()
-                .get(&DataKey::EventData(id))
-                .unwrap();
+            let id: BytesN<32> = env.storage().instance().get(&DataKey::EventOrder(i)).unwrap();
+            let evt: Event = env.storage().instance().get(&DataKey::EventData(id)).unwrap();
             if evt.category == category {
                 cnt += 1;
             }
@@ -1046,12 +1013,7 @@ impl AuditLedger {
     }
 
     /// List event headers for a given category with simple pagination.
-    pub fn list_events_by_category(
-        env: Env,
-        category: Symbol,
-        start: u32,
-        limit: u32,
-    ) -> Vec<EventHeader> {
+    pub fn list_events_by_category(env: Env, category: Symbol, start: u32, limit: u32) -> Vec<EventHeader> {
         let total = Self::total_events(env.clone());
         let mut out: Vec<EventHeader> = Vec::new(&env);
         if start >= total {
@@ -1060,16 +1022,8 @@ impl AuditLedger {
         let mut added: u32 = 0;
         let mut i = start;
         while i < total && added < limit {
-            let id: BytesN<32> = env
-                .storage()
-                .instance()
-                .get(&DataKey::EventOrder(i))
-                .unwrap();
-            let evt: Event = env
-                .storage()
-                .instance()
-                .get(&DataKey::EventData(id))
-                .unwrap();
+            let id: BytesN<32> = env.storage().instance().get(&DataKey::EventOrder(i)).unwrap();
+            let evt: Event = env.storage().instance().get(&DataKey::EventData(id)).unwrap();
             if evt.category == category {
                 let header = EventHeader {
                     index: evt.index,
@@ -1098,24 +1052,12 @@ impl AuditLedger {
             .unwrap_or(0u32);
         let mut moved: u32 = 0;
         for i in 0..total {
-            let id: BytesN<32> = env
-                .storage()
-                .instance()
-                .get(&DataKey::EventOrder(i))
-                .unwrap();
+            let id: BytesN<32> = env.storage().instance().get(&DataKey::EventOrder(i)).unwrap();
             // skip if already archived
-            if env
-                .storage()
-                .instance()
-                .has(&DataKey::EventArchivedFlag(id.clone()))
-            {
+            if env.storage().instance().has(&DataKey::EventArchivedFlag(id.clone())) {
                 continue;
             }
-            let evt: Event = env
-                .storage()
-                .instance()
-                .get(&DataKey::EventData(id.clone()))
-                .unwrap();
+            let evt: Event = env.storage().instance().get(&DataKey::EventData(id.clone())).unwrap();
             if evt.timestamp < cutoff_timestamp {
                 // copy into archived storage
                 env.storage()
@@ -1149,11 +1091,8 @@ impl AuditLedger {
                 moved += 1;
             }
         }
-        env.storage()
-            .instance()
-            .set(&DataKey::ArchivedTotalEvents, &archived);
-        env.events()
-            .publish((Symbol::new(&env, "events_archived"),), (moved,));
+        env.storage().instance().set(&DataKey::ArchivedTotalEvents, &archived);
+        env.events().publish((Symbol::new(&env, "events_archived"),), (moved,));
         moved
     }
 
@@ -1178,11 +1117,7 @@ impl AuditLedger {
                 .instance()
                 .get::<_, BytesN<32>>(&DataKey::ArchivedEventOrder(i))
             {
-                if env
-                    .storage()
-                    .instance()
-                    .has(&DataKey::ArchivedEventData(id))
-                {
+                if env.storage().instance().has(&DataKey::ArchivedEventData(id)) {
                     cnt += 1;
                 }
             }
@@ -1223,12 +1158,7 @@ impl AuditLedger {
     }
 
     /// Permanently purge archived events older than cutoff. `confirm` must be true.
-    pub fn purge_archived_events(
-        env: Env,
-        caller: Address,
-        cutoff_timestamp: u64,
-        confirm: bool,
-    ) -> u32 {
+    pub fn purge_archived_events(env: Env, caller: Address, cutoff_timestamp: u64, confirm: bool) -> u32 {
         caller.require_auth();
         Self::require_owner_or_multisig(&env, &caller);
         if !confirm {
@@ -1252,9 +1182,7 @@ impl AuditLedger {
                     .get::<_, Event>(&DataKey::ArchivedEventData(id.clone()))
                 {
                     if evt.timestamp < cutoff_timestamp {
-                        env.storage()
-                            .instance()
-                            .remove(&DataKey::ArchivedEventData(id.clone()));
+                        env.storage().instance().remove(&DataKey::ArchivedEventData(id.clone()));
                         env.storage()
                             .instance()
                             .remove(&DataKey::ArchivedEventHeaderKey(id.clone()));
@@ -1262,9 +1190,7 @@ impl AuditLedger {
                             .instance()
                             .remove(&DataKey::ArchivedEventMetadata(id.clone()));
                         // remove archived order mapping
-                        env.storage()
-                            .instance()
-                            .remove(&DataKey::ArchivedEventOrder(i));
+                        env.storage().instance().remove(&DataKey::ArchivedEventOrder(i));
                         removed += 1;
                     }
                 }
@@ -1299,8 +1225,7 @@ impl AuditLedger {
         {
             // Perform upgrade via deployer API (Soroban deployer helper).
             // This is a best-effort call and may vary by runtime.
-            env.deployer()
-                .update_current_contract_wasm(new_wasm_hash.clone());
+            env.deployer().update_current_contract_wasm(new_wasm_hash.clone());
         }
     }
 
@@ -1356,12 +1281,7 @@ impl AuditLedger {
         results
     }
 
-    pub fn list_events_by_type(
-        env: Env,
-        event_type: Symbol,
-        offset: u32,
-        limit: u32,
-    ) -> Vec<Event> {
+    pub fn list_events_by_type(env: Env, event_type: Symbol, offset: u32, limit: u32) -> Vec<Event> {
         if limit == 0 {
             return Vec::new(&env);
         }
@@ -1382,13 +1302,7 @@ impl AuditLedger {
         results
     }
 
-    pub fn get_events_by_time_range(
-        env: Env,
-        start_time: u64,
-        end_time: u64,
-        offset: u32,
-        limit: u32,
-    ) -> Vec<Event> {
+    pub fn get_events_by_time_range(env: Env, start_time: u64, end_time: u64, offset: u32, limit: u32) -> Vec<Event> {
         if limit == 0 {
             return Vec::new(&env);
         }
@@ -1460,11 +1374,7 @@ impl AuditLedger {
             panic_with_error!(&env, ContractError::EventDoesNotExist);
         }
 
-        let current_id: BytesN<32> = env
-            .storage()
-            .instance()
-            .get(&DataKey::EventOrder(index))
-            .unwrap();
+        let current_id: BytesN<32> = env.storage().instance().get(&DataKey::EventOrder(index)).unwrap();
         let current_event: Event = env
             .storage()
             .instance()
@@ -1495,7 +1405,7 @@ impl AuditLedger {
             .get(&DataKey::EventVersions(index))
             .unwrap_or_else(|| Vec::new(&env));
 
-        if versions.len() == 0 {
+        if versions.is_empty() {
             let original_version = EventVersion {
                 version: 0,
                 data: current_event.clone(),
@@ -1508,21 +1418,12 @@ impl AuditLedger {
         let prev_hash: BytesN<32> = if index == 0 {
             BytesN::from_array(&env, &[0u8; 32])
         } else {
-            let prev_id: BytesN<32> = env
-                .storage()
-                .instance()
-                .get(&DataKey::EventOrder(index - 1))
-                .unwrap();
-            let prev_evt: Event = env
-                .storage()
-                .instance()
-                .get(&DataKey::EventData(prev_id))
-                .unwrap();
+            let prev_id: BytesN<32> = env.storage().instance().get(&DataKey::EventOrder(index - 1)).unwrap();
+            let prev_evt: Event = env.storage().instance().get(&DataKey::EventData(prev_id)).unwrap();
             prev_evt.event_hash.clone()
         };
 
-        let updated_event_hash =
-            Self::compute_event_hash(&env, &new_id, &prev_hash, index, current_event.timestamp);
+        let updated_event_hash = Self::compute_event_hash(&env, &new_id, &prev_hash, index, current_event.timestamp);
 
         let updated_event = Event {
             index,
@@ -1544,16 +1445,12 @@ impl AuditLedger {
             updated_by: caller.clone(),
         };
         versions.push_back(update_version);
-        env.storage()
-            .instance()
-            .set(&DataKey::EventVersions(index), &versions);
+        env.storage().instance().set(&DataKey::EventVersions(index), &versions);
 
         env.storage()
             .instance()
             .set(&DataKey::EventData(new_id.clone()), &updated_event);
-        env.storage()
-            .instance()
-            .set(&DataKey::EventOrder(index), &new_id);
+        env.storage().instance().set(&DataKey::EventOrder(index), &new_id);
         env.storage().instance().set(
             &DataKey::EventHeaderKey(new_id.clone()),
             &EventHeader {
@@ -1572,24 +1469,15 @@ impl AuditLedger {
 
         let mut next_prev_hash = updated_event_hash;
         for i in index + 1..total {
-            let event_id: BytesN<32> = env
-                .storage()
-                .instance()
-                .get(&DataKey::EventOrder(i))
-                .unwrap();
+            let event_id: BytesN<32> = env.storage().instance().get(&DataKey::EventOrder(i)).unwrap();
             let mut later_event: Event = env
                 .storage()
                 .instance()
                 .get(&DataKey::EventData(event_id.clone()))
                 .unwrap();
             later_event.prev_hash = next_prev_hash.clone();
-            later_event.event_hash = Self::compute_event_hash(
-                &env,
-                &event_id,
-                &later_event.prev_hash,
-                i,
-                later_event.timestamp,
-            );
+            later_event.event_hash =
+                Self::compute_event_hash(&env, &event_id, &later_event.prev_hash, i, later_event.timestamp);
             env.storage()
                 .instance()
                 .set(&DataKey::EventData(event_id.clone()), &later_event);
@@ -1601,13 +1489,7 @@ impl AuditLedger {
 
         env.events().publish(
             (Symbol::new(&env, "event_updated"),),
-            (
-                index,
-                current_id,
-                new_id.clone(),
-                caller,
-                env.ledger().timestamp(),
-            ),
+            (index, current_id, new_id.clone(), caller, env.ledger().timestamp()),
         );
 
         new_id
@@ -1627,16 +1509,8 @@ impl AuditLedger {
             return versions;
         }
 
-        let event_id: BytesN<32> = env
-            .storage()
-            .instance()
-            .get(&DataKey::EventOrder(index))
-            .unwrap();
-        let event: Event = env
-            .storage()
-            .instance()
-            .get(&DataKey::EventData(event_id))
-            .unwrap();
+        let event_id: BytesN<32> = env.storage().instance().get(&DataKey::EventOrder(index)).unwrap();
+        let event: Event = env.storage().instance().get(&DataKey::EventData(event_id)).unwrap();
 
         let mut history = Vec::new(&env);
         let ts = event.timestamp;
@@ -1685,6 +1559,10 @@ impl AuditLedger {
         cfg.global_max_logs = new_max;
         env.storage().instance().set(&DataKey::Config, &cfg);
         env.storage().instance().set(&DataKey::GlobalMaxLogs, &new_max);
+        if let Some(mut rs) = env.storage().instance().get::<_, RuntimeState>(&DataKey::RuntimeState) {
+            rs.global_max_logs = new_max;
+            env.storage().instance().set(&DataKey::RuntimeState, &rs);
+        }
         env.events().publish(
             (Symbol::new(&env, "governance"), Symbol::new(&env, "set_global_max")),
             (caller, old_max, new_max),
@@ -1713,17 +1591,15 @@ impl AuditLedger {
             .instance()
             .remove(&DataKey::EventCapRemoved(event_type.clone()));
 
-        if !Self::effective_low_cost_mode(&env) {
-            if !env
+        if !Self::effective_low_cost_mode(&env)
+            && !env
                 .storage()
                 .instance()
-                .has(&DataKey::EventTypeIndices(event_type.clone()))
-            {
-                env.storage().instance().set(
-                    &DataKey::EventTypeIndices(event_type.clone()),
-                    &Bytes::new(&env),
-                );
-            }
+                .has(&DataKey::EventCapConfig(event_type.clone()))
+        {
+            env.storage()
+                .instance()
+                .set(&DataKey::EventTypeIndices(event_type.clone()), &Bytes::new(&env));
         }
     }
 
@@ -1765,9 +1641,7 @@ impl AuditLedger {
 
     pub fn has_cap(env: Env, event_type: Symbol) -> bool {
         Self::require_initialized(&env);
-        env.storage()
-            .instance()
-            .has(&DataKey::EventCapConfig(event_type))
+        env.storage().instance().has(&DataKey::EventCapConfig(event_type))
     }
 
     pub fn transfer_ownership(env: Env, caller: Address, new_owner: Address) {
@@ -1785,6 +1659,15 @@ impl AuditLedger {
             panic_with_error!(&env, ContractError::SameOwner);
         }
         env.storage().instance().set(&DataKey::Owner, &new_owner);
+        // Also update the multi-sig Owners list (replace old owner with new)
+        let mut owners = Self::get_owners(&env);
+        for i in 0..owners.len() {
+            if owners.get(i).unwrap() == current_owner {
+                owners.set(i, new_owner.clone());
+                break;
+            }
+        }
+        env.storage().instance().set(&DataKey::Owners, &owners);
         env.events().publish(
             (Symbol::new(&env, "governance"), Symbol::new(&env, "transfer_ownership")),
             (caller, current_owner, new_owner),
@@ -1803,9 +1686,7 @@ impl AuditLedger {
             panic_with_error!(&env, ContractError::ContractPaused);
         }
         Self::require_owner_or_multisig(&env, &caller);
-        env.storage()
-            .instance()
-            .set(&DataKey::GlobalMetadataMaxSize, &max_size);
+        env.storage().instance().set(&DataKey::GlobalMetadataMaxSize, &max_size);
         if let Some(mut rs) = env.storage().instance().get::<_, RuntimeState>(&DataKey::RuntimeState) {
             rs.global_metadata_max_size = max_size;
             env.storage().instance().set(&DataKey::RuntimeState, &rs);
@@ -1814,12 +1695,7 @@ impl AuditLedger {
 
     /// Set a per-event-type metadata size limit (owner-only).
     /// Overrides the global limit for the given event type.
-    pub fn set_event_metadata_max_size(
-        env: Env,
-        caller: Address,
-        event_type: Symbol,
-        max_size: u32,
-    ) {
+    pub fn set_event_metadata_max_size(env: Env, caller: Address, event_type: Symbol, max_size: u32) {
         Self::require_initialized(&env);
         caller.require_auth();
         if let Some(true) = env.storage().instance().get::<_, bool>(&DataKey::Paused) {
@@ -1846,11 +1722,7 @@ impl AuditLedger {
             panic_with_error!(&env, ContractError::ContractPaused);
         }
         Self::require_owner_or_multisig(&env, &caller);
-        let old_ttl: u32 = env
-            .storage()
-            .instance()
-            .get(&DataKey::EventTtl)
-            .unwrap_or(0);
+        let old_ttl: u32 = env.storage().instance().get(&DataKey::EventTtl).unwrap_or(0);
         env.storage().instance().set(&DataKey::EventTtl, &ttl_ledgers);
         env.events().publish(
             (Symbol::new(&env, "governance"), Symbol::new(&env, "set_event_ttl")),
@@ -1869,23 +1741,16 @@ impl AuditLedger {
     /// HTTP POST requests when matching events are emitted.
     ///
     /// `url` — HTTP(S) endpoint; `secret` — HMAC signing secret (opaque bytes).
-    pub fn register_webhook(
-        env: Env,
-        caller: Address,
-        event_type: Symbol,
-        url: Bytes,
-        secret: Bytes,
-    ) {
+    pub fn register_webhook(env: Env, caller: Address, event_type: Symbol, url: Bytes, secret: Bytes) {
         Self::require_initialized(&env);
         caller.require_auth();
         Self::require_owner(&env, &caller);
-        let entry = WebhookEntry { url: url.clone(), secret };
+        let entry = WebhookEntry {
+            url: url.clone(),
+            secret,
+        };
         let key = DataKey::WebhookRegistrations(event_type.clone());
-        let mut list: Vec<WebhookEntry> = env
-            .storage()
-            .instance()
-            .get(&key)
-            .unwrap_or_else(|| Vec::new(&env));
+        let mut list: Vec<WebhookEntry> = env.storage().instance().get(&key).unwrap_or_else(|| Vec::new(&env));
         list.push_back(entry);
         env.storage().instance().set(&key, &list);
         env.events().publish(
@@ -1897,21 +1762,12 @@ impl AuditLedger {
     /// Unregister a webhook for a specific event type (#25).
     ///
     /// Owner-only. Removes the first entry whose `url` matches `url`.
-    pub fn unregister_webhook(
-        env: Env,
-        caller: Address,
-        event_type: Symbol,
-        url: Bytes,
-    ) {
+    pub fn unregister_webhook(env: Env, caller: Address, event_type: Symbol, url: Bytes) {
         Self::require_initialized(&env);
         caller.require_auth();
         Self::require_owner(&env, &caller);
         let key = DataKey::WebhookRegistrations(event_type.clone());
-        let list: Vec<WebhookEntry> = env
-            .storage()
-            .instance()
-            .get(&key)
-            .unwrap_or_else(|| Vec::new(&env));
+        let list: Vec<WebhookEntry> = env.storage().instance().get(&key).unwrap_or_else(|| Vec::new(&env));
         let mut new_list: Vec<WebhookEntry> = Vec::new(&env);
         let mut removed = false;
         for entry in list.iter() {
@@ -1947,10 +1803,13 @@ impl AuditLedger {
         Self::require_initialized(&env);
         caller.require_auth();
         Self::require_owner_or_multisig(&env, &caller);
-        let already_paused = env.storage().instance().get::<_, bool>(&DataKey::Paused).unwrap_or(false);
+        let _already_paused = env
+            .storage()
+            .instance()
+            .get::<_, bool>(&DataKey::Paused)
+            .unwrap_or(false);
         env.storage().instance().set(&DataKey::Paused, &true);
-        env.events()
-            .publish((Symbol::new(&env, "contract_paused"),), (caller,));
+        env.events().publish((Symbol::new(&env, "contract_paused"),), (caller,));
     }
 
     /// Unpause write operations. Owner-only.
@@ -1997,10 +1856,8 @@ impl AuditLedger {
         env.storage()
             .instance()
             .set(&DataKey::SubmitterBlocklist(submitter.clone()), &true);
-        env.events().publish(
-            (Symbol::new(&env, "submitter_blocked"),),
-            (submitter, caller),
-        );
+        env.events()
+            .publish((Symbol::new(&env, "submitter_blocked"),), (submitter, caller));
     }
 
     /// Unblock a submitter (owner-only). Issue #141: governance.
@@ -2011,10 +1868,8 @@ impl AuditLedger {
         env.storage()
             .instance()
             .remove(&DataKey::SubmitterBlocklist(submitter.clone()));
-        env.events().publish(
-            (Symbol::new(&env, "submitter_unblocked"),),
-            (submitter, caller),
-        );
+        env.events()
+            .publish((Symbol::new(&env, "submitter_unblocked"),), (submitter, caller));
     }
 
     /// Enable allowlist mode (owner-only). Issue #141: governance.
@@ -2037,9 +1892,7 @@ impl AuditLedger {
         Self::require_initialized(&env);
         caller.require_auth();
         Self::require_owner_or_multisig(&env, &caller);
-        env.storage()
-            .instance()
-            .set(&DataKey::AllowlistMode, &false);
+        env.storage().instance().set(&DataKey::AllowlistMode, &false);
         env.events()
             .publish((Symbol::new(&env, "allowlist_disabled"),), (caller,));
     }
@@ -2053,10 +1906,8 @@ impl AuditLedger {
         env.storage()
             .instance()
             .set(&DataKey::SubmitterAllowlist(submitter.clone()), &true);
-        env.events().publish(
-            (Symbol::new(&env, "submitter_allowed"),),
-            (submitter, caller),
-        );
+        env.events()
+            .publish((Symbol::new(&env, "submitter_allowed"),), (submitter, caller));
     }
 
     /// Remove a submitter from the allowlist (owner-only). Issue #141: governance.
@@ -2094,12 +1945,8 @@ impl AuditLedger {
         Self::require_initialized(&env);
         caller.require_auth();
         Self::require_owner_or_multisig(&env, &caller);
-        env.storage()
-            .instance()
-            .set(&DataKey::EventEmissionConfig, &mode);
-        env.storage()
-            .instance()
-            .set(&DataKey::EventEmissionVersion, &2u32);
+        env.storage().instance().set(&DataKey::EventEmissionConfig, &mode);
+        env.storage().instance().set(&DataKey::EventEmissionVersion, &2u32);
         if let Some(mut rs) = env.storage().instance().get::<_, RuntimeState>(&DataKey::RuntimeState) {
             rs.emission_mode = mode;
             env.storage().instance().set(&DataKey::RuntimeState, &rs);
@@ -2122,9 +1969,7 @@ impl AuditLedger {
         Self::require_initialized(&env);
         caller.require_auth();
         Self::require_owner_or_multisig(&env, &caller);
-        env.storage()
-            .instance()
-            .set(&DataKey::LowCostMode, &enabled);
+        env.storage().instance().set(&DataKey::LowCostMode, &enabled);
         if let Some(mut rs) = env.storage().instance().get::<_, RuntimeState>(&DataKey::RuntimeState) {
             rs.low_cost_mode = enabled;
             env.storage().instance().set(&DataKey::RuntimeState, &rs);
@@ -2137,10 +1982,7 @@ impl AuditLedger {
         if let Some(rs) = env.storage().instance().get::<_, RuntimeState>(&DataKey::RuntimeState) {
             return rs.low_cost_mode;
         }
-        env.storage()
-            .instance()
-            .get(&DataKey::LowCostMode)
-            .unwrap_or(false)
+        env.storage().instance().get(&DataKey::LowCostMode).unwrap_or(false)
     }
 
     // ── issue #62: rate limiting ──────────────────────────────────────────────
@@ -2148,12 +1990,7 @@ impl AuditLedger {
     /// Set a per-submitter rate limit (owner-only).
     /// `max_per_timestamp` = max events allowed per ledger timestamp.
     /// 0 = completely block that submitter.
-    pub fn set_submitter_rate_limit(
-        env: Env,
-        caller: Address,
-        submitter: Address,
-        max_per_timestamp: u32,
-    ) {
+    pub fn set_submitter_rate_limit(env: Env, caller: Address, submitter: Address, max_per_timestamp: u32) {
         Self::require_initialized(&env);
         caller.require_auth();
         Self::require_owner_or_multisig(&env, &caller);
@@ -2178,21 +2015,11 @@ impl AuditLedger {
         for i in 0..stale_types.len() {
             let et = stale_types.get(i).unwrap();
             // Only compact if the cap is no longer set (i.e., was removed).
-            if !env
-                .storage()
-                .instance()
-                .has(&DataKey::EventCapConfig(et.clone()))
+            if !env.storage().instance().has(&DataKey::EventCapConfig(et.clone()))
+                && env.storage().instance().has(&DataKey::EventTypeIndices(et.clone()))
             {
-                if env
-                    .storage()
-                    .instance()
-                    .has(&DataKey::EventTypeIndices(et.clone()))
-                {
-                    env.storage()
-                        .instance()
-                        .remove(&DataKey::EventTypeIndices(et.clone()));
-                    removed += 1;
-                }
+                env.storage().instance().remove(&DataKey::EventTypeIndices(et.clone()));
+                removed += 1;
             }
         }
 
@@ -2202,10 +2029,7 @@ impl AuditLedger {
     }
 
     fn effective_low_cost_mode(env: &Env) -> bool {
-        env.storage()
-            .instance()
-            .get(&DataKey::LowCostMode)
-            .unwrap_or(false)
+        env.storage().instance().get(&DataKey::LowCostMode).unwrap_or(false)
     }
 
     fn effective_metadata_max_size(env: &Env, event_type: &Symbol) -> u32 {
@@ -2218,11 +2042,7 @@ impl AuditLedger {
             return v;
         }
         // global fallback
-        if let Some(v) = env
-            .storage()
-            .instance()
-            .get::<_, u32>(&DataKey::GlobalMetadataMaxSize)
-        {
+        if let Some(v) = env.storage().instance().get::<_, u32>(&DataKey::GlobalMetadataMaxSize) {
             return v;
         }
         DEFAULT_MAX_METADATA_SIZE
@@ -2265,10 +2085,9 @@ impl AuditLedger {
             sub_event_type,
             false,
         );
-        env.storage().instance().set(
-            &DataKey::EventSignature(event_id.clone()),
-            &signature_payload,
-        );
+        env.storage()
+            .instance()
+            .set(&DataKey::EventSignature(event_id.clone()), &signature_payload);
         event_id
     }
 
@@ -2276,37 +2095,23 @@ impl AuditLedger {
     /// event. Returns `None` if no signature was attached during logging.
     pub fn get_event_signature(env: Env, event_id: BytesN<32>) -> Option<Bytes> {
         Self::require_initialized(&env);
-        env.storage()
-            .instance()
-            .get(&DataKey::EventSignature(event_id))
+        env.storage().instance().get(&DataKey::EventSignature(event_id))
     }
 
     /// Look up an event by its content (event_type, submitter, metadata).
     ///
     /// Returns `Some(Event)` if an event with that exact content was previously
     /// stored (and deduplication recorded its position), `None` otherwise.
-    pub fn find_event_by_content(
-        env: Env,
-        event_type: Symbol,
-        submitter: Address,
-        metadata: Bytes,
-    ) -> Option<Event> {
+    pub fn find_event_by_content(env: Env, event_type: Symbol, submitter: Address, metadata: Bytes) -> Option<Event> {
         Self::require_initialized(&env);
-        let content_hash =
-            Self::compute_content_hash(&env, &event_type, &submitter, &metadata);
+        let content_hash = Self::compute_content_hash(&env, &event_type, &submitter, &metadata);
         if let Some(index) = env
             .storage()
             .instance()
             .get::<_, u32>(&DataKey::EventContentHash(content_hash))
         {
-            let id: BytesN<32> = env
-                .storage()
-                .instance()
-                .get(&DataKey::EventOrder(index))
-                .unwrap();
-            env.storage()
-                .instance()
-                .get(&DataKey::EventData(id))
+            let id: BytesN<32> = env.storage().instance().get(&DataKey::EventOrder(index)).unwrap();
+            env.storage().instance().get(&DataKey::EventData(id))
         } else {
             None
         }
@@ -2355,10 +2160,7 @@ impl AuditLedger {
     }
 
     fn current_contract_version(env: &Env) -> u32 {
-        env.storage()
-            .instance()
-            .get(&DataKey::ContractVersion)
-            .unwrap_or(1u32)
+        env.storage().instance().get(&DataKey::ContractVersion).unwrap_or(1u32)
     }
 
     fn validate_event_type(_env: &Env, _event_type: &Symbol) {
@@ -2368,9 +2170,7 @@ impl AuditLedger {
     }
 
     fn require_initialized(env: &Env) {
-        if !env.storage().instance().has(&DataKey::Owner)
-            || !env.storage().instance().has(&DataKey::Config)
-        {
+        if !env.storage().instance().has(&DataKey::Owner) || !env.storage().instance().has(&DataKey::Config) {
             panic_with_error!(env, ContractError::ContractNotInitialized);
         }
     }
@@ -2425,14 +2225,13 @@ impl AuditLedger {
         }
         owners.push_back(new_owner.clone());
         env.storage().instance().set(&DataKey::Owners, &owners);
-        env.events()
-            .publish((Symbol::new(&env, "owner_added"),), (new_owner,));
+        env.events().publish((Symbol::new(&env, "owner_added"),), (new_owner,));
     }
 
     pub fn remove_owner(env: Env, caller: Address, owner_to_remove: Address) {
         caller.require_auth();
         Self::require_owner_or_multisig(&env, &caller);
-        let mut owners = Self::get_owners(&env);
+        let owners = Self::get_owners(&env);
         let mut found = false;
         let mut new_vec: Vec<Address> = Vec::new(&env);
         for i in 0..owners.len() {
@@ -2448,7 +2247,7 @@ impl AuditLedger {
         }
         // ensure required_signatures is not greater than owners.len()
         let req = Self::get_required_signatures(&env);
-        if req as u32 > new_vec.len() {
+        if req > new_vec.len() {
             // reduce required signatures to new_vec.len()
             env.storage()
                 .instance()
@@ -2466,28 +2265,17 @@ impl AuditLedger {
         if required == 0 || required > owners.len() {
             return; // invalid; ignore
         }
-        env.storage()
-            .instance()
-            .set(&DataKey::RequiredSignatures, &required);
+        env.storage().instance().set(&DataKey::RequiredSignatures, &required);
         env.events()
             .publish((Symbol::new(&env, "required_signatures_set"),), (required,));
     }
 
-    pub fn submit_proposal(
-        env: Env,
-        proposer: Address,
-        action: ProposalAction,
-        ttl_seconds: u64,
-    ) -> u32 {
+    pub fn submit_proposal(env: Env, proposer: Address, action: ProposalAction, ttl_seconds: u64) -> u32 {
         proposer.require_auth();
         if !Self::is_addr_owner(&env, &proposer) {
             panic_with_error!(&env, ContractError::CallerNotOwner);
         }
-        let mut count: u32 = env
-            .storage()
-            .instance()
-            .get(&DataKey::ProposalCount)
-            .unwrap_or(0u32);
+        let count: u32 = env.storage().instance().get(&DataKey::ProposalCount).unwrap_or(0u32);
         let id = count;
         let now = env.ledger().timestamp();
         let mut approvals: Vec<Address> = Vec::new(&env);
@@ -2501,11 +2289,8 @@ impl AuditLedger {
             executed: false,
         };
         env.storage().instance().set(&DataKey::Proposal(id), &prop);
-        env.storage()
-            .instance()
-            .set(&DataKey::ProposalCount, &(count + 1));
-        env.events()
-            .publish((Symbol::new(&env, "proposal_submitted"),), (id,));
+        env.storage().instance().set(&DataKey::ProposalCount, &(count + 1));
+        env.events().publish((Symbol::new(&env, "proposal_submitted"),), (id,));
         id
     }
 
@@ -2533,13 +2318,9 @@ impl AuditLedger {
             }
         }
         prop.approvals.push_back(approver.clone());
-        env.storage()
-            .instance()
-            .set(&DataKey::Proposal(proposal_id), &prop);
-        env.events().publish(
-            (Symbol::new(&env, "proposal_approved"),),
-            (proposal_id, approver),
-        );
+        env.storage().instance().set(&DataKey::Proposal(proposal_id), &prop);
+        env.events()
+            .publish((Symbol::new(&env, "proposal_approved"),), (proposal_id, approver));
     }
 
     pub fn execute_proposal(env: Env, executor: Address, proposal_id: u32) {
@@ -2582,7 +2363,7 @@ impl AuditLedger {
                 }
             }
             ProposalAction::RemoveOwner(ref addr) => {
-                let mut owners = Self::get_owners(&env);
+                let owners = Self::get_owners(&env);
                 let mut new_vec: Vec<Address> = Vec::new(&env);
                 for i in 0..owners.len() {
                     let o = owners.get(i).unwrap();
@@ -2593,9 +2374,7 @@ impl AuditLedger {
                 env.storage().instance().set(&DataKey::Owners, &new_vec);
             }
             ProposalAction::SetRequiredSignatures(req) => {
-                env.storage()
-                    .instance()
-                    .set(&DataKey::RequiredSignatures, &req);
+                env.storage().instance().set(&DataKey::RequiredSignatures, &req);
             }
             ProposalAction::SetGlobalMaxLogs(v) => {
                 env.storage().instance().set(&DataKey::GlobalMaxLogs, &v);
@@ -2608,13 +2387,9 @@ impl AuditLedger {
             }
         }
         prop.executed = true;
-        env.storage()
-            .instance()
-            .set(&DataKey::Proposal(proposal_id), &prop);
-        env.events().publish(
-            (Symbol::new(&env, "proposal_executed"),),
-            (proposal_id, executor),
-        );
+        env.storage().instance().set(&DataKey::Proposal(proposal_id), &prop);
+        env.events()
+            .publish((Symbol::new(&env, "proposal_executed"),), (proposal_id, executor));
     }
 
     fn event_type_count(env: &Env, event_type: Symbol) -> u32 {
@@ -2672,12 +2447,7 @@ impl AuditLedger {
 
     /// Compute a content hash for deduplication: sha256(event_type_payload_le || submitter_strkey || metadata).
     /// This hash is independent of timestamp and index, making it stable across retries.
-    fn compute_content_hash(
-        env: &Env,
-        event_type: &Symbol,
-        submitter: &Address,
-        metadata: &Bytes,
-    ) -> BytesN<32> {
+    fn compute_content_hash(env: &Env, event_type: &Symbol, submitter: &Address, metadata: &Bytes) -> BytesN<32> {
         let mut preimage = Bytes::new(env);
         preimage.append(&Self::u64_to_bytes(env, event_type.to_val().get_payload()));
         preimage.append(&submitter.to_string().to_bytes());
@@ -2691,11 +2461,10 @@ impl AuditLedger {
         let mut expected_prev: BytesN<32> = if from == 0 {
             BytesN::from_array(env, &[0u8; 32])
         } else {
-            let prev_id: BytesN<32> =
-                match env.storage().instance().get(&DataKey::EventOrder(from - 1)) {
-                    Some(v) => v,
-                    None => return false,
-                };
+            let prev_id: BytesN<32> = match env.storage().instance().get(&DataKey::EventOrder(from - 1)) {
+                Some(v) => v,
+                None => return false,
+            };
             let prev_evt: Event = match env.storage().instance().get(&DataKey::EventData(prev_id)) {
                 Some(v) => v,
                 None => return false,
@@ -2707,11 +2476,7 @@ impl AuditLedger {
                 Some(v) => v,
                 None => return false,
             };
-            let evt: Event = match env
-                .storage()
-                .instance()
-                .get(&DataKey::EventData(id.clone()))
-            {
+            let evt: Event = match env.storage().instance().get(&DataKey::EventData(id.clone())) {
                 Some(v) => v,
                 None => return false,
             };
@@ -2736,26 +2501,18 @@ impl AuditLedger {
             .map(|c| c.total_events)
             .unwrap_or(0);
         let now = env.ledger().timestamp();
-        let mut events_by_type: Vec<(Symbol, u32)> = Vec::new(&env);
-        let mut top_submitters: Vec<(Address, u32)> = Vec::new(&env);
+        let mut events_by_type: Vec<(Symbol, u32)> = Vec::new(env);
+        let mut top_submitters: Vec<(Address, u32)> = Vec::new(env);
         let mut events_last_hour: u32 = 0;
         let mut events_last_day: u32 = 0;
         let mut events_last_week: u32 = 0;
 
         for i in 0..total {
-            let event_id: BytesN<32> = env
-                .storage()
-                .instance()
-                .get(&DataKey::EventOrder(i))
-                .unwrap();
-            let evt: Event = env
-                .storage()
-                .instance()
-                .get(&DataKey::EventData(event_id))
-                .unwrap();
+            let event_id: BytesN<32> = env.storage().instance().get(&DataKey::EventOrder(i)).unwrap();
+            let evt: Event = env.storage().instance().get(&DataKey::EventData(event_id)).unwrap();
 
-            Self::increment_type_count(&env, &mut events_by_type, evt.event_type.clone());
-            Self::increment_submitter_count(&env, &mut top_submitters, evt.submitter.clone());
+            Self::increment_type_count(env, &mut events_by_type, evt.event_type.clone());
+            Self::increment_submitter_count(env, &mut top_submitters, evt.submitter.clone());
 
             if let Some(elapsed) = now.checked_sub(evt.timestamp) {
                 if elapsed <= 3600 {
@@ -2780,7 +2537,7 @@ impl AuditLedger {
         }
     }
 
-    fn increment_type_count(env: &Env, counts: &mut Vec<(Symbol, u32)>, event_type: Symbol) {
+    fn increment_type_count(_env: &Env, counts: &mut Vec<(Symbol, u32)>, event_type: Symbol) {
         for idx in 0..counts.len() {
             let pair: (Symbol, u32) = counts.get(idx).unwrap();
             if pair.0 == event_type {
@@ -2791,7 +2548,7 @@ impl AuditLedger {
         counts.push_back((event_type, 1u32));
     }
 
-    fn increment_submitter_count(env: &Env, counts: &mut Vec<(Address, u32)>, submitter: Address) {
+    fn increment_submitter_count(_env: &Env, counts: &mut Vec<(Address, u32)>, submitter: Address) {
         for idx in 0..counts.len() {
             let pair: (Address, u32) = counts.get(idx).unwrap();
             if pair.0 == submitter {
@@ -2802,11 +2559,7 @@ impl AuditLedger {
         counts.push_back((submitter, 1u32));
     }
 
-    fn increment_address_count(
-        env: &Env,
-        counts: &mut Vec<(Address, u32)>,
-        submitter: Address,
-    ) -> u32 {
+    fn increment_address_count(_env: &Env, counts: &mut Vec<(Address, u32)>, submitter: Address) -> u32 {
         for idx in 0..counts.len() {
             let pair: (Address, u32) = counts.get(idx).unwrap();
             if pair.0 == submitter {
@@ -2819,11 +2572,7 @@ impl AuditLedger {
         1
     }
 
-    fn increment_symbol_count(
-        env: &Env,
-        counts: &mut Vec<(Symbol, u32)>,
-        event_type: Symbol,
-    ) -> u32 {
+    fn increment_symbol_count(_env: &Env, counts: &mut Vec<(Symbol, u32)>, event_type: Symbol) -> u32 {
         for idx in 0..counts.len() {
             let pair: (Symbol, u32) = counts.get(idx).unwrap();
             if pair.0 == event_type {

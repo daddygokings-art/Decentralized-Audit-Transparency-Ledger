@@ -102,8 +102,10 @@ fn boundary_global_max_logs_at_u32_max() {
     let client = AuditLedgerClient::new(&env, &contract_id);
 
     env.mock_all_auths();
+    let mut owners = Vec::new(&env);
+    owners.push_back(owner.clone());
     // Setting global_max_logs to u32::MAX should work
-    client.initialize(&owner, &u32::MAX);
+    client.initialize(&owners, &u32::MAX);
 
     // Verify it was set
     // (cannot directly read, but initialization succeeded)
@@ -138,7 +140,10 @@ fn boundary_total_events_near_overflow() {
         client.log_event(
             &submitter,
             &symbol_short!("test"),
-            &Bytes::from_slice(&env, &i.to_le_bytes()), &None, &None, &false,
+            &Bytes::from_slice(&env, &i.to_le_bytes()),
+            &None,
+            &None,
+            &false,
         );
     }
 
@@ -174,7 +179,10 @@ fn boundary_log_event_near_capacity() {
         client.log_event(
             &submitter,
             &symbol_short!("test"),
-            &Bytes::from_slice(&env, &i.to_le_bytes()), &None, &None, &false,
+            &Bytes::from_slice(&env, &i.to_le_bytes()),
+            &None,
+            &None,
+            &false,
         );
     }
 
@@ -184,7 +192,10 @@ fn boundary_log_event_near_capacity() {
     let result = client.try_log_event(
         &submitter,
         &symbol_short!("test"),
-        &Bytes::from_slice(&env, b"overflow"), &None, &None, &false,
+        &Bytes::from_slice(&env, b"overflow"),
+        &None,
+        &None,
+        &false,
     );
     assert!(result.is_err());
 }
@@ -203,14 +214,24 @@ fn boundary_event_type_near_capacity() {
         client.log_event(
             &submitter,
             &payment,
-            &Bytes::from_slice(&env, &i.to_le_bytes()), &None, &None, &false,
+            &Bytes::from_slice(&env, &i.to_le_bytes()),
+            &None,
+            &None,
+            &false,
         );
     }
 
     assert_eq!(client.event_count(&payment), 3);
 
     // Next event of this type should fail
-    let result = client.try_log_event(&submitter, &payment, &Bytes::from_slice(&env, b"overflow"));
+    let result = client.try_log_event(
+        &submitter,
+        &payment,
+        &Bytes::from_slice(&env, b"overflow"),
+        &None,
+        &None,
+        &false,
+    );
     assert!(result.is_err());
 }
 
@@ -246,12 +267,18 @@ fn boundary_multiple_types_with_high_counts() {
         client.log_event(
             &submitter,
             &type_a,
-            &Bytes::from_slice(&env, &i.to_le_bytes()), &None, &None, &false,
+            &Bytes::from_slice(&env, &i.to_le_bytes()),
+            &None,
+            &None,
+            &false,
         );
         client.log_event(
             &submitter,
             &type_b,
-            &Bytes::from_slice(&env, &i.to_le_bytes()), &None, &None, &false,
+            &Bytes::from_slice(&env, &i.to_le_bytes()),
+            &None,
+            &None,
+            &false,
         );
     }
 
@@ -299,16 +326,25 @@ fn boundary_event_order_index_increment() {
         &submitter,
         &symbol_short!("test"),
         &Bytes::from_slice(&env, b"0"),
+        &None,
+        &None,
+        &false,
     );
     let id1 = client.log_event(
         &submitter,
         &symbol_short!("test"),
         &Bytes::from_slice(&env, b"1"),
+        &None,
+        &None,
+        &false,
     );
     let id2 = client.log_event(
         &submitter,
         &symbol_short!("test"),
         &Bytes::from_slice(&env, b"2"),
+        &None,
+        &None,
+        &false,
     );
 
     let evt0 = client.get_event(&id0);
@@ -332,7 +368,10 @@ fn boundary_event_order_retrieval_at_high_index() {
         client.log_event(
             &submitter,
             &symbol_short!("test"),
-            &Bytes::from_slice(&env, &i.to_le_bytes()), &None, &None, &false,
+            &Bytes::from_slice(&env, &i.to_le_bytes()),
+            &None,
+            &None,
+            &false,
         );
     }
 
@@ -355,7 +394,10 @@ fn boundary_event_type_index_retrieval_at_high_index() {
         client.log_event(
             &submitter,
             &payment,
-            &Bytes::from_slice(&env, &i.to_le_bytes()), &None, &None, &false,
+            &Bytes::from_slice(&env, &i.to_le_bytes()),
+            &None,
+            &None,
+            &false,
         );
     }
 
@@ -376,7 +418,10 @@ fn boundary_hash_chain_at_high_index() {
         client.log_event(
             &submitter,
             &symbol_short!("test"),
-            &Bytes::from_slice(&env, &i.to_le_bytes()), &None, &None, &false,
+            &Bytes::from_slice(&env, &i.to_le_bytes()),
+            &None,
+            &None,
+            &false,
         );
     }
 
@@ -397,6 +442,9 @@ fn boundary_zero_index_event() {
         &submitter,
         &symbol_short!("test"),
         &Bytes::from_slice(&env, b"first"),
+        &None,
+        &None,
+        &false,
     );
 
     let evt = client.get_event(&id);
@@ -411,7 +459,14 @@ fn boundary_event_type_index_zero() {
     let submitter = Address::generate(&env);
 
     env.mock_all_auths();
-    client.log_event(&submitter, &payment, &Bytes::from_slice(&env, b"first"), &None, &None, &false);
+    client.log_event(
+        &submitter,
+        &payment,
+        &Bytes::from_slice(&env, b"first"),
+        &None,
+        &None,
+        &false,
+    );
 
     let evt = client.get_event_by_type(&payment, &0);
     assert_eq!(evt.index, 0);
@@ -429,12 +484,22 @@ fn boundary_metadata_size_zero() {
     let result = client.try_log_event(
         &submitter,
         &symbol_short!("test"),
-        &Bytes::from_slice(&env, b"x"), &None, &None, &false,
+        &Bytes::from_slice(&env, b"x"),
+        &None,
+        &None,
+        &false,
     );
     assert!(result.is_err());
 
     // But empty metadata should still work
-    let id = client.log_event(&submitter, &symbol_short!("test"), &Bytes::new(&env), &None, &None, &false);
+    let id = client.log_event(
+        &submitter,
+        &symbol_short!("test"),
+        &Bytes::new(&env),
+        &None,
+        &None,
+        &false,
+    );
     let evt = client.get_event(&id);
     assert_eq!(evt.metadata.len(), 0);
 }
@@ -456,6 +521,9 @@ fn boundary_global_max_logs_one() {
         &submitter,
         &symbol_short!("test"),
         &Bytes::from_slice(&env, b"first"),
+        &None,
+        &None,
+        &false,
     );
 
     assert_eq!(client.total_events(), 1);
@@ -463,7 +531,10 @@ fn boundary_global_max_logs_one() {
     let result = client.try_log_event(
         &submitter,
         &symbol_short!("test"),
-        &Bytes::from_slice(&env, b"second"), &None, &None, &false,
+        &Bytes::from_slice(&env, b"second"),
+        &None,
+        &None,
+        &false,
     );
     assert!(result.is_err());
 }
@@ -477,10 +548,24 @@ fn boundary_event_max_logs_one() {
     env.mock_all_auths();
     client.set_event_max_logs(&owner, &payment, &1);
 
-    client.log_event(&submitter, &payment, &Bytes::from_slice(&env, b"first"), &None, &None, &false);
+    client.log_event(
+        &submitter,
+        &payment,
+        &Bytes::from_slice(&env, b"first"),
+        &None,
+        &None,
+        &false,
+    );
 
     assert_eq!(client.event_count(&payment), 1);
 
-    let result = client.try_log_event(&submitter, &payment, &Bytes::from_slice(&env, b"second"));
+    let result = client.try_log_event(
+        &submitter,
+        &payment,
+        &Bytes::from_slice(&env, b"second"),
+        &None,
+        &None,
+        &false,
+    );
     assert!(result.is_err());
 }

@@ -10,17 +10,11 @@ pub struct CallerContract;
 #[contractimpl]
 impl CallerContract {
     /// Calls AuditLedger's log_event on behalf of a user
-    pub fn log_on_behalf(
-        env: Env,
-        audit_ledger: Address,
-        user: Address,
-        event_type: Symbol,
-        metadata: Bytes,
-    ) {
+    pub fn log_on_behalf(env: Env, audit_ledger: Address, user: Address, event_type: Symbol, metadata: Bytes) {
         // The caller contract invokes log_event with the user as submitter
         // The user must authorize this call
         let client = AuditLedgerClient::new(&env, &audit_ledger);
-        client.log_event(&user, &event_type, &metadata);
+        client.log_event(&user, &event_type, &metadata, &None, &None, &false);
     }
 
     /// Calls AuditLedger's governance functions
@@ -34,7 +28,14 @@ impl CallerContract {
     pub fn trigger_global_max_error(env: Env, audit_ledger: Address, submitter: Address) {
         let client = AuditLedgerClient::new(&env, &audit_ledger);
         // Try to log when at capacity
-        client.log_event(&submitter, &symbol_short!("test"), &Bytes::new(&env));
+        client.log_event(
+            &submitter,
+            &symbol_short!("test"),
+            &Bytes::new(&env),
+            &None,
+            &None,
+            &false,
+        );
     }
 
     /// Attempts reentrancy by calling back into AuditLedger
@@ -47,12 +48,12 @@ impl CallerContract {
     ) {
         let client = AuditLedgerClient::new(&env, &audit_ledger);
         // First call
-        client.log_event(&submitter, &event_type, &metadata);
+        client.log_event(&submitter, &event_type, &metadata, &None, &None, &false);
 
         // Attempt second call (reentrancy)
         // In a real scenario, this would be called from within a callback
         // For testing, we just make a second call
-        client.log_event(&submitter, &event_type, &metadata);
+        client.log_event(&submitter, &event_type, &metadata, &None, &None, &false);
     }
 }
 
@@ -62,7 +63,7 @@ fn create_ledger() -> (Env, Address, AuditLedgerClient<'static>) {
     let contract_id = env.register(AuditLedger, ());
     let client = AuditLedgerClient::new(&env, &contract_id);
 
-    env.mock_all_auths();
+    env.mock_all_auths_allowing_non_root_auth();
     let mut owners = Vec::new(&env);
     owners.push_back(owner.clone());
     client.initialize(&owners, &100);
@@ -84,7 +85,7 @@ fn cross_contract_log_event_with_correct_submitter() {
     let audit_client = AuditLedgerClient::new(&env, &audit_ledger_id);
     let caller_client = CallerContractClient::new(&env, &caller_contract_id);
 
-    env.mock_all_auths();
+    env.mock_all_auths_allowing_non_root_auth();
     let mut owners = Vec::new(&env);
     owners.push_back(owner.clone());
     audit_client.initialize(&owners, &100);
@@ -120,7 +121,7 @@ fn cross_contract_multiple_logs_different_users() {
     let audit_client = AuditLedgerClient::new(&env, &audit_ledger_id);
     let caller_client = CallerContractClient::new(&env, &caller_contract_id);
 
-    env.mock_all_auths();
+    env.mock_all_auths_allowing_non_root_auth();
     let mut owners = Vec::new(&env);
     owners.push_back(owner.clone());
     audit_client.initialize(&owners, &100);
@@ -164,7 +165,7 @@ fn cross_contract_governance_requires_owner() {
     let audit_client = AuditLedgerClient::new(&env, &audit_ledger_id);
     let caller_client = CallerContractClient::new(&env, &caller_contract_id);
 
-    env.mock_all_auths();
+    env.mock_all_auths_allowing_non_root_auth();
     let mut owners = Vec::new(&env);
     owners.push_back(owner.clone());
     audit_client.initialize(&owners, &100);
@@ -187,7 +188,7 @@ fn cross_contract_governance_with_owner_succeeds() {
     let audit_client = AuditLedgerClient::new(&env, &audit_ledger_id);
     let caller_client = CallerContractClient::new(&env, &caller_contract_id);
 
-    env.mock_all_auths();
+    env.mock_all_auths_allowing_non_root_auth();
     let mut owners = Vec::new(&env);
     owners.push_back(owner.clone());
     audit_client.initialize(&owners, &100);
@@ -208,7 +209,7 @@ fn cross_contract_transfer_ownership_across_contracts() {
 
     let audit_client = AuditLedgerClient::new(&env, &audit_ledger_id);
 
-    env.mock_all_auths();
+    env.mock_all_auths_allowing_non_root_auth();
     let mut owners = Vec::new(&env);
     owners.push_back(owner.clone());
     audit_client.initialize(&owners, &100);
@@ -234,7 +235,7 @@ fn cross_contract_global_max_logs_error_propagates() {
     let audit_client = AuditLedgerClient::new(&env, &audit_ledger_id);
     let caller_client = CallerContractClient::new(&env, &caller_contract_id);
 
-    env.mock_all_auths();
+    env.mock_all_auths_allowing_non_root_auth();
     let mut owners = Vec::new(&env);
     owners.push_back(owner.clone());
     audit_client.initialize(&owners, &1); // Max 1 event
@@ -244,6 +245,9 @@ fn cross_contract_global_max_logs_error_propagates() {
         &submitter,
         &symbol_short!("test"),
         &Bytes::from_slice(&env, b"first"),
+        &None,
+        &None,
+        &false,
     );
 
     // Try to log another event via caller contract
@@ -265,7 +269,7 @@ fn cross_contract_event_type_max_logs_error_propagates() {
     let audit_client = AuditLedgerClient::new(&env, &audit_ledger_id);
     let caller_client = CallerContractClient::new(&env, &caller_contract_id);
 
-    env.mock_all_auths();
+    env.mock_all_auths_allowing_non_root_auth();
     let mut owners = Vec::new(&env);
     owners.push_back(owner.clone());
     audit_client.initialize(&owners, &100);
@@ -276,6 +280,9 @@ fn cross_contract_event_type_max_logs_error_propagates() {
         &submitter,
         &symbol_short!("payment"),
         &Bytes::from_slice(&env, b"first"),
+        &None,
+        &None,
+        &false,
     );
 
     // Try to log another payment event via caller contract
@@ -302,7 +309,7 @@ fn cross_contract_metadata_too_large_error_propagates() {
     let audit_client = AuditLedgerClient::new(&env, &audit_ledger_id);
     let caller_client = CallerContractClient::new(&env, &caller_contract_id);
 
-    env.mock_all_auths();
+    env.mock_all_auths_allowing_non_root_auth();
     let mut owners = Vec::new(&env);
     owners.push_back(owner.clone());
     audit_client.initialize(&owners, &100);
@@ -332,7 +339,7 @@ fn cross_contract_contract_paused_error_propagates() {
     let audit_client = AuditLedgerClient::new(&env, &audit_ledger_id);
     let caller_client = CallerContractClient::new(&env, &caller_contract_id);
 
-    env.mock_all_auths();
+    env.mock_all_auths_allowing_non_root_auth();
     let mut owners = Vec::new(&env);
     owners.push_back(owner.clone());
     audit_client.initialize(&owners, &100);
@@ -364,7 +371,7 @@ fn cross_contract_sequential_calls_work() {
     let audit_client = AuditLedgerClient::new(&env, &audit_ledger_id);
     let caller_client = CallerContractClient::new(&env, &caller_contract_id);
 
-    env.mock_all_auths();
+    env.mock_all_auths_allowing_non_root_auth();
     let mut owners = Vec::new(&env);
     owners.push_back(owner.clone());
     audit_client.initialize(&owners, &100);
@@ -423,7 +430,7 @@ fn cross_contract_event_integrity_preserved() {
     let audit_client = AuditLedgerClient::new(&env, &audit_ledger_id);
     let caller_client = CallerContractClient::new(&env, &caller_contract_id);
 
-    env.mock_all_auths();
+    env.mock_all_auths_allowing_non_root_auth();
     let mut owners = Vec::new(&env);
     owners.push_back(owner.clone());
     audit_client.initialize(&owners, &100);
@@ -454,7 +461,7 @@ fn cross_contract_multiple_caller_contracts() {
     let caller1_client = CallerContractClient::new(&env, &caller1_id);
     let caller2_client = CallerContractClient::new(&env, &caller2_id);
 
-    env.mock_all_auths();
+    env.mock_all_auths_allowing_non_root_auth();
     let mut owners = Vec::new(&env);
     owners.push_back(owner.clone());
     audit_client.initialize(&owners, &100);
