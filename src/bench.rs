@@ -2,6 +2,8 @@
 
 extern crate std;
 
+use std::string::String;
+
 use super::*;
 use soroban_sdk::testutils::{Address as _, Ledger};
 use soroban_sdk::{Bytes, Symbol};
@@ -44,7 +46,7 @@ fn benchmark_sequential_logging_10000() {
 
     for i in 0..10_000u32 {
         let metadata = random_bytes(&env, (i % 255) as u8, 16);
-        let result = client.try_log_event(&submitter, &event_type, &metadata);
+        let result = client.try_log_event(&submitter, &event_type, &metadata, &None, &None, &false);
         assert!(result.is_ok());
         env.ledger().set_timestamp(1_000 + i as u64);
     }
@@ -61,7 +63,7 @@ fn benchmark_multi_type_logging_10000() {
         let event_type = random_symbol(&env, type_idx);
         for i in 0..1_000u32 {
             let metadata = random_bytes(&env, (type_idx.wrapping_add((i % 255) as u8)), 32);
-            let result = client.try_log_event(&submitter, &event_type, &metadata);
+            let result = client.try_log_event(&submitter, &event_type, &metadata, &None, &None, &false);
             assert!(result.is_ok());
             env.ledger().set_timestamp(2_000 + (type_idx as u64 * 1_000) + i as u64);
         }
@@ -80,7 +82,7 @@ fn benchmark_mixed_metadata_sizes() {
     for &size in sizes.iter() {
         for i in 0..1_000u32 {
             let metadata = random_bytes(&env, (size as u8).wrapping_add(i as u8), size);
-            let result = client.try_log_event(&submitter, &event_type, &metadata);
+            let result = client.try_log_event(&submitter, &event_type, &metadata, &None, &None, &false);
             assert!(result.is_ok());
             env.ledger().set_timestamp(3_000 + i as u64);
         }
@@ -98,7 +100,7 @@ fn benchmark_concurrent_submitters() {
         let submitter = Address::generate(&env);
         for i in 0..100u32 {
             let metadata = random_bytes(&env, submitter_idx, 16);
-            let result = client.try_log_event(&submitter, &event_type, &metadata);
+            let result = client.try_log_event(&submitter, &event_type, &metadata, &None, &None, &false);
             assert!(result.is_ok());
             env.ledger().set_timestamp(4_000 + submitter_idx as u64 + i as u64);
         }
@@ -115,14 +117,14 @@ fn benchmark_near_capacity_logging() {
 
     for i in 0..9_900u32 {
         let metadata = random_bytes(&env, 1, 8);
-        let result = client.try_log_event(&submitter, &event_type, &metadata);
+        let result = client.try_log_event(&submitter, &event_type, &metadata, &None, &None, &false);
         assert!(result.is_ok());
         env.ledger().set_timestamp(5_000 + i as u64);
     }
 
     for i in 9_900..9_999u32 {
         let metadata = random_bytes(&env, 2, 8);
-        let result = client.try_log_event(&submitter, &event_type, &metadata);
+        let result = client.try_log_event(&submitter, &event_type, &metadata, &None, &None, &false);
         assert!(result.is_ok());
         env.ledger().set_timestamp(5_000 + i as u64);
     }

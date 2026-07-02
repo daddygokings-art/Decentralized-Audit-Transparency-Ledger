@@ -6,6 +6,7 @@ use super::*;
 use proptest::prelude::*;
 use soroban_sdk::testutils::{Address as _, Ledger};
 use soroban_sdk::{Bytes, Symbol, Vec as SorobanVec};
+use std::string::String;
 use std::vec::Vec as StdVec;
 
 const MAX_EVENT_COUNT: usize = 12;
@@ -83,6 +84,7 @@ fn run_random_sequence(env: &Env, owner: &Address, client: &AuditLedgerClient<'_
                     &Address::generate(env),
                     &symbol(env, event_type),
                     &bytes(env, metadata),
+                    &None, &None, &false,
                 );
             }
             Op::SetCap { event_type, cap } => {
@@ -133,6 +135,7 @@ proptest! {
                 &Address::generate(&env),
                 &symbol(&env, &event_type),
                 &bytes(&env, &metadata),
+                &None, &None, &false,
             );
             if !seen_types.iter().any(|v| v == &event_type) {
                 seen_types.push(event_type.clone());
@@ -159,6 +162,7 @@ proptest! {
                 &Address::generate(&env),
                 &symbol(&env, &event_type),
                 &bytes(&env, &metadata),
+                &None, &None, &false,
             );
         }
 
@@ -185,6 +189,7 @@ proptest! {
                 &Address::generate(&env),
                 &symbol(&env, &event_type),
                 &bytes(&env, &metadata),
+                &None, &None, &false,
             ) {
                 let event = client.get_event(&id);
                 original_events.push_back((id, event));
@@ -208,6 +213,7 @@ proptest! {
                 &Address::generate(&env),
                 &symbol(&env, &event_type),
                 &bytes(&env, &metadata),
+                &None, &None, &false,
             );
             assert!(result.is_ok() || result.is_err(), "calls should safely return result");
         }
@@ -216,6 +222,7 @@ proptest! {
             &Address::generate(&env),
             &symbol(&env, &event_type),
             &bytes(&env, &metadata),
+            &None, &None, &false,
         );
         if cap == 0 {
             assert!(extra.is_err(), "zero cap must reject all logs");
@@ -259,6 +266,7 @@ proptest! {
                 &Address::generate(&env),
                 &symbol(&env, &event_type),
                 &bytes(&env, &metadata),
+                &None, &None, &false,
             );
         }
 
@@ -286,6 +294,7 @@ proptest! {
             &Address::generate(&env),
             &symbol(&env, &event_type),
             &bytes(&env, &metadata),
+            &None, &None, &false,
         );
 
         if result.is_ok() {
@@ -310,6 +319,7 @@ proptest! {
                 &Address::generate(&env),
                 &symbol(&env, &event_type),
                 &bytes(&env, &metadata),
+                &None, &None, &false,
             );
         }
 
