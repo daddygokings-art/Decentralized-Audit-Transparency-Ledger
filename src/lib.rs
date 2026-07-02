@@ -122,6 +122,8 @@ pub enum DataKey {
     EventMetadataMaxSize(Symbol),
     /// Global metadata size cap (issue #67). Absent = DEFAULT_MAX_METADATA_SIZE.
     GlobalMetadataMaxSize,
+    /// Cached full runtime state for fast reads.
+    RuntimeState,
     /// Signature stored for an event (issue #69): (pubkey, signature).
     EventSignature(BytesN<32>),
     /// Cached event count per type (issue #52). Updated alongside EventTypeIndices.
@@ -338,12 +340,70 @@ pub struct Proposal {
 
 const NULL_ACCOUNT: &str = "GAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAWHF";
 
+// ── Additional type definitions ──────────────────────────────────────────────
+
+/// A versioned snapshot of an Event, stored when `update_event` is called.
+#[contracttype]
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct EventVersion {
+    /// 0-based version counter (0 = original).
+    pub version: u32,
+    /// Full event data at this version.
+    pub data: Event,
+    /// Ledger timestamp when this version was recorded.
+    pub updated_at: u64,
+    /// Address that triggered the update (or original submitter for version 0).
+    pub updated_by: Address,
+}
+
+/// Aggregate statistics returned by `get_statistics`.
+#[contracttype]
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct ContractStatistics {
+    pub total_events: u32,
+    pub events_by_type: Vec<(Symbol, u32)>,
+    pub events_last_hour: u32,
+    pub events_last_day: u32,
+    pub events_last_week: u32,
+    pub top_submitters: Vec<(Address, u32)>,
+}
+
+/// Governance action carried by a multisig proposal.
+#[contracttype]
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub enum ProposalAction {
+    TransferOwnership(Address),
+    AddOwner(Address),
+    RemoveOwner(Address),
+    SetRequiredSignatures(u32),
+    SetGlobalMaxLogs(u32),
+    Pause,
+    Unpause,
+}
+
+/// An on-chain governance proposal awaiting multisig approval.
+#[contracttype]
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct Proposal {
+    pub id: u32,
+    pub proposer: Address,
+    pub action: ProposalAction,
+    pub approvals: Vec<Address>,
+    pub expires_at: u64,
+    pub executed: bool,
+}
+
 #[contract]
 pub struct AuditLedger;
 
 #[contractimpl]
 impl AuditLedger {
-    pub fn initialize(env: Env, owners: Vec<Address>, global_max_logs: u32) {
+    pub fn initialize(
+        env: Env,
+        owners: Vec<Address>,
+        global_max_logs: u32,
+        max_metadata_bytes: u32,
+    ) {
         if env.storage().instance().has(&DataKey::Owner) {
             panic_with_error!(&env, ContractError::AlreadyInitialized);
         }
@@ -361,6 +421,27 @@ impl AuditLedger {
                 total_events: 0,
             },
         );
+        env.storage()
+            .instance()
+            .set(&DataKey::GlobalMaxLogs, &global_max_logs);
+        env.storage()
+            .instance()
+            .set(&DataKey::GlobalMetadataMaxSize, &max_metadata_bytes);
+        env.storage()
+            .instance()
+            .set(
+                &DataKey::RuntimeState,
+                &RuntimeState {
+                    global_max_logs,
+                    total_events: 0,
+                    paused: false,
+                    allowlist_mode: false,
+                    low_cost_mode: false,
+                    emission_mode: 1,
+                    global_metadata_max_size: max_metadata_bytes,
+                },
+            );
+        env.storage().instance().set(&DataKey::TotalEvents, &0u32);
         env.storage().instance().set(&DataKey::Paused, &false);
 
         let rs = RuntimeState {
@@ -543,13 +624,12 @@ impl AuditLedger {
                     .set(&DataKey::EventTypeCount(event_type.clone()), &count);
             }
 
-            // #179: emit canonical ("log", event_type) event with (index, submitter, metadata_hash)
+            // #175: emit structured ("audit", "log_event") event with (submitter, event_type, index)
             let emission_mode = Self::effective_event_emission_mode(&env);
             if emission_mode != 3 {
-                let metadata_hash: BytesN<32> = env.crypto().sha256(&metadata).into();
                 env.events().publish(
-                    (Symbol::new(&env, "log"), event_type.clone()),
-                    (index, submitter.clone(), metadata_hash),
+                    (Symbol::new(&env, "audit"), Symbol::new(&env, "log_event")),
+                    (submitter.clone(), event_type.clone(), index),
                 );
             }
 
@@ -650,6 +730,23 @@ impl AuditLedger {
             }
         }
 
+        let rs: RuntimeState = env
+            .storage()
+            .instance()
+            .get(&DataKey::RuntimeState)
+            .unwrap_or_else(|| {
+                let cfg: Config = env.storage().instance().get(&DataKey::Config).unwrap();
+                RuntimeState {
+                    global_max_logs: cfg.global_max_logs,
+                    total_events: cfg.total_events,
+                    paused: env.storage().instance().get::<_, bool>(&DataKey::Paused).unwrap_or(false),
+                    allowlist_mode: env.storage().instance().get::<_, bool>(&DataKey::AllowlistMode).unwrap_or(false),
+                    low_cost_mode: env.storage().instance().get::<_, bool>(&DataKey::LowCostMode).unwrap_or(false),
+                    emission_mode: env.storage().instance().get::<_, u32>(&DataKey::EventEmissionConfig).unwrap_or(1),
+                    global_metadata_max_size: env.storage().instance().get::<_, u32>(&DataKey::GlobalMetadataMaxSize).unwrap_or(0),
+                }
+            });
+
         // --- issue #62: enforce per-submitter rate limit (per-submitter key, optional) ---
         if let Some(limit) = env
             .storage()
@@ -705,18 +802,8 @@ impl AuditLedger {
             total_events: rs.total_events,
         });
 
-        // --- issue #67: enforce metadata size cap (from RuntimeState, no extra read) ---
-        let max_meta = if let Some(v) = env
-            .storage()
-            .instance()
-            .get::<_, u32>(&DataKey::EventMetadataMaxSize(event_type.clone()))
-        {
-            v
-        } else if let Some(v) = env.storage().instance().get::<_, u32>(&DataKey::GlobalMetadataMaxSize) {
-            v
-        } else {
-            DEFAULT_MAX_METADATA_SIZE
-        };
+        // --- issue #67: enforce metadata size cap ---
+        let max_meta = Self::effective_metadata_max_size(&env, &event_type);
         if metadata.len() > max_meta {
             panic_with_error!(&env, ContractError::MetadataTooLarge);
         }
@@ -795,7 +882,7 @@ impl AuditLedger {
             index,
             timestamp,
             event_type: event_type.clone(),
-            category: cat.clone(),
+            category: Symbol::new(&env, "general"),
             submitter: submitter.clone(),
             metadata: metadata.clone(),
             sub_event_type: sub_event_type.clone(),
@@ -858,12 +945,11 @@ impl AuditLedger {
             env.storage().instance().set(&DataKey::RuntimeState, &rs);
         }
 
-        // #179: emit canonical ("log", event_type) event with (index, submitter, metadata_hash)
+        // #175: emit structured ("audit", "log_event") event with (submitter, event_type, index)
         if emission_mode != 3 {
-            let metadata_hash: BytesN<32> = env.crypto().sha256(&metadata).into();
             env.events().publish(
-                (Symbol::new(&env, "log"), event_type),
-                (index, submitter, metadata_hash),
+                (Symbol::new(&env, "audit"), Symbol::new(&env, "log_event")),
+                (submitter, event_type, index),
             );
         }
 
@@ -1302,7 +1388,50 @@ impl AuditLedger {
         results
     }
 
-    pub fn get_events_by_time_range(env: Env, start_time: u64, end_time: u64, offset: u32, limit: u32) -> Vec<Event> {
+    /// Return a paginated slice of events for a given event type.
+    ///
+    /// * `event_type` — the type to filter by.
+    /// * `start`      — 0-based index into the per-type sub-ledger to begin reading from.
+    /// * `limit`      — maximum number of events to return (capped at 100).
+    ///
+    /// Returns an empty `Vec` when `start` is beyond the last index for the type,
+    /// or when the type has no events at all — no panics for out-of-range inputs.
+    /// A partial slice is returned when fewer than `limit` events remain after `start`.
+    pub fn get_events_by_type(
+        env: Env,
+        event_type: Symbol,
+        start: u32,
+        limit: u32,
+    ) -> Vec<Event> {
+        Self::require_initialized(&env);
+
+        if limit == 0 {
+            return Vec::new(&env);
+        }
+        if limit > 100 {
+            panic_with_error!(&env, ContractError::InvalidPaginationParams);
+        }
+
+        let total = Self::event_type_count(&env, event_type.clone());
+        if total == 0 || start >= total {
+            return Vec::new(&env);
+        }
+
+        let end = (start.saturating_add(limit)).min(total);
+        let mut results = Vec::new(&env);
+        for i in start..end {
+            results.push_back(Self::get_event_by_type(env.clone(), event_type.clone(), i));
+        }
+        results
+    }
+
+    pub fn get_events_by_time_range(
+        env: Env,
+        start_time: u64,
+        end_time: u64,
+        offset: u32,
+        limit: u32,
+    ) -> Vec<Event> {
         if limit == 0 {
             return Vec::new(&env);
         }
@@ -1512,6 +1641,8 @@ impl AuditLedger {
         let event_id: BytesN<32> = env.storage().instance().get(&DataKey::EventOrder(index)).unwrap();
         let event: Event = env.storage().instance().get(&DataKey::EventData(event_id)).unwrap();
 
+        let evt_timestamp = event.timestamp;
+        let evt_submitter = event.submitter.clone();
         let mut history = Vec::new(&env);
         let ts = event.timestamp;
         let sub = event.submitter.clone();
@@ -2068,8 +2199,6 @@ impl AuditLedger {
         submitter: Address,
         event_type: Symbol,
         metadata: Bytes,
-        category: Option<Symbol>,
-        sub_event_type: Option<Symbol>,
         signature_payload: Bytes,
     ) -> BytesN<32> {
         // Delegates auth to the inner log_event call.
@@ -2118,6 +2247,74 @@ impl AuditLedger {
     }
 
     // ── Private helpers ─────────────────────────────────────────────────────
+
+    /// Panic with `ContractNotInitialized` if the contract has not been initialized.
+    fn require_initialized(env: &Env) {
+        if !env.storage().instance().has(&DataKey::Owner) {
+            panic_with_error!(env, ContractError::ContractNotInitialized);
+        }
+    }
+
+    /// Increment the count for `addr` in a (Address, u32) accumulator Vec.
+    /// Returns the NEW count for that address in the batch.
+    fn increment_address_count(
+        _env: &Env,
+        counts: &mut Vec<(Address, u32)>,
+        addr: Address,
+    ) -> u32 {
+        for idx in 0..counts.len() {
+            let pair: (Address, u32) = counts.get(idx).unwrap();
+            if pair.0 == addr {
+                let new_count = pair.1 + 1;
+                counts.set(idx, &(addr.clone(), new_count));
+                return new_count;
+            }
+        }
+        counts.push_back(&(addr, 1u32));
+        1u32
+    }
+
+    /// Increment the count for `sym` in a (Symbol, u32) accumulator Vec.
+    /// Returns the NEW count for that symbol in the batch.
+    fn increment_symbol_count(
+        _env: &Env,
+        counts: &mut Vec<(Symbol, u32)>,
+        sym: Symbol,
+    ) -> u32 {
+        for idx in 0..counts.len() {
+            let pair: (Symbol, u32) = counts.get(idx).unwrap();
+            if pair.0 == sym {
+                let new_count = pair.1 + 1;
+                counts.set(idx, &(sym.clone(), new_count));
+                return new_count;
+            }
+        }
+        counts.push_back(&(sym, 1u32));
+        1u32
+    }
+
+    /// Validate that `metadata` conforms to `schema`.
+    ///
+    /// ## Schema format
+    /// The schema is a length-prefixed byte sequence: the first 4 bytes (LE u32)
+    /// encode the minimum required metadata length.  If `metadata.len() >= min_len`,
+    /// the validation passes.  A `min_len` of 0 accepts any metadata (including empty).
+    ///
+    /// This simple format is intentionally minimal to remain gas-efficient on-chain.
+    /// Off-chain consumers can apply richer validation (JSON Schema, Protobuf, etc.)
+    /// after retrieving the schema via `get_metadata_schema`.
+    fn validate_metadata_schema(metadata: &Bytes, schema: &Bytes) -> bool {
+        if schema.len() < 4 {
+            // Schema too short to contain the minimum-length prefix — treat as no constraint.
+            return true;
+        }
+        let b0 = schema.get(0).unwrap() as u32;
+        let b1 = schema.get(1).unwrap() as u32;
+        let b2 = schema.get(2).unwrap() as u32;
+        let b3 = schema.get(3).unwrap() as u32;
+        let min_len: u32 = b0 | (b1 << 8) | (b2 << 16) | (b3 << 24);
+        metadata.len() >= min_len
+    }
 
     // ── issue #54: packed-Bytes index storage helpers ────────────────────────
 
@@ -2377,7 +2574,10 @@ impl AuditLedger {
                 env.storage().instance().set(&DataKey::RequiredSignatures, &req);
             }
             ProposalAction::SetGlobalMaxLogs(v) => {
-                env.storage().instance().set(&DataKey::GlobalMaxLogs, &v);
+                if let Some(mut c) = env.storage().instance().get::<_, Config>(&DataKey::Config) {
+                    c.global_max_logs = v;
+                    env.storage().instance().set(&DataKey::Config, &c);
+                }
             }
             ProposalAction::Pause => {
                 env.storage().instance().set(&DataKey::Paused, &true);

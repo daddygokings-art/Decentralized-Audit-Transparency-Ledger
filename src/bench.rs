@@ -15,9 +15,7 @@ fn create_ledger() -> (Env, Address, AuditLedgerClient<'static>) {
     let client = AuditLedgerClient::new(&env, &contract_id);
 
     env.mock_all_auths();
-    let mut owners = Vec::new(&env);
-    owners.push_back(owner.clone());
-    client.initialize(&owners, &100_000);
+    client.initialize(&owner, &100_000, &4096);
     (env, owner, client)
 }
 

@@ -11,7 +11,7 @@ fn create_ledger() -> (Env, Address, AuditLedgerClient<'static>) {
     env.mock_all_auths();
     let mut owners = Vec::new(&env);
     owners.push_back(owner.clone());
-    client.initialize(&owners, &100);
+    client.initialize(&owners, &100, &4096);
     (env, owner, client)
 }
 
@@ -27,7 +27,7 @@ fn regression_initialize_and_verify_state() {
     env.mock_all_auths();
     let mut owners = Vec::new(&env);
     owners.push_back(owner.clone());
-    client.initialize(&owners, &100);
+    client.initialize(&owners, &100, &4096);
 
     assert_eq!(client.total_events(), 0);
     assert!(!client.is_low_cost_mode());
@@ -227,7 +227,7 @@ fn regression_global_max_logs_reached_panics() {
     env.mock_all_auths();
     let mut owners = Vec::new(&env);
     owners.push_back(owner.clone());
-    client.initialize(&owners, &2);
+    client.initialize(&owners, &2, &4096);
 
     client.log_event(
         &submitter,
@@ -436,7 +436,7 @@ fn regression_zero_global_max_logs() {
     env.mock_all_auths();
     let mut owners = Vec::new(&env);
     owners.push_back(owner.clone());
-    client.initialize(&owners, &0);
+    client.initialize(&owners, &0, &4096);
 
     let result = client.try_log_event(
         &Address::generate(&env),

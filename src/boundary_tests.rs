@@ -11,7 +11,7 @@ fn create_ledger() -> (Env, Address, AuditLedgerClient<'static>) {
     env.mock_all_auths();
     let mut owners = Vec::new(&env);
     owners.push_back(owner.clone());
-    client.initialize(&owners, &100);
+    client.initialize(&owners, &100, &4096);
     (env, owner, client)
 }
 
@@ -27,7 +27,7 @@ fn boundary_event_at_max_index_minus_one() {
     env.mock_all_auths();
     let mut owners = Vec::new(&env);
     owners.push_back(owner.clone());
-    client.initialize(&owners, &u32::MAX);
+    client.initialize(&owners, &u32::MAX, &4096);
 
     let submitter = Address::generate(&env);
 
@@ -105,7 +105,7 @@ fn boundary_global_max_logs_at_u32_max() {
     let mut owners = Vec::new(&env);
     owners.push_back(owner.clone());
     // Setting global_max_logs to u32::MAX should work
-    client.initialize(&owners, &u32::MAX);
+    client.initialize(&owner, &u32::MAX, &4096);
 
     // Verify it was set
     // (cannot directly read, but initialization succeeded)
@@ -131,7 +131,7 @@ fn boundary_total_events_near_overflow() {
     env.mock_all_auths();
     let mut owners = Vec::new(&env);
     owners.push_back(owner.clone());
-    client.initialize(&owners, &1000);
+    client.initialize(&owners, &1000, &4096);
 
     let submitter = Address::generate(&env);
 
@@ -170,7 +170,7 @@ fn boundary_log_event_near_capacity() {
     env.mock_all_auths();
     let mut owners = Vec::new(&env);
     owners.push_back(owner.clone());
-    client.initialize(&owners, &5);
+    client.initialize(&owners, &5, &4096);
 
     let submitter = Address::generate(&env);
 
@@ -514,7 +514,7 @@ fn boundary_global_max_logs_one() {
     env.mock_all_auths();
     let mut owners = Vec::new(&env);
     owners.push_back(owner.clone());
-    client.initialize(&owners, &1);
+    client.initialize(&owners, &1, &4096);
 
     let submitter = Address::generate(&env);
     client.log_event(

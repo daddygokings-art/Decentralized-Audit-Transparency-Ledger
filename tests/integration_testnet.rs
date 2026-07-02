@@ -35,7 +35,7 @@ fn standalone_deploy_and_initialize() {
     env.mock_all_auths();
     let mut owners = Vec::new(&env);
     owners.push_back(owner.clone());
-    client.initialize(&owners, &1000);
+    client.initialize(&owners, &1000, &4096);
 
     assert_eq!(client.total_events(), 0);
 }
@@ -52,7 +52,7 @@ fn standalone_log_and_retrieve_events() {
     env.mock_all_auths();
     let mut owners = Vec::new(&env);
     owners.push_back(owner.clone());
-    client.initialize(&owners, &1000);
+    client.initialize(&owners, &1000, &4096);
 
     // Log events with various metadata sizes
     let small_meta = Bytes::from_slice(&env, b"small");
@@ -87,7 +87,7 @@ fn standalone_governance_operations() {
     env.mock_all_auths();
     let mut owners = Vec::new(&env);
     owners.push_back(owner.clone());
-    client.initialize(&owners, &100);
+    client.initialize(&owners, &100, &4096);
 
     // Set global max logs
     client.set_global_max_logs(&owner, &500);
@@ -115,7 +115,7 @@ fn standalone_cap_management() {
     env.mock_all_auths();
     let mut owners = Vec::new(&env);
     owners.push_back(owner.clone());
-    client.initialize(&owners, &100);
+    client.initialize(&owners, &100, &4096);
 
     let payment = symbol_short!("payment");
 
@@ -163,7 +163,7 @@ fn standalone_ownership_transfer() {
     env.mock_all_auths();
     let mut owners = Vec::new(&env);
     owners.push_back(owner.clone());
-    client.initialize(&owners, &100);
+    client.initialize(&owners, &100, &4096);
 
     // Transfer ownership
     client.transfer_ownership(&owner, &new_owner);
@@ -188,7 +188,7 @@ fn standalone_pause_unpause() {
     env.mock_all_auths();
     let mut owners = Vec::new(&env);
     owners.push_back(owner.clone());
-    client.initialize(&owners, &100);
+    client.initialize(&owners, &100, &4096);
 
     // Pause contract
     client.pause(&owner);
@@ -231,7 +231,7 @@ fn standalone_hash_chain_integrity() {
     env.mock_all_auths();
     let mut owners = Vec::new(&env);
     owners.push_back(owner.clone());
-    client.initialize(&owners, &100);
+    client.initialize(&owners, &100, &4096);
 
     // Log multiple events
     for i in 0u8..10 {
@@ -262,7 +262,7 @@ fn standalone_event_emission_modes() {
     env.mock_all_auths();
     let mut owners = Vec::new(&env);
     owners.push_back(owner.clone());
-    client.initialize(&owners, &100);
+    client.initialize(&owners, &100, &4096);
 
     // Test index-only mode
     client.set_event_emission_mode(&owner, &1);
@@ -292,7 +292,7 @@ fn standalone_low_cost_mode() {
     env.mock_all_auths();
     let mut owners = Vec::new(&env);
     owners.push_back(owner.clone());
-    client.initialize(&owners, &100);
+    client.initialize(&owners, &100, &4096);
 
     // Enable low-cost mode
     client.set_low_cost_mode(&owner, &true);
@@ -326,7 +326,7 @@ fn standalone_event_signatures() {
     env.mock_all_auths();
     let mut owners = Vec::new(&env);
     owners.push_back(owner.clone());
-    client.initialize(&owners, &100);
+    client.initialize(&owners, &100, &4096);
 
     // Log event with signature
     let sig_payload = Bytes::from_slice(&env, &[0u8; 96]);
@@ -375,7 +375,7 @@ fn testnet_deploy_and_initialize() {
     // let contract_id = deploy_contract(&env);
     // let client = AuditLedgerClient::new(&env, &contract_id);
     //
-    // client.initialize(&owner, &1000);
+    // client.initialize(&owner, &1000, &4096);
     // assert_eq!(client.total_events(), 0);
 }
 

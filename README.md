@@ -2,6 +2,8 @@
 
 A Soroban smart contract for immutably logging financial transactions on the Stellar network, providing a publicly verifiable audit trail. Built with the [Soroban SDK](https://soroban.stellar.org/).
 
+This repository also includes ongoing work for retention policies, event export workflows, schema validation, and event chaining support.
+
 ## Overview
 
 `AuditLedger` acts as an append-only log for financial and operational events. Each entry is sealed with a timestamp, event type (`Symbol`), and submitter address (`Address`), producing a tamper-evident historical record that any party can independently verify. Configurable global and per-event logging limits prevent state bloat while maintaining a complete, ordered history.
@@ -69,6 +71,10 @@ All governance functions publish a typed Soroban event with topic `("governance"
 #### TTL Storage
 
 `set_event_ttl(ttl_ledgers)` enables optional persistent storage for events. When `ttl_ledgers > 0`, each `log_event` call additionally writes the event to `env.storage().persistent()` and extends its TTL to `ttl_ledgers` ledgers, making events eligible for network expiry after that point. See [`docs/fees.md#ttl-storage`](docs/fees.md#ttl-storage) for cost tradeoffs.
+
+## Architecture
+
+For a high-level view of how the contract, SDKs, APIs, bridge, monitoring, and UI fit together, see [docs/architecture.md](docs/architecture.md).
 
 ## Quick Start
 
