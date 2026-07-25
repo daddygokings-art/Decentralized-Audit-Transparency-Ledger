@@ -49,10 +49,32 @@ ui/out/
 
 # Test artifacts & snapshots
 test_snapshots/
+__snapshots__/
 *.snap
+*.snapshot
 coverage/
+.coverage
+.coverage.*
+htmlcov/
 lcov.info
 tarpaulin-report.html
+junit*.xml
+test-results/
+test_results/
+
+# Python type-checking caches
+.mypy_cache/
+.dmypy.json
+dmypy.json
+.pytype/
+.pyre/
+
+# Python packaging artifacts
+*.egg-info/
+*.egg
+MANIFEST
+pip-wheel-metadata/
+share/python-wheels/
 
 # Soroban / Stellar
 .soroban/
