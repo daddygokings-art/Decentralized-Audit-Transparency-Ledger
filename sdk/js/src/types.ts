@@ -38,10 +38,13 @@ export enum ContractError {
 export class AuditLedgerError extends Error {
   code?: number;
   status?: number;
-  constructor(message: string, code?: number, status?: number) {
+  /** Seconds to wait before retrying, parsed from a `Retry-After` response header, if present. */
+  retryAfterSeconds?: number;
+  constructor(message: string, code?: number, status?: number, retryAfterSeconds?: number) {
     super(message);
     this.name = 'AuditLedgerError';
     this.code = code;
     this.status = status;
+    this.retryAfterSeconds = retryAfterSeconds;
   }
 }
