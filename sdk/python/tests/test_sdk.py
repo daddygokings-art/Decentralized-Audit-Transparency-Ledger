@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import json
 import sys
 import types
 import pytest
@@ -256,7 +257,23 @@ class TestGetEvents:
         client.server = MagicMock()
         client.source = None
         client.total_events = MagicMock(return_value=n)
-        client.get_event_by_order = MagicMock(side_effect=_make_event)
+
+        def _invoke(method, params=None):
+            if method == "get_event_by_order":
+                order = params["order"]
+                event = _make_event(order)
+                return {
+                    "index": event.index,
+                    "timestamp": event.timestamp,
+                    "event_type": event.event_type,
+                    "submitter": event.submitter,
+                    "metadata": event.metadata.hex(),
+                    "event_hash": event.event_hash.hex(),
+                    "prev_hash": event.prev_hash.hex(),
+                }
+            return None
+
+        client._invoke = MagicMock(side_effect=_invoke)
         return client
 
     def test_default_limit(self):

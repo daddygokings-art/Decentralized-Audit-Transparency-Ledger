@@ -19,6 +19,19 @@ export interface ContractStatistics {
   top_submitters: Array<[string, number]>;
 }
 
+export interface EventPage {
+  items: Event[];
+  total: number;
+  offset: number;
+  limit: number;
+}
+
+export interface CacheStats {
+  hits: number;
+  misses: number;
+  size: number;
+}
+
 export enum ContractError {
   CallerNotOwner = 1,
   GlobalMaxLogsReached = 2,

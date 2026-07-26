@@ -29,6 +29,12 @@ export class AuditLedgerClient {
   contractId?: string;
   maxRetries: number;
   baseDelayMs: number;
+  private eventCache: Map<number, Event>;
+  private totalEventsCache?: number;
+  private cacheHits: number;
+  private cacheMisses: number;
+  private maxCacheSize: number;
+  private maxPageSize: number;
 
   /** #237 — Logger */
   readonly logger: Logger;
@@ -157,8 +163,11 @@ export class AuditLedgerClient {
     return this.callTransport('get_event', [id]);
   }
 
-  async totalEvents(): Promise<number> {
-    return this.callTransport('total_events', []);
+  async totalEvents(useCache = true): Promise<number> {
+    if (useCache && this.totalEventsCache !== undefined) return this.totalEventsCache;
+    const total = await this.callTransport<number>('total_events', []);
+    this.totalEventsCache = total;
+    return total;
   }
 
   async eventCount(type: string): Promise<number> {
@@ -167,6 +176,102 @@ export class AuditLedgerClient {
 
   async getEventByType(type: string, index: number): Promise<Event> {
     return this.callTransport('get_event_by_type', [type, index]);
+  }
+
+  async getEventByOrder(order: number): Promise<Event> {
+    if (this.eventCache.has(order)) {
+      this.cacheHits += 1;
+      return this.eventCache.get(order)!;
+    }
+    this.cacheMisses += 1;
+    const event = await this.callTransport<Event>('get_event_by_order', [order]);
+    this.eventCache.set(order, event);
+    while (this.eventCache.size > this.maxCacheSize) {
+      const oldestKey = this.eventCache.keys().next().value as number | undefined;
+      if (oldestKey === undefined) break;
+      this.eventCache.delete(oldestKey);
+    }
+    return event;
+  }
+
+  async getEvents(offset = 0, limit = 50, cursor?: number): Promise<EventPage> {
+    const start = cursor !== undefined ? Math.max(cursor, 0) : Math.max(offset, 0);
+    const safeLimit = Math.max(1, Math.min(limit, this.maxPageSize));
+    const total = await this.totalEvents();
+    const end = Math.min(start + safeLimit, total);
+    const items: Event[] = [];
+    for (let index = start; index < end; index += 1) {
+      items.push(await this.getEventByOrder(index));
+    }
+    return { items, total, offset: start, limit: safeLimit };
+  }
+
+  async *streamEvents(afterIndex = 0, pollIntervalMs = 5000): Promise<AsyncGenerator<Event>> {
+    let cursor = Math.max(afterIndex, 0);
+    while (true) {
+      const total = await this.totalEvents();
+      while (cursor < total) {
+        yield await this.getEventByOrder(cursor);
+        cursor += 1;
+      }
+      if (pollIntervalMs <= 0) return;
+      await this.sleep(pollIntervalMs);
+    }
+  }
+
+  filterEvents(events: Event[], options: { eventType?: string; submitter?: string; startTime?: number; endTime?: number; metadataQuery?: string } = {}): Event[] {
+    const query = options.metadataQuery?.toLowerCase();
+    return events.filter((event) => {
+      if (options.eventType && event.event_type !== options.eventType) return false;
+      if (options.submitter && event.submitter !== options.submitter) return false;
+      if (options.startTime !== undefined && event.timestamp < options.startTime) return false;
+      if (options.endTime !== undefined && event.timestamp > options.endTime) return false;
+      if (query) {
+        const metadata = event.metadata.toLowerCase();
+        if (!metadata.includes(query)) return false;
+      }
+      return true;
+    });
+  }
+
+  exportEvents(events: Event[], fmt: 'json' | 'csv' = 'json', streaming = false, onProgress?: (progress: { completed: number; total: number }) => void): string {
+    const total = events.length;
+    const rows = events.map((event, index) => {
+      const record = {
+        index: event.index,
+        timestamp: event.timestamp,
+        event_type: event.event_type,
+        submitter: event.submitter,
+        metadata: event.metadata,
+        metadata_hex: Buffer.from(event.metadata).toString('hex'),
+        event_hash: event.event_hash,
+        prev_hash: event.prev_hash,
+      };
+      if (streaming) onProgress?.({ completed: index + 1, total });
+      return record;
+    });
+
+    if (fmt === 'csv') {
+      const headers = ['index', 'timestamp', 'event_type', 'submitter', 'metadata', 'metadata_hex', 'event_hash', 'prev_hash'];
+      const lines = [headers.join(',')];
+      for (const row of rows) {
+        lines.push(headers.map((header) => String(row[header as keyof typeof row]).replace(/,/g, ' ')).join(','));
+      }
+      return lines.join('\n');
+    }
+
+    return JSON.stringify(rows);
+  }
+
+  cacheStats(): CacheStats {
+    return { hits: this.cacheHits, misses: this.cacheMisses, size: this.eventCache.size };
+  }
+
+  invalidateCache() {
+    this.eventCache.clear();
+    this.totalEventsCache = undefined;
+    this.cacheHits = 0;
+    this.cacheMisses = 0;
   }
 
   async getStatistics(): Promise<ContractStatistics> {
