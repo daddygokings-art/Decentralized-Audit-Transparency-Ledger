@@ -1,5 +1,9 @@
+"""AuditLedger SDK data models."""
+
+from __future__ import annotations
+
 from dataclasses import dataclass
-from typing import Generic, List, Optional, TypeVar
+from typing import Generic, List, TypeVar
 
 T = TypeVar("T")
 
@@ -37,34 +41,18 @@ class Event:
         )
 
 
-class AuditLedgerError(Exception):
-    """Base exception for AuditLedger SDK errors."""
+# ── Re-export exception classes from exceptions module for backward compatibility.
+# The canonical definitions live in audit_ledger.exceptions (issue #249).
+from .exceptions import (  # noqa: E402  (import after class defs is intentional)
+    AuditLedgerError,
+    ContractError,
+    RPCError,
+)
 
-
-class ContractError(AuditLedgerError):
-    """Raised when the contract returns an error code."""
-
-    ERROR_CODES = {
-        1: "CallerNotOwner",
-        2: "GlobalMaxLogsReached",
-        3: "EventTypeMaxLogsReached",
-        4: "EventDoesNotExist",
-        5: "EventTypeIndexOutOfBounds",
-        6: "NewOwnerIsZero",
-        7: "CapNotSet",
-        8: "MetadataTooLarge",
-        9: "InvalidSignature",
-        10: "ContractPaused",
-        11: "RateLimitExceeded",
-        14: "NoEventsForType",
-        15: "AlreadyInitialized",
-    }
-
-    def __init__(self, code: int):
-        self.code = code
-        self.name = self.ERROR_CODES.get(code, f"UnknownError({code})")
-        super().__init__(f"ContractError #{code}: {self.name}")
-
-
-class RPCError(AuditLedgerError):
-    """Raised when the Soroban RPC call fails."""
+__all__ = [
+    "Page",
+    "Event",
+    "AuditLedgerError",
+    "ContractError",
+    "RPCError",
+]

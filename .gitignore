@@ -30,6 +30,13 @@ __pycache__/
 dist/
 .venv/
 venv/
+.mypy_cache/
+.ruff_cache/
+*.pyo
+pip-wheel-metadata/
+.python-version
+*.whl
+build/
 
 # Node / JS
 node_modules/
@@ -46,13 +53,19 @@ ui/out/
 # TypeScript build outputs
 *.js.map
 *.d.ts.map
+*.tsbuildinfo
 
 # Test artifacts & snapshots
 test_snapshots/
 *.snap
+__snapshots__/
 coverage/
 lcov.info
 tarpaulin-report.html
+.coverage
+htmlcov/
+junit*.xml
+test-results/
 
 # Soroban / Stellar
 .soroban/
@@ -73,14 +86,17 @@ docs/fees-benchmark.txt
 *.profdata
 *.profraw
 
-# Python virtual envs & local build
-.python-version
-*.whl
-build/
-
 # TypeScript declaration map
-*.tsbuildinfo
 
 # Editor local history
 .history/
 .idea/workspace.xml
+
+# Jupyter
+.ipynb_checkpoints/
+*.ipynb
+
+# Temporary files
+*.tmp
+*.bak
+*.orig

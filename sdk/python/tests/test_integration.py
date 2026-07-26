@@ -61,7 +61,7 @@ class TestPythonSDKIntegration:
             "timestamp": 1000,
             "event_type": "payment",
             "submitter": "GA",
-            "metadata": "dHgtZGF0YQ==",
+            "metadata": "74782d64617461",
             "event_hash": "00" * 32,
             "prev_hash": "00" * 32,
         }
@@ -77,7 +77,7 @@ class TestPythonSDKIntegration:
             "timestamp": 2000,
             "event_type": "audit",
             "submitter": "GB",
-            "metadata": "b",
+            "metadata": "",
             "event_hash": "11" * 32,
             "prev_hash": "00" * 32,
         }
@@ -97,7 +97,7 @@ class TestPythonSDKIntegration:
             "timestamp": 1500,
             "event_type": "refund",
             "submitter": "GC",
-            "metadata": "c",
+            "metadata": "",
             "event_hash": "22" * 32,
             "prev_hash": "11" * 32,
         }
@@ -165,7 +165,7 @@ class TestPythonSDKIntegration:
                 "timestamp": 1000 + i,
                 "event_type": "payment",
                 "submitter": f"G{i}",
-                "metadata": f"{i}".encode(),
+                "metadata": f"{i}".encode().hex(),
                 "event_hash": "00" * 32,
                 "prev_hash": "00" * 32,
             }
@@ -192,7 +192,7 @@ class TestEventModel:
             "timestamp": 1000,
             "event_type": "payment",
             "submitter": "GA",
-            "metadata": "dHgtZGF0YQ==",
+            "metadata": "74782d64617461",
             "event_hash": "ab" * 32,
             "prev_hash": "00" * 32,
         }
@@ -213,8 +213,8 @@ class TestEventModel:
         }
         event = Event.from_dict(raw)
         assert event.metadata == b""
-        assert event.event_hash is None
-        assert event.prev_hash is None
+        assert event.event_hash == bytes(32)
+        assert event.prev_hash == bytes(32)
 
     def test_from_dict_empty_metadata(self):
         raw = {
