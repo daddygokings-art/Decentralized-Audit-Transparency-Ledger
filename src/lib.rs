@@ -149,6 +149,12 @@ pub enum DataKey {
     /// Per-submitter nonce for replay-attack prevention (issue #64).
     /// Stores the last accepted nonce; absent means no event submitted yet (treat as 0).
     SubmitterNonce(Address),
+    /// Packed nonce state per submitter (issue #214): window_size, max_nonce.
+    SubmitterNonceConfig(Address),
+    /// Global default nonce window size (issue #214).
+    DefaultNonceWindowSize,
+    /// Global maximum nonce value before exhaustion (issue #214).
+    DefaultNonceMaxValue,
     ArchivedTotalEvents,
     ArchivedEventData(BytesN<32>),
     ArchivedEventHeaderKey(BytesN<32>),
@@ -273,6 +279,12 @@ pub enum ContractError {
     CapAlreadyRemoved = 17,
     CapNeverSet = 18,
     NonceTooLow = 19,
+    /// **Code 27**: Nonce has reached the exhaustion threshold for this submitter.
+    NonceExhausted = 27,
+    /// **Code 28**: Nonce is outside the valid window for this submitter.
+    NonceWindowExceeded = 28,
+    /// **Code 29**: Attempted reset when the submitter's nonce is not exhausted.
+    NonceResetNotExhausted = 29,
     NoEventsForType = 20,
     InvalidPaginationParams = 21,
     InvalidWasmHash = 22,
@@ -312,20 +324,17 @@ pub struct WebhookEntry {
     pub secret: Bytes,
 }
 
-/// A point-in-time snapshot of the audit ledger state (issue #213).
+/// Packed nonce state per submitter for optimized storage (issue #214).
+/// Combines last nonce, window size, and max nonce into a single storage read.
 #[contracttype]
 #[derive(Clone, Debug, Eq, PartialEq)]
-pub struct Snapshot {
-    /// Sequential snapshot identifier (0-based).
-    pub id: u32,
-    /// Ledger timestamp when the snapshot was created.
-    pub timestamp: u64,
-    /// Total number of events at snapshot time.
-    pub event_count: u32,
-    /// SHA-256 hash of the last event's event_hash at snapshot time.
-    pub event_hash: BytesN<32>,
-    /// Optional human-readable description.
-    pub description: Bytes,
+pub struct NonceState {
+    /// Last accepted nonce value.
+    pub last_nonce: u32,
+    /// Window size: max allowed gap between last nonce and submitted nonce. 0 = unlimited.
+    pub window_size: u32,
+    /// Maximum nonce value before exhaustion.
+    pub max_nonce: u32,
 }
 
 #[contracttype]
@@ -481,6 +490,14 @@ impl AuditLedger {
 
         // Set version to 1 (marks contract as initialized, immutable)
         env.storage().instance().set(&DataKey::ContractVersion, &1u32);
+
+        // Issue #214: Initialize default nonce replay protection configuration
+        env.storage()
+            .instance()
+            .set(&DataKey::DefaultNonceWindowSize, &1000u32);
+        env.storage()
+            .instance()
+            .set(&DataKey::DefaultNonceMaxValue, &u32::MAX);
     }
 
     /// Log a batch of events atomically and return their sequential indices.
@@ -983,11 +1000,12 @@ impl AuditLedger {
         event_id
     }
 
-    /// Log an event with an explicit nonce to prevent replay attacks (issue #64).
+    /// Log an event with an explicit nonce to prevent replay attacks (issue #64, enhanced #214).
     ///
-    /// Rules:
-    /// - `nonce` must equal `stored_nonce + 1` (strict sequential) or be any value
-    ///   greater than `stored_nonce` (gaps accepted, stored nonce jumps to `nonce`).
+    /// Rules (enhanced with window validation and exhaustion):
+    /// - `nonce` must be > `stored_nonce` (strict ordering).
+    /// - If `window_size > 0` and `nonce - stored_nonce > window_size`, rejects with `NonceWindowExceeded`.
+    /// - If `nonce > max_nonce`, rejects with `NonceExhausted`.
     /// - If `nonce <= stored_nonce`, rejects with `NonceTooLow`.
     /// - If `nonce == 0`, rejects with `NonceTooLow` (nonces are 1-based).
     ///
@@ -999,22 +1017,55 @@ impl AuditLedger {
         metadata: Bytes,
         nonce: u32,
     ) -> BytesN<32> {
-        let stored: u32 = env
+        // Read optimized NonceState (single read instead of separate reads).
+        let state: NonceState = env
             .storage()
             .instance()
             .get(&DataKey::SubmitterNonce(submitter.clone()))
-            .unwrap_or(0);
+            .unwrap_or_else(|| NonceState {
+                last_nonce: 0,
+                window_size: Self::default_nonce_window_size(&env),
+                max_nonce: Self::default_nonce_max_value(&env),
+            });
 
-        if nonce == 0 || nonce <= stored {
+        // Allow per-submitter config override if present.
+        let config: Option<NonceState> = env
+            .storage()
+            .instance()
+            .get(&DataKey::SubmitterNonceConfig(submitter.clone()));
+        let effective_state = config.unwrap_or(state);
+
+        // --- nonce exhaustion handling (issue #214) ---
+        if nonce > effective_state.max_nonce {
+            panic_with_error!(&env, ContractError::NonceExhausted);
+        }
+
+        // --- nonce ordering check ---
+        if nonce == 0 || nonce <= effective_state.last_nonce {
             panic_with_error!(&env, ContractError::NonceTooLow);
+        }
+
+        // --- nonce window validation (issue #214) ---
+        if effective_state.window_size > 0
+            && nonce.checked_sub(effective_state.last_nonce).is_none()
+                || (effective_state.window_size > 0
+                    && (nonce - effective_state.last_nonce) > effective_state.window_size)
+        {
+            panic_with_error!(&env, ContractError::NonceWindowExceeded);
         }
 
         let event_id =
             Self::log_event_with_hierarchy(env.clone(), submitter.clone(), event_type, metadata, None, None, false);
 
+        // Store updated NonceState (optimized single write).
+        let updated_state = NonceState {
+            last_nonce: nonce,
+            window_size: effective_state.window_size,
+            max_nonce: effective_state.max_nonce,
+        };
         env.storage()
             .instance()
-            .set(&DataKey::SubmitterNonce(submitter), &nonce);
+            .set(&DataKey::SubmitterNonce(submitter), &updated_state);
 
         event_id
     }
@@ -1023,8 +1074,124 @@ impl AuditLedger {
     pub fn get_submitter_nonce(env: Env, submitter: Address) -> u32 {
         env.storage()
             .instance()
-            .get(&DataKey::SubmitterNonce(submitter))
+            .get::<_, NonceState>(&DataKey::SubmitterNonce(submitter))
+            .map(|s| s.last_nonce)
             .unwrap_or(0)
+    }
+
+    /// Return the full nonce state for a submitter (issue #214).
+    pub fn get_submitter_nonce_state(env: Env, submitter: Address) -> NonceState {
+        env.storage()
+            .instance()
+            .get::<_, NonceState>(&DataKey::SubmitterNonce(submitter))
+            .unwrap_or_else(|| NonceState {
+                last_nonce: 0,
+                window_size: Self::default_nonce_window_size(&env),
+                max_nonce: Self::default_nonce_max_value(&env),
+            })
+    }
+
+    /// Set the nonce window configuration for a specific submitter (owner-only, issue #214).
+    /// `window_size`: max gap allowed between last accepted nonce and new nonce (0 = unlimited).
+    /// `max_nonce`: upper nonce bound before exhaustion is triggered.
+    pub fn set_submitter_nonce_config(
+        env: Env,
+        caller: Address,
+        submitter: Address,
+        window_size: u32,
+        max_nonce: u32,
+    ) {
+        Self::require_initialized(&env);
+        caller.require_auth();
+        Self::require_owner_or_multisig(&env, &caller);
+        if max_nonce == 0 {
+            panic_with_error!(&env, ContractError::NonceExhausted);
+        }
+        let current: NonceState = env
+            .storage()
+            .instance()
+            .get(&DataKey::SubmitterNonce(submitter.clone()))
+            .unwrap_or_else(|| NonceState {
+                last_nonce: 0,
+                window_size: Self::default_nonce_window_size(&env),
+                max_nonce: Self::default_nonce_max_value(&env),
+            });
+        let updated = NonceState {
+            last_nonce: current.last_nonce,
+            window_size,
+            max_nonce,
+        };
+        env.storage()
+            .instance()
+            .set(&DataKey::SubmitterNonceConfig(submitter.clone()), &updated);
+        env.events().publish(
+            (Symbol::new(&env, "nonce_config_set"),),
+            (submitter, window_size, max_nonce),
+        );
+    }
+
+    /// Reset a submitter's nonce back to 0 (owner-only, issue #214).
+    pub fn reset_submitter_nonce(env: Env, caller: Address, submitter: Address) {
+        Self::require_initialized(&env);
+        caller.require_auth();
+        Self::require_owner_or_multisig(&env, &caller);
+        let state: NonceState = env
+            .storage()
+            .instance()
+            .get(&DataKey::SubmitterNonce(submitter.clone()))
+            .unwrap_or_else(|| NonceState {
+                last_nonce: 0,
+                window_size: Self::default_nonce_window_size(&env),
+                max_nonce: Self::default_nonce_max_value(&env),
+            });
+        let reset_state = NonceState {
+            last_nonce: 0,
+            window_size: state.window_size,
+            max_nonce: state.max_nonce,
+        };
+        env.storage()
+            .instance()
+            .set(&DataKey::SubmitterNonce(submitter.clone()), &reset_state);
+        env.storage()
+            .instance()
+            .remove(&DataKey::SubmitterNonceConfig(submitter.clone()));
+        env.events()
+            .publish((Symbol::new(&env, "nonce_reset"),), (submitter, caller));
+    }
+
+    /// Set the default nonce window configuration for all submitters (owner-only, issue #214).
+    pub fn set_default_nonce_config(
+        env: Env,
+        caller: Address,
+        window_size: u32,
+        max_nonce: u32,
+    ) {
+        Self::require_initialized(&env);
+        caller.require_auth();
+        Self::require_owner_or_multisig(&env, &caller);
+        if max_nonce == 0 {
+            panic_with_error!(&env, ContractError::NonceExhausted);
+        }
+        env.storage()
+            .instance()
+            .set(&DataKey::DefaultNonceWindowSize, &window_size);
+        env.storage()
+            .instance()
+            .set(&DataKey::DefaultNonceMaxValue, &max_nonce);
+        env.events().publish(
+            (Symbol::new(&env, "default_nonce_config_set"),),
+            (caller, window_size, max_nonce),
+        );
+    }
+
+    /// Return the default nonce window size.
+    pub fn get_default_nonce_window_size(env: Env) -> u32 {
+        Self::default_nonce_window_size(&env)
+    }
+
+    /// Return the default nonce max value.
+    pub fn get_default_nonce_max_value(env: Env) -> u32 {
+        Self::default_nonce_max_value(&env)
     }
 
     pub fn total_events(env: Env) -> u32 {
@@ -3024,6 +3191,22 @@ impl AuditLedger {
             }
         }
         false
+    }
+
+    /// Default nonce window size (issue #214). 0 = unlimited gap allowed.
+    fn default_nonce_window_size(env: &Env) -> u32 {
+        env.storage()
+            .instance()
+            .get(&DataKey::DefaultNonceWindowSize)
+            .unwrap_or(1000)
+    }
+
+    /// Default nonce max value (issue #214). u32::MAX = effectively no exhaustion.
+    fn default_nonce_max_value(env: &Env) -> u32 {
+        env.storage()
+            .instance()
+            .get(&DataKey::DefaultNonceMaxValue)
+            .unwrap_or(u32::MAX)
     }
 }
 
