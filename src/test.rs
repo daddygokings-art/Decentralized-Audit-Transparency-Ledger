@@ -2911,3 +2911,173 @@ fn test_get_events_by_type_preserves_insertion_order() {
     assert_eq!(page.get(1).unwrap().metadata, Bytes::from_slice(&env, b"second"));
     assert_eq!(page.get(2).unwrap().metadata, Bytes::from_slice(&env, b"third"));
 }
+
+// ── issue #202: metadata schema validation ────────────────────────────────────
+
+#[test]
+fn test_set_metadata_schema_and_get() {
+    let (env, owner, client) = create_ledger();
+    let event_type = symbol_short!("payment");
+    env.mock_all_auths();
+    // schema: min_len = 5
+    let schema = Bytes::from_slice(&env, &[5u8, 0, 0, 0]);
+    client.set_metadata_schema(&owner, &event_type, &schema);
+    let retrieved = client.get_metadata_schema(&event_type);
+    assert_eq!(retrieved, schema);
+}
+
+#[test]
+fn test_get_metadata_schema_returns_empty_when_not_set() {
+    let (env, _owner, client) = create_ledger();
+    let event_type = symbol_short!("payment");
+    let schema = client.get_metadata_schema(&event_type);
+    assert_eq!(schema.len(), 0);
+}
+
+#[test]
+fn test_metadata_schema_passes_when_met() {
+    let (env, owner, client) = create_ledger();
+    let submitter = Address::generate(&env);
+    let event_type = symbol_short!("payment");
+    env.mock_all_auths();
+    // schema: min_len = 5
+    let schema = Bytes::from_slice(&env, &[5u8, 0, 0, 0]);
+    client.set_metadata_schema(&owner, &event_type, &schema);
+    // 5 bytes passes
+    let id = client.log_event(
+        &submitter,
+        &event_type,
+        &Bytes::from_slice(&env, b"12345"),
+        &None,
+        &None,
+        &false,
+    );
+    assert_eq!(client.total_events(), 1);
+    // 10 bytes also passes
+    client.log_event(
+        &submitter,
+        &event_type,
+        &Bytes::from_slice(&env, b"0123456789"),
+        &None,
+        &None,
+        &false,
+    );
+    assert_eq!(client.total_events(), 2);
+}
+
+#[test]
+#[should_panic(expected = "HostError: Error(Contract, #32)")]
+fn test_metadata_schema_fails_when_too_short() {
+    let (env, owner, client) = create_ledger();
+    let submitter = Address::generate(&env);
+    let event_type = symbol_short!("payment");
+    env.mock_all_auths();
+    // schema: min_len = 10
+    let schema = Bytes::from_slice(&env, &[10u8, 0, 0, 0]);
+    client.set_metadata_schema(&owner, &event_type, &schema);
+    // 5 bytes is too short
+    client.log_event(
+        &submitter,
+        &event_type,
+        &Bytes::from_slice(&env, b"12345"),
+        &None,
+        &None,
+        &false,
+    );
+}
+
+#[test]
+fn test_metadata_schema_empty_passes_any() {
+    let (env, owner, client) = create_ledger();
+    let submitter = Address::generate(&env);
+    let event_type = symbol_short!("payment");
+    env.mock_all_auths();
+    // empty schema = no constraint
+    client.set_metadata_schema(&owner, &event_type, &Bytes::new(&env));
+    client.log_event(
+        &submitter,
+        &event_type,
+        &Bytes::new(&env),
+        &None,
+        &None,
+        &false,
+    );
+    assert_eq!(client.total_events(), 1);
+}
+
+#[test]
+fn test_metadata_schema_non_owner_cannot_set() {
+    let (env, _owner, client) = create_ledger();
+    let attacker = Address::generate(&env);
+    let event_type = symbol_short!("payment");
+    env.mock_all_auths();
+    let schema = Bytes::from_slice(&env, &[5u8, 0, 0, 0]);
+    let result = client.try_set_metadata_schema(&attacker, &event_type, &schema);
+    assert!(result.is_err());
+}
+
+#[test]
+#[should_panic(expected = "HostError: Error(Contract, #32)")]
+fn test_metadata_schema_enforced_on_update() {
+    let (env, owner, client) = create_ledger();
+    let submitter = Address::generate(&env);
+    let event_type = symbol_short!("payment");
+    env.mock_all_auths();
+    // schema: min_len = 10
+    let schema = Bytes::from_slice(&env, &[10u8, 0, 0, 0]);
+    client.set_metadata_schema(&owner, &event_type, &schema);
+    // log a valid event first
+    let id = client.log_event(
+        &submitter,
+        &event_type,
+        &Bytes::from_slice(&env, b"0123456789"),
+        &None,
+        &None,
+        &false,
+    );
+    // attempt to update with too-short metadata
+    client.update_event(&owner, &0, &Bytes::from_slice(&env, b"short"));
+}
+
+#[test]
+fn test_metadata_schema_per_type_isolation() {
+    let (env, owner, client) = create_ledger();
+    let submitter = Address::generate(&env);
+    let payment = symbol_short!("payment");
+    let refund = symbol_short!("refund");
+    env.mock_all_auths();
+    // payment requires min 8 bytes
+    let schema_payment = Bytes::from_slice(&env, &[8u8, 0, 0, 0]);
+    client.set_metadata_schema(&owner, &payment, &schema_payment);
+    // refund has no schema
+    // refund short metadata passes
+    client.log_event(
+        &submitter,
+        &refund,
+        &Bytes::from_slice(&env, b"1"),
+        &None,
+        &None,
+        &false,
+    );
+    assert_eq!(client.total_events(), 1);
+    // payment short metadata fails
+    let result = client.try_log_event(
+        &submitter,
+        &payment,
+        &Bytes::from_slice(&env, b"1"),
+        &None,
+        &None,
+        &false,
+    );
+    assert!(result.is_err());
+    // payment long metadata passes
+    client.log_event(
+        &submitter,
+        &payment,
+        &Bytes::from_slice(&env, b"01234567"),
+        &None,
+        &None,
+        &false,
+    );
+    assert_eq!(client.total_events(), 2);
+}

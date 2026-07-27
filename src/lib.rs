@@ -126,6 +126,8 @@ pub enum DataKey {
     EventMetadataMaxSize(Symbol),
     /// Global metadata size cap (issue #67). Absent = DEFAULT_MAX_METADATA_SIZE.
     GlobalMetadataMaxSize,
+    /// Per-event-type metadata validation schema (issue #202). Absent = no schema constraint.
+    MetadataSchema(Symbol),
     /// Cached full runtime state for fast reads.
     RuntimeState,
     /// Signature stored for an event (issue #69): (pubkey, signature).
@@ -236,6 +238,11 @@ pub enum ContractError {
     /// **Common cause**: Metadata payload larger than `global_metadata_max_size` or event-type specific limit.
     /// **Resolution**: Reduce metadata size, or owner should increase limit via `set_global_metadata_max_size()` or `set_event_metadata_max_size()`.
     MetadataTooLarge = 8,
+
+    /// **Code 32**: Metadata does not satisfy the configured min-length schema for its event type.
+    /// **Common cause**: Owner configured a min-bytes schema for this event type and the submitted metadata is too short.
+    /// **Resolution**: Include more metadata bytes or have the owner reduce the constraint via `set_metadata_schema`.
+    MetadataSchemaViolation = 32,
 
     /// **Code 9**: Contract has not been initialized.
     /// **Common cause**: Attempting to call functions before `initialize(owner, global_max_logs)`.
@@ -404,6 +411,7 @@ pub enum ProposalAction {
     RemoveOwner(Address),
     SetRequiredSignatures(u32),
     SetGlobalMaxLogs(u32),
+    SetMetadataSchema(Symbol, Bytes),
     Pause,
     Unpause,
 }
@@ -458,6 +466,7 @@ pub enum ProposalAction {
     RemoveOwner(Address),
     SetRequiredSignatures(u32),
     SetGlobalMaxLogs(u32),
+    SetMetadataSchema(Symbol, Bytes),
     Pause,
     Unpause,
 }
@@ -613,6 +622,9 @@ impl AuditLedger {
             if metadata.len() > max_meta {
                 panic_with_error!(&env, ContractError::MetadataTooLarge);
             }
+
+            // --- issue #202: validate metadata against optional per-type schema ---
+            Self::validate_metadata_against_schema(&env, &event_type, &metadata);
 
             if let Some(limit) = env
                 .storage()
@@ -897,6 +909,9 @@ impl AuditLedger {
         if metadata.len() > max_meta {
             panic_with_error!(&env, ContractError::MetadataTooLarge);
         }
+
+        // --- issue #202: validate metadata against optional per-type schema ---
+        Self::validate_metadata_against_schema(&env, &event_type, &metadata);
 
         if rs.total_events >= rs.global_max_logs {
             panic_with_error!(&env, ContractError::GlobalMaxLogsReached);
@@ -1833,6 +1848,9 @@ impl AuditLedger {
             panic_with_error!(&env, ContractError::MetadataTooLarge);
         }
 
+        // --- issue #202: validate new metadata against optional per-type schema ---
+        Self::validate_metadata_against_schema(&env, &current_event.event_type, &new_metadata);
+
         let new_id = Self::compute_event_id(
             &env,
             &current_event.submitter,
@@ -2319,6 +2337,34 @@ impl AuditLedger {
             .set(&DataKey::EventMetadataMaxSize(event_type), &max_size);
     }
 
+    /// Set a metadata validation schema for a specific event type (owner-only, issue #202).
+    ///
+    /// The schema format is length-prefixed: the first 4 bytes (LE u32) encode the
+    /// minimum required metadata length in bytes.  If `schema` is empty or shorter
+    /// than 4 bytes, the constraint is removed (any metadata passes).
+    pub fn set_metadata_schema(env: Env, caller: Address, event_type: Symbol, schema: Bytes) {
+        Self::require_initialized(&env);
+        caller.require_auth();
+        if let Some(true) = env.storage().instance().get::<_, bool>(&DataKey::Paused) {
+            panic_with_error!(&env, ContractError::ContractPaused);
+        }
+        Self::require_owner_or_multisig(&env, &caller);
+        env.storage().instance().set(&DataKey::MetadataSchema(event_type.clone()), &schema);
+        env.events().publish(
+            (Symbol::new(&env, "governance"), Symbol::new(&env, "set_metadata_schema")),
+            (caller, event_type, schema.len() as u32),
+        );
+    }
+
+    /// Return the metadata validation schema for `event_type`, or empty `Bytes` if none is configured (issue #202).
+    pub fn get_metadata_schema(env: Env, event_type: Symbol) -> Bytes {
+        Self::require_initialized(&env);
+        env.storage()
+            .instance()
+            .get(&DataKey::MetadataSchema(event_type))
+            .unwrap_or_else(|| Bytes::new(&env))
+    }
+
     /// Set the TTL for events written to persistent storage (#121).
     ///
     /// When `ttl_ledgers > 0`, subsequent `log_event` calls store each event in
@@ -2797,6 +2843,21 @@ impl AuditLedger {
         metadata.len() >= min_len
     }
 
+    /// Panic with `MetadataSchemaViolation` if `metadata` does not satisfy the
+    /// optional schema configured for `event_type`.  When no schema is configured,
+    /// validation is a no-op (issue #202).
+    fn validate_metadata_against_schema(env: &Env, event_type: &Symbol, metadata: &Bytes) {
+        if let Some(schema) = env
+            .storage()
+            .instance()
+            .get::<_, Bytes>(&DataKey::MetadataSchema(event_type.clone()))
+        {
+            if !Self::validate_metadata_schema(metadata, &schema) {
+                panic_with_error!(env, ContractError::MetadataSchemaViolation);
+            }
+        }
+    }
+
     // ── issue #54: packed-Bytes index storage helpers ────────────────────────
 
     /// Append a global order index (u32, 4 bytes LE) to the packed Bytes for `event_type`.
@@ -3105,6 +3166,9 @@ impl AuditLedger {
                     c.global_max_logs = v;
                     env.storage().instance().set(&DataKey::Config, &c);
                 }
+            }
+            ProposalAction::SetMetadataSchema(ref event_type, ref schema) => {
+                env.storage().instance().set(&DataKey::MetadataSchema(event_type.clone()), schema);
             }
             ProposalAction::Pause => {
                 env.storage().instance().set(&DataKey::Paused, &true);
