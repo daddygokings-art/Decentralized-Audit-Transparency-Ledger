@@ -1,8 +1,8 @@
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 import { AuditLedgerClient } from '../AuditLedgerClient';
-import { AuditLedgerError } from '../types';
+import { AuditLedgerError, Event } from '../types';
 
-function makeEvent(index: number): any {
+function makeEvent(index: number): Event {
   return {
     index,
     timestamp: 1_700_000_000 + index,
@@ -25,7 +25,7 @@ describe('AuditLedgerClient', () => {
   });
 
   it('calls transport for totalEvents', async () => {
-    const transport = async (method: string, params: any[]) => {
+    const transport = async (method: string, _params: unknown[]) => {
       if (method === 'total_events') return 42;
       return null;
     };
@@ -35,7 +35,7 @@ describe('AuditLedgerClient', () => {
   });
 
   it('calls transport for logEvents', async () => {
-    const transport = async (method: string, params: any[]) => {
+    const transport = async (method: string, _params: unknown[]) => {
       if (method === 'log_events') return [0, 1, 2];
       return null;
     };
@@ -87,14 +87,14 @@ describe('AuditLedgerClient', () => {
   });
 
   it('supports paginated retrieval with cursor-based offsets', async () => {
-    const transport = vi.fn().mockImplementation(async (method: string, params: any[]) => {
+    const transport = vi.fn().mockImplementation(async (method: string, params: unknown[]) => {
       if (method === 'total_events') return 5;
-      if (method === 'get_event_by_order') return makeEvent(params[0]);
+      if (method === 'get_event_by_order') return makeEvent(params[0] as number);
       return null;
     });
     const client = new AuditLedgerClient(transport);
     const page = await client.getEvents(0, 3, 2);
-    expect(page.items.map((event) => event.index)).toEqual([2, 3, 4]);
+    expect(page.items.map((event: Event) => event.index)).toEqual([2, 3, 4]);
     expect(page.offset).toBe(2);
   });
 
@@ -110,9 +110,9 @@ describe('AuditLedgerClient', () => {
   });
 
   it('streams events with progress updates', async () => {
-    const transport = vi.fn().mockImplementation(async (method: string, params: any[]) => {
+    const transport = vi.fn().mockImplementation(async (method: string, params: unknown[]) => {
       if (method === 'total_events') return 2;
-      if (method === 'get_event_by_order') return makeEvent(params[0]);
+      if (method === 'get_event_by_order') return makeEvent(params[0] as number);
       return null;
     });
     const client = new AuditLedgerClient(transport);
