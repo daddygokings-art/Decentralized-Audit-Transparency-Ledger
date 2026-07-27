@@ -352,6 +352,50 @@ pub struct ContractStatistics {
     pub top_submitters: Vec<(Address, u32)>,
 }
 
+/// Result of a single event in a batch submission (issue #223).
+#[contracttype]
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct BatchEventResult {
+    /// Index of the event within the batch.
+    pub batch_index: u32,
+    /// Whether this event was successfully logged.
+    pub success: bool,
+    /// Event ID (BytesN<32>) if successful, or None if failed.
+    pub event_id: Option<BytesN<32>>,
+    /// Error message if failed, or empty if successful.
+    pub error: Bytes,
+}
+
+/// State of a batch submission retry (issue #223).
+#[contracttype]
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct BatchRetryState {
+    /// Batch identifier.
+    pub batch_id: u32,
+    /// Total events in original batch.
+    pub total_events: u32,
+    /// Number of events successfully logged.
+    pub succeeded: u32,
+    /// Number of events that failed.
+    pub failed: u32,
+    /// Timestamp when the batch was first submitted.
+    pub created_at: u64,
+    /// Whether the batch has been fully retried.
+    pub completed: bool,
+}
+
+/// Record of an event access (issue #216).
+#[contracttype]
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct AccessRecord {
+    /// The address that accessed the event.
+    pub accessor: Address,
+    /// The index of the event accessed.
+    pub event_index: u32,
+    /// Timestamp of the access.
+    pub timestamp: u64,
+}
+
 #[contracttype]
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub enum ProposalAction {
