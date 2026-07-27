@@ -1,4 +1,8 @@
-export type Bytes32 = string; // hex/base64 representation
+/** Hex or base64 encoded 32-byte hash string. */
+export type Bytes32 = string;
+
+/** Hex or base64 encoded byte payload. */
+export type Bytes = string;
 
 export interface Event {
   index: number;
@@ -8,6 +12,27 @@ export interface Event {
   metadata: string;
   event_hash: Bytes32;
   prev_hash: Bytes32;
+}
+
+export interface EventHeader {
+  index: number;
+  timestamp: number;
+  event_type: string;
+  submitter: string;
+}
+
+export interface NonceState {
+  last_nonce: number;
+  window_size: number;
+  max_nonce: number;
+}
+
+export interface SnapshotMetadata {
+  id: number;
+  timestamp: number;
+  event_count: number;
+  event_hash: Bytes32;
+  description: string;
 }
 
 export interface ContractStatistics {
@@ -57,4 +82,31 @@ export class AuditLedgerError extends Error {
     this.code = code;
     this.status = status;
   }
+}
+
+/** Batch signing types (issue #218). */
+export interface SignedEvent {
+  event_type: string;
+  submitter: string;
+  metadata: string;
+  timestamp: number;
+  nonce: number;
+}
+
+export interface BatchSignature {
+  /** Public key of the signer (hex-encoded Ed25519 pubkey). */
+  pubkey: string;
+  /** Ed25519 signature over the SHA-256 of the concatenated event hashes. */
+  signature: string;
+  /** Number of events covered by this batch signature. */
+  event_count: number;
+  /** SHA-256 hash of the concatenated event preimages. */
+  batch_hash: Bytes32;
+}
+
+export interface BatchVerificationResult {
+  valid: boolean;
+  event_count: number;
+  batch_hash: Bytes32;
+  error?: string;
 }

@@ -1,10 +1,12 @@
-import { ContractStatistics, Event, AuditLedgerError } from './types';
+import { ContractStatistics, Event, EventHeader, AuditLedgerError, CacheStats, SnapshotMetadata, BatchSignature, BatchVerificationResult } from './types';
 import { Logger, LogLevel, LoggerOptions } from './logger';
 import { EventValidator, ValidatorOptions, EventInput } from './validator';
 import { SubscriptionManager, SubscriptionOptions, EventCallback, Subscription } from './subscriptions';
 import { BatchProcessor, BatchItem, BatchProcessorOptions, BatchProcessorResult, ProgressCallback } from './batch';
+import { BatchSigner } from './batch-signing';
 
-export type Transport = (method: string, params: any[]) => Promise<any>;
+/** Transport function type: sends a Soroban RPC method call and returns the result. */
+export type Transport = (method: string, params: unknown[]) => Promise<unknown>;
 
 export interface RetryOptions {
   maxRetries?: number;
@@ -30,7 +32,7 @@ export class AuditLedgerClient {
   maxRetries: number;
   baseDelayMs: number;
   private eventCache: Map<number, Event>;
-  private totalEventsCache?: number;
+  private totalEventsCache: number | undefined;
   private cacheHits: number;
   private cacheMisses: number;
   private maxCacheSize: number;
@@ -74,7 +76,7 @@ export class AuditLedgerClient {
   }
 
   static fromRpc(rpcUrl: string, contractId?: string, retryOptions: RetryOptions = {}) {
-    const transport: Transport = async (method, params) => {
+    const transport: Transport = async (method: string, params: unknown[]) => {
       try {
         const res = await fetch(rpcUrl, {
           method: 'POST',
@@ -82,7 +84,7 @@ export class AuditLedgerClient {
           body: JSON.stringify({ method, params }),
         });
         if (!res.ok) throw new AuditLedgerError('Transport error', undefined, res.status);
-        const json = await res.json();
+        const json: { result?: unknown; error?: { message: string; code: number } } = await res.json() as { result?: unknown; error?: { message: string; code: number } };
         if (json.error) throw new AuditLedgerError(json.error.message, json.error.code, res.status);
         return json.result;
       } catch (err) {
@@ -97,7 +99,7 @@ export class AuditLedgerClient {
     await new Promise((resolve) => setTimeout(resolve, ms));
   }
 
-  private isRetryableError(err: unknown) {
+  private isRetryableError(err: unknown): boolean {
     if (err instanceof AuditLedgerError) {
       return err.status === 429 || err.status === 503;
     }
@@ -111,7 +113,7 @@ export class AuditLedgerClient {
     return false;
   }
 
-  private async callTransport<T>(method: string, params: any[]): Promise<T> {
+  private async callTransport<T>(method: string, params: unknown[]): Promise<T> {
     // #237 — log request
     this.logger.logRequest(method, params);
     const start = Date.now();
@@ -206,7 +208,7 @@ export class AuditLedgerClient {
     return { items, total, offset: start, limit: safeLimit };
   }
 
-  async *streamEvents(afterIndex = 0, pollIntervalMs = 5000): Promise<AsyncGenerator<Event>> {
+  async *streamEvents(afterIndex = 0, pollIntervalMs = 5000): AsyncGenerator<Event> {
     let cursor = Math.max(afterIndex, 0);
     while (true) {
       const total = await this.totalEvents();
@@ -236,14 +238,17 @@ export class AuditLedgerClient {
 
   exportEvents(events: Event[], fmt: 'json' | 'csv' = 'json', streaming = false, onProgress?: (progress: { completed: number; total: number }) => void): string {
     const total = events.length;
-    const rows = events.map((event, index) => {
+    const rows = events.map((event: Event, index: number) => {
+      const metadataHex = Array.from(event.metadata)
+        .map((c: string) => c.charCodeAt(0).toString(16).padStart(2, '0'))
+        .join('');
       const record = {
         index: event.index,
         timestamp: event.timestamp,
         event_type: event.event_type,
         submitter: event.submitter,
         metadata: event.metadata,
-        metadata_hex: Buffer.from(event.metadata).toString('hex'),
+        metadata_hex: metadataHex,
         event_hash: event.event_hash,
         prev_hash: event.prev_hash,
       };
@@ -366,6 +371,15 @@ export class AuditLedgerClient {
       completed++;
       onProgress?.({ completed, total });
     }
+  }
+
+  // ── #218 — Batch Signing ────────────────────────────────────────────────
+
+  /**
+   * Get the batch signer instance for signing/verifying event batches.
+   */
+  getBatchSigner(): BatchSigner {
+    return new BatchSigner();
   }
 }
 

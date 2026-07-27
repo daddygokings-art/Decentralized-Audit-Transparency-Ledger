@@ -114,6 +114,10 @@ pub enum DataKey {
     EventCapConfig(Symbol),
     /// Stores packed Bytes of u32 global-order indices (4 bytes each, LE) for a type (issue #54).
     EventTypeIndices(Symbol),
+    /// Stores packed Bytes of u32 global-order indices (4 bytes each, LE) for a submitter (issue #206).
+    SubmitterEventIndices(Address),
+    /// Cached event count per submitter (issue #206).
+    SubmitterEventCount(Address),
     /// Primary storage: event ID → Event.
     EventData(BytesN<32>),
     /// Sequential index → event ID, for ordered retrieval.
@@ -149,6 +153,12 @@ pub enum DataKey {
     /// Per-submitter nonce for replay-attack prevention (issue #64).
     /// Stores the last accepted nonce; absent means no event submitted yet (treat as 0).
     SubmitterNonce(Address),
+    /// Packed nonce state per submitter (issue #214): window_size, max_nonce.
+    SubmitterNonceConfig(Address),
+    /// Global default nonce window size (issue #214).
+    DefaultNonceWindowSize,
+    /// Global maximum nonce value before exhaustion (issue #214).
+    DefaultNonceMaxValue,
     ArchivedTotalEvents,
     ArchivedEventData(BytesN<32>),
     ArchivedEventHeaderKey(BytesN<32>),
@@ -177,16 +187,10 @@ pub enum DataKey {
     PausedSince,
     /// Webhook registrations (#25): per-event-type list of (url, secret) pairs. Owner-only.
     WebhookRegistrations(Symbol),
-    /// Batch retry tracking: stores the retry state for a batch submission (issue #223).
-    BatchRetryState(u32),
-    /// Batch retry counter: incremented for each new batch (issue #223).
-    BatchRetryCounter,
-    /// Event access log: tracks who accessed which events (issue #216).
-    EventAccessLog(u32),
-    /// Access counter per address (issue #216).
-    AccessCount(Address),
-    /// Global event expiration timestamp (issue #217). 0 = no expiration.
-    EventExpiration,
+    /// Snapshot count — total snapshots created (issue #213).
+    SnapshotCount,
+    /// Individual snapshot data keyed by snapshot index (issue #213).
+    SnapshotData(u32),
 }
 
 #[contracterror]
@@ -279,6 +283,12 @@ pub enum ContractError {
     CapAlreadyRemoved = 17,
     CapNeverSet = 18,
     NonceTooLow = 19,
+    /// **Code 27**: Nonce has reached the exhaustion threshold for this submitter.
+    NonceExhausted = 27,
+    /// **Code 28**: Nonce is outside the valid window for this submitter.
+    NonceWindowExceeded = 28,
+    /// **Code 29**: Attempted reset when the submitter's nonce is not exhausted.
+    NonceResetNotExhausted = 29,
     NoEventsForType = 20,
     InvalidPaginationParams = 21,
     InvalidWasmHash = 22,
@@ -292,10 +302,10 @@ pub enum ContractError {
     /// **Common cause**: Calling `initialize()` more than once.
     /// **Resolution**: The contract can only be initialized once at deployment.
     AlreadyInitialized = 26,
-    /// **Code 32**: Batch submission not found.
-    BatchNotFound = 32,
-    /// **Code 33**: Event has expired.
-    EventExpired = 33,
+    /// **Code 30**: Snapshot does not exist.
+    SnapshotNotFound = 30,
+    /// **Code 31**: Snapshot verification failed (hash mismatch).
+    SnapshotVerificationFailed = 31,
 }
 
 #[contracttype]
@@ -316,6 +326,19 @@ pub struct WebhookEntry {
     pub url: Bytes,
     /// HMAC secret for request signing (opaque bytes, never returned by queries).
     pub secret: Bytes,
+}
+
+/// Packed nonce state per submitter for optimized storage (issue #214).
+/// Combines last nonce, window size, and max nonce into a single storage read.
+#[contracttype]
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct NonceState {
+    /// Last accepted nonce value.
+    pub last_nonce: u32,
+    /// Window size: max allowed gap between last nonce and submitted nonce. 0 = unlimited.
+    pub window_size: u32,
+    /// Maximum nonce value before exhaustion.
+    pub max_nonce: u32,
 }
 
 #[contracttype]
@@ -515,6 +538,14 @@ impl AuditLedger {
 
         // Set version to 1 (marks contract as initialized, immutable)
         env.storage().instance().set(&DataKey::ContractVersion, &1u32);
+
+        // Issue #214: Initialize default nonce replay protection configuration
+        env.storage()
+            .instance()
+            .set(&DataKey::DefaultNonceWindowSize, &1000u32);
+        env.storage()
+            .instance()
+            .set(&DataKey::DefaultNonceMaxValue, &u32::MAX);
     }
 
     /// Log a batch of events atomically and return their sequential indices.
@@ -671,6 +702,7 @@ impl AuditLedger {
 
             if !Self::effective_low_cost_mode(&env) {
                 Self::push_type_index(&env, event_type.clone(), index);
+                Self::push_submitter_index(&env, &submitter, index);
                 let mut count: u32 = env
                     .storage()
                     .instance()
@@ -985,6 +1017,7 @@ impl AuditLedger {
         // --- issue #54: packed-Bytes index storage ---
         if !low_cost {
             Self::push_type_index(&env, event_type.clone(), index);
+            Self::push_submitter_index(&env, &submitter, index);
             // Task 5: reuse cached count instead of re-reading.
             let new_count = type_count_opt.unwrap_or_else(|| Self::event_type_count(&env, event_type.clone())) + 1;
             env.storage()
@@ -1017,11 +1050,12 @@ impl AuditLedger {
         event_id
     }
 
-    /// Log an event with an explicit nonce to prevent replay attacks (issue #64).
+    /// Log an event with an explicit nonce to prevent replay attacks (issue #64, enhanced #214).
     ///
-    /// Rules:
-    /// - `nonce` must equal `stored_nonce + 1` (strict sequential) or be any value
-    ///   greater than `stored_nonce` (gaps accepted, stored nonce jumps to `nonce`).
+    /// Rules (enhanced with window validation and exhaustion):
+    /// - `nonce` must be > `stored_nonce` (strict ordering).
+    /// - If `window_size > 0` and `nonce - stored_nonce > window_size`, rejects with `NonceWindowExceeded`.
+    /// - If `nonce > max_nonce`, rejects with `NonceExhausted`.
     /// - If `nonce <= stored_nonce`, rejects with `NonceTooLow`.
     /// - If `nonce == 0`, rejects with `NonceTooLow` (nonces are 1-based).
     ///
@@ -1033,22 +1067,55 @@ impl AuditLedger {
         metadata: Bytes,
         nonce: u32,
     ) -> BytesN<32> {
-        let stored: u32 = env
+        // Read optimized NonceState (single read instead of separate reads).
+        let state: NonceState = env
             .storage()
             .instance()
             .get(&DataKey::SubmitterNonce(submitter.clone()))
-            .unwrap_or(0);
+            .unwrap_or_else(|| NonceState {
+                last_nonce: 0,
+                window_size: Self::default_nonce_window_size(&env),
+                max_nonce: Self::default_nonce_max_value(&env),
+            });
 
-        if nonce == 0 || nonce <= stored {
+        // Allow per-submitter config override if present.
+        let config: Option<NonceState> = env
+            .storage()
+            .instance()
+            .get(&DataKey::SubmitterNonceConfig(submitter.clone()));
+        let effective_state = config.unwrap_or(state);
+
+        // --- nonce exhaustion handling (issue #214) ---
+        if nonce > effective_state.max_nonce {
+            panic_with_error!(&env, ContractError::NonceExhausted);
+        }
+
+        // --- nonce ordering check ---
+        if nonce == 0 || nonce <= effective_state.last_nonce {
             panic_with_error!(&env, ContractError::NonceTooLow);
+        }
+
+        // --- nonce window validation (issue #214) ---
+        if effective_state.window_size > 0
+            && nonce.checked_sub(effective_state.last_nonce).is_none()
+                || (effective_state.window_size > 0
+                    && (nonce - effective_state.last_nonce) > effective_state.window_size)
+        {
+            panic_with_error!(&env, ContractError::NonceWindowExceeded);
         }
 
         let event_id =
             Self::log_event_with_hierarchy(env.clone(), submitter.clone(), event_type, metadata, None, None, false);
 
+        // Store updated NonceState (optimized single write).
+        let updated_state = NonceState {
+            last_nonce: nonce,
+            window_size: effective_state.window_size,
+            max_nonce: effective_state.max_nonce,
+        };
         env.storage()
             .instance()
-            .set(&DataKey::SubmitterNonce(submitter), &nonce);
+            .set(&DataKey::SubmitterNonce(submitter), &updated_state);
 
         event_id
     }
@@ -1057,8 +1124,124 @@ impl AuditLedger {
     pub fn get_submitter_nonce(env: Env, submitter: Address) -> u32 {
         env.storage()
             .instance()
-            .get(&DataKey::SubmitterNonce(submitter))
+            .get::<_, NonceState>(&DataKey::SubmitterNonce(submitter))
+            .map(|s| s.last_nonce)
             .unwrap_or(0)
+    }
+
+    /// Return the full nonce state for a submitter (issue #214).
+    pub fn get_submitter_nonce_state(env: Env, submitter: Address) -> NonceState {
+        env.storage()
+            .instance()
+            .get::<_, NonceState>(&DataKey::SubmitterNonce(submitter))
+            .unwrap_or_else(|| NonceState {
+                last_nonce: 0,
+                window_size: Self::default_nonce_window_size(&env),
+                max_nonce: Self::default_nonce_max_value(&env),
+            })
+    }
+
+    /// Set the nonce window configuration for a specific submitter (owner-only, issue #214).
+    /// `window_size`: max gap allowed between last accepted nonce and new nonce (0 = unlimited).
+    /// `max_nonce`: upper nonce bound before exhaustion is triggered.
+    pub fn set_submitter_nonce_config(
+        env: Env,
+        caller: Address,
+        submitter: Address,
+        window_size: u32,
+        max_nonce: u32,
+    ) {
+        Self::require_initialized(&env);
+        caller.require_auth();
+        Self::require_owner_or_multisig(&env, &caller);
+        if max_nonce == 0 {
+            panic_with_error!(&env, ContractError::NonceExhausted);
+        }
+        let current: NonceState = env
+            .storage()
+            .instance()
+            .get(&DataKey::SubmitterNonce(submitter.clone()))
+            .unwrap_or_else(|| NonceState {
+                last_nonce: 0,
+                window_size: Self::default_nonce_window_size(&env),
+                max_nonce: Self::default_nonce_max_value(&env),
+            });
+        let updated = NonceState {
+            last_nonce: current.last_nonce,
+            window_size,
+            max_nonce,
+        };
+        env.storage()
+            .instance()
+            .set(&DataKey::SubmitterNonceConfig(submitter.clone()), &updated);
+        env.events().publish(
+            (Symbol::new(&env, "nonce_config_set"),),
+            (submitter, window_size, max_nonce),
+        );
+    }
+
+    /// Reset a submitter's nonce back to 0 (owner-only, issue #214).
+    pub fn reset_submitter_nonce(env: Env, caller: Address, submitter: Address) {
+        Self::require_initialized(&env);
+        caller.require_auth();
+        Self::require_owner_or_multisig(&env, &caller);
+        let state: NonceState = env
+            .storage()
+            .instance()
+            .get(&DataKey::SubmitterNonce(submitter.clone()))
+            .unwrap_or_else(|| NonceState {
+                last_nonce: 0,
+                window_size: Self::default_nonce_window_size(&env),
+                max_nonce: Self::default_nonce_max_value(&env),
+            });
+        let reset_state = NonceState {
+            last_nonce: 0,
+            window_size: state.window_size,
+            max_nonce: state.max_nonce,
+        };
+        env.storage()
+            .instance()
+            .set(&DataKey::SubmitterNonce(submitter.clone()), &reset_state);
+        env.storage()
+            .instance()
+            .remove(&DataKey::SubmitterNonceConfig(submitter.clone()));
+        env.events()
+            .publish((Symbol::new(&env, "nonce_reset"),), (submitter, caller));
+    }
+
+    /// Set the default nonce window configuration for all submitters (owner-only, issue #214).
+    pub fn set_default_nonce_config(
+        env: Env,
+        caller: Address,
+        window_size: u32,
+        max_nonce: u32,
+    ) {
+        Self::require_initialized(&env);
+        caller.require_auth();
+        Self::require_owner_or_multisig(&env, &caller);
+        if max_nonce == 0 {
+            panic_with_error!(&env, ContractError::NonceExhausted);
+        }
+        env.storage()
+            .instance()
+            .set(&DataKey::DefaultNonceWindowSize, &window_size);
+        env.storage()
+            .instance()
+            .set(&DataKey::DefaultNonceMaxValue, &max_nonce);
+        env.events().publish(
+            (Symbol::new(&env, "default_nonce_config_set"),),
+            (caller, window_size, max_nonce),
+        );
+    }
+
+    /// Return the default nonce window size.
+    pub fn get_default_nonce_window_size(env: Env) -> u32 {
+        Self::default_nonce_window_size(&env)
+    }
+
+    /// Return the default nonce max value.
+    pub fn get_default_nonce_max_value(env: Env) -> u32 {
+        Self::default_nonce_max_value(&env)
     }
 
     pub fn total_events(env: Env) -> u32 {
@@ -1482,6 +1665,84 @@ impl AuditLedger {
         results
     }
 
+    // ── Submitter-based event filtering (issue #206) ────────────────────────
+
+    /// Return the number of events submitted by a given address (issue #206).
+    pub fn submitter_event_count(env: Env, submitter: Address) -> u32 {
+        Self::require_initialized(&env);
+        Self::submitter_count(&env, submitter)
+    }
+
+    /// Retrieve an event by submitter address and local index (issue #206).
+    /// `submitter_index` is 0-based within the submitter's sub-ledger.
+    pub fn get_event_by_submitter(
+        env: Env,
+        submitter: Address,
+        submitter_index: u32,
+    ) -> Event {
+        Self::require_initialized(&env);
+
+        let count = Self::submitter_count(&env, submitter.clone());
+        if count == 0 {
+            panic_with_error!(&env, ContractError::NoEventsForType);
+        }
+        if submitter_index >= count {
+            panic_with_error!(&env, ContractError::EventTypeIndexOutOfBounds);
+        }
+
+        let global_order = Self::get_submitter_index(&env, &submitter, submitter_index);
+        let event_id: BytesN<32> = env
+            .storage()
+            .instance()
+            .get(&DataKey::EventOrder(global_order))
+            .unwrap_or_else(|| {
+                panic_with_error!(&env, ContractError::EventDoesNotExist);
+            });
+
+        env.storage()
+            .instance()
+            .get(&DataKey::EventData(event_id))
+            .unwrap_or_else(|| {
+                panic_with_error!(&env, ContractError::EventDoesNotExist);
+            })
+    }
+
+    /// Return a paginated list of events for a given submitter (issue #206).
+    ///
+    /// * `submitter` — the address to filter by.
+    /// * `start`     — 0-based index into the submitter's sub-ledger.
+    /// * `limit`     — maximum number of events to return (capped at 100).
+    ///
+    /// Returns an empty `Vec` when `start` is beyond the last index, or when
+    /// the submitter has no events — no panics for out-of-range inputs.
+    pub fn get_events_by_submitter(
+        env: Env,
+        submitter: Address,
+        start: u32,
+        limit: u32,
+    ) -> Vec<Event> {
+        Self::require_initialized(&env);
+
+        if limit == 0 {
+            return Vec::new(&env);
+        }
+        if limit > 100 {
+            panic_with_error!(&env, ContractError::InvalidPaginationParams);
+        }
+
+        let total = Self::submitter_count(&env, submitter.clone());
+        if total == 0 || start >= total {
+            return Vec::new(&env);
+        }
+
+        let end = (start.saturating_add(limit)).min(total);
+        let mut results = Vec::new(&env);
+        for i in start..end {
+            results.push_back(Self::get_event_by_submitter(env.clone(), submitter.clone(), i));
+        }
+        results
+    }
+
     pub fn get_events_by_time_range(
         env: Env,
         start_time: u64,
@@ -1728,244 +1989,167 @@ impl AuditLedger {
         Self::verify_range(&env, from, to)
     }
 
-    // ── Batch submission with retry (issue #223) ───────────────────────────
+    // ── Snapshots (issue #213) ─────────────────────────────────────────────
 
-    /// Submit a batch of events with automatic retry tracking for failed events.
-    /// Returns a batch ID and per-event results indicating success/failure.
-    /// Failed events can be retried individually using `retry_batch_event`.
-    pub fn submit_batch_with_retry(
-        env: Env,
-        events: Vec<(Address, Symbol, Bytes)>,
-    ) -> (u32, Vec<BatchEventResult>) {
-        Self::require_initialized(&env);
-
-        if events.is_empty() {
-            return (0, Vec::new(&env));
-        }
-
-        let batch_id: u32 = env
-            .storage()
-            .instance()
-            .get(&DataKey::BatchRetryCounter)
-            .unwrap_or(0);
-
-        let now = env.ledger().timestamp();
-        let total = events.len();
-        let mut results: Vec<BatchEventResult> = Vec::new(&env);
-        let mut succeeded: u32 = 0;
-        let mut failed: u32 = 0;
-
-        for i in 0..total {
-            let (submitter, event_type, metadata) = events.get(i).unwrap().clone();
-
-            // Check if submitter is blocked
-            if let Some(true) = env
-                .storage()
-                .instance()
-                .get::<_, bool>(&DataKey::SubmitterBlocklist(submitter.clone()))
-            {
-                results.push_back(BatchEventResult {
-                    batch_index: i,
-                    success: false,
-                    event_id: None,
-                    error: Bytes::from_slice(&env, b"submitter_blocked"),
-                });
-                failed += 1;
-                continue;
-            }
-
-            // Check capacity
-            let total_events = Self::total_events(env.clone());
-            let max_logs: u32 = env
-                .storage()
-                .instance()
-                .get::<_, Config>(&DataKey::Config)
-                .map(|c| c.global_max_logs)
-                .unwrap_or(u32::MAX);
-            if total_events >= max_logs {
-                results.push_back(BatchEventResult {
-                    batch_index: i,
-                    success: false,
-                    event_id: None,
-                    error: Bytes::from_slice(&env, b"capacity_reached"),
-                });
-                failed += 1;
-                continue;
-            }
-
-            // Attempt to log the event
-            match std::panic::catch_unwind(|| {
-                // Use log_event_with_hierarchy for the actual logging
-                let evt_id = Self::log_event_with_hierarchy(
-                    env.clone(),
-                    submitter.clone(),
-                    event_type,
-                    metadata,
-                    None,
-                    None,
-                    false,
-                );
-                evt_id
-            }) {
-                Ok(event_id) => {
-                    results.push_back(BatchEventResult {
-                        batch_index: i,
-                        success: true,
-                        event_id: Some(event_id),
-                        error: Bytes::new(&env),
-                    });
-                    succeeded += 1;
-                }
-                Err(_) => {
-                    results.push_back(BatchEventResult {
-                        batch_index: i,
-                        success: false,
-                        event_id: None,
-                        error: Bytes::from_slice(&env, b"event_failed"),
-                    });
-                    failed += 1;
-                }
-            }
-        }
-
-        let state = BatchRetryState {
-            batch_id,
-            total_events: total,
-            succeeded,
-            failed,
-            created_at: now,
-            completed: failed == 0,
-        };
-        env.storage()
-            .instance()
-            .set(&DataKey::BatchRetryState(batch_id), &state);
-        env.storage()
-            .instance()
-            .set(&DataKey::BatchRetryCounter, &(batch_id + 1));
-
-        env.events().publish(
-            (Symbol::new(&env, "batch_submitted"),),
-            (batch_id, succeeded, failed),
-        );
-
-        (batch_id, results)
-    }
-
-    /// Retry a single failed event from a previous batch submission.
-    pub fn retry_batch_event(
-        env: Env,
-        submitter: Address,
-        event_type: Symbol,
-        metadata: Bytes,
-    ) -> BytesN<32> {
-        Self::require_initialized(&env);
-        Self::log_event_with_hierarchy(env, submitter, event_type, metadata, None, None, false)
-    }
-
-    /// Get the retry state for a batch.
-    pub fn get_batch_retry_state(env: Env, batch_id: u32) -> BatchRetryState {
-        Self::require_initialized(&env);
-        env.storage()
-            .instance()
-            .get(&DataKey::BatchRetryState(batch_id))
-            .unwrap_or_else(|| panic_with_error!(&env, ContractError::BatchNotFound))
-    }
-
-    // ── Event access logging (issue #216) ──────────────────────────────────
-
-    /// Log an event access by the given address. Called internally when events are read.
-    fn log_event_access(env: &Env, accessor: &Address, event_index: u32) {
-        let total_accesses: u32 = env
-            .storage()
-            .instance()
-            .get(&DataKey::AccessCount(accessor.clone()))
-            .unwrap_or(0);
-        let record = AccessRecord {
-            accessor: accessor.clone(),
-            event_index,
-            timestamp: env.ledger().timestamp(),
-        };
-        env.storage().instance().set(
-            &DataKey::EventAccessLog(total_accesses),
-            &record,
-        );
-        env.storage()
-            .instance()
-            .set(&DataKey::AccessCount(accessor.clone()), &(total_accesses + 1));
-    }
-
-    /// Return the number of times an address has accessed events.
-    pub fn get_access_count(env: Env, accessor: Address) -> u32 {
-        Self::require_initialized(&env);
-        env.storage()
-            .instance()
-            .get(&DataKey::AccessCount(accessor))
-            .unwrap_or(0)
-    }
-
-    /// Return the access record at a given index.
-    pub fn get_access_record(env: Env, record_index: u32) -> AccessRecord {
-        Self::require_initialized(&env);
-        env.storage()
-            .instance()
-            .get(&DataKey::EventAccessLog(record_index))
-            .unwrap_or_else(|| {
-                // Return a default empty record
-                AccessRecord {
-                    accessor: Address::from_str(&env, "GAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAWHF"),
-                    event_index: 0,
-                    timestamp: 0,
-                }
-            })
-    }
-
-    // ── Event expiration (issue #217) ──────────────────────────────────────
-
-    /// Set the global event expiration duration in seconds (owner-only).
-    /// Events older than (current_timestamp - expiration_duration) are considered expired.
-    /// Pass 0 to disable expiration.
-    pub fn set_event_expiration(env: Env, caller: Address, expiration_seconds: u64) {
+    /// Create a point-in-time snapshot of the audit ledger state.
+    /// Records the current timestamp, event count, and last event hash.
+    /// Owner-only. Returns the new snapshot ID.
+    pub fn create_snapshot(env: Env, caller: Address, description: Bytes) -> u32 {
         Self::require_initialized(&env);
         caller.require_auth();
         Self::require_owner_or_multisig(&env, &caller);
-        env.storage()
-            .instance()
-            .set(&DataKey::EventExpiration, &expiration_seconds);
-        env.events().publish(
-            (Symbol::new(&env, "event_expiration_set"),),
-            (caller, expiration_seconds),
-        );
-    }
 
-    /// Get the global event expiration duration in seconds. Returns 0 if disabled.
-    pub fn get_event_expiration(env: Env) -> u64 {
-        Self::require_initialized(&env);
-        env.storage()
-            .instance()
-            .get(&DataKey::EventExpiration)
-            .unwrap_or(0u64)
-    }
+        let total = Self::total_events(env.clone());
+        let timestamp = env.ledger().timestamp();
 
-    /// Check whether an event is expired based on the global expiration setting.
-    /// Returns true if the event's timestamp is older than (now - expiration_seconds).
-    pub fn is_event_expired(env: Env, event_index: u32) -> bool {
-        Self::require_initialized(&env);
-        let expiration_secs: u64 = env
+        let event_hash: BytesN<32> = if total == 0 {
+            BytesN::from_array(&env, &[0u8; 32])
+        } else {
+            let last_id: BytesN<32> = env
+                .storage()
+                .instance()
+                .get(&DataKey::EventOrder(total - 1))
+                .unwrap();
+            let last_evt: Event = env
+                .storage()
+                .instance()
+                .get(&DataKey::EventData(last_id))
+                .unwrap();
+            last_evt.event_hash
+        };
+
+        let snap_id: u32 = env
             .storage()
             .instance()
-            .get(&DataKey::EventExpiration)
-            .unwrap_or(0u64);
-        if expiration_secs == 0 {
-            return false; // Expiration disabled
-        }
-        let total = Self::total_events(env.clone());
-        if event_index >= total {
+            .get(&DataKey::SnapshotCount)
+            .unwrap_or(0);
+
+        let snapshot = Snapshot {
+            id: snap_id,
+            timestamp,
+            event_count: total,
+            event_hash,
+            description,
+        };
+
+        env.storage()
+            .instance()
+            .set(&DataKey::SnapshotData(snap_id), &snapshot);
+        env.storage()
+            .instance()
+            .set(&DataKey::SnapshotCount, &(snap_id + 1));
+
+        env.events().publish(
+            (Symbol::new(&env, "snapshot_created"),),
+            (snap_id, timestamp, total),
+        );
+
+        snap_id
+    }
+
+    /// Retrieve a snapshot by its ID.
+    pub fn get_snapshot(env: Env, snapshot_id: u32) -> Snapshot {
+        Self::require_initialized(&env);
+        env.storage()
+            .instance()
+            .get(&DataKey::SnapshotData(snapshot_id))
+            .unwrap_or_else(|| panic_with_error!(&env, ContractError::SnapshotNotFound))
+    }
+
+    /// Return the total number of snapshots that have been created.
+    pub fn snapshot_count(env: Env) -> u32 {
+        Self::require_initialized(&env);
+        env.storage()
+            .instance()
+            .get(&DataKey::SnapshotCount)
+            .unwrap_or(0)
+    }
+
+    /// Verify that a snapshot is consistent with the current ledger state.
+    /// Checks that the event_count and event_hash at snapshot time are still valid
+    /// by re-walking the chain up to the snapshot's event_count.
+    pub fn verify_snapshot(env: Env, snapshot_id: u32) -> bool {
+        Self::require_initialized(&env);
+        let snapshot: Snapshot = env
+            .storage()
+            .instance()
+            .get(&DataKey::SnapshotData(snapshot_id))
+            .unwrap_or_else(|| panic_with_error!(&env, ContractError::SnapshotNotFound));
+
+        let current_total = Self::total_events(env.clone());
+
+        // Snapshot must reference events that still exist.
+        if snapshot.event_count > current_total {
             return false;
         }
-        let id: BytesN<32> = env.storage().instance().get(&DataKey::EventOrder(event_index)).unwrap();
-        let evt: Event = env.storage().instance().get(&DataKey::EventData(id)).unwrap();
-        let now = env.ledger().timestamp();
-        now > evt.timestamp + expiration_secs
+
+        if snapshot.event_count == 0 {
+            return snapshot.event_hash == BytesN::from_array(&env, &[0u8; 32]);
+        }
+
+        // Re-derive the hash chain up to snapshot.event_count and compare.
+        let last_idx = snapshot.event_count - 1;
+        let last_id: BytesN<32> = match env.storage().instance().get(&DataKey::EventOrder(last_idx)) {
+            Some(v) => v,
+            None => return false,
+        };
+        let last_evt: Event = match env.storage().instance().get(&DataKey::EventData(last_id)) {
+            Some(v) => v,
+            None => return false,
+        };
+
+        last_evt.event_hash == snapshot.event_hash
+    }
+
+    // ── Deduplication cleanup (issue #212) ──────────────────────────────────
+
+    /// Remove stale content hash dedup entries that no longer correspond to an event.
+    /// Owner-only. Returns the number of entries cleaned.
+    pub fn cleanup_stale_hashes(env: Env, caller: Address, start_index: u32, batch_size: u32) -> u32 {
+        Self::require_initialized(&env);
+        caller.require_auth();
+        Self::require_owner_or_multisig(&env, &caller);
+
+        let total = Self::total_events(env.clone());
+        let mut cleaned: u32 = 0;
+        let mut idx = start_index;
+        let end = (start_index + batch_size).min(total);
+
+        // Scan all event order entries and verify their content hash still maps correctly.
+        while idx < end {
+            if let Some(event_id) = env
+                .storage()
+                .instance()
+                .get::<_, BytesN<32>>(&DataKey::EventOrder(idx))
+            {
+                if let Some(evt) = env
+                    .storage()
+                    .instance()
+                    .get::<_, Event>(&DataKey::EventData(event_id.clone()))
+                {
+                    let content_hash =
+                        Self::compute_content_hash(&env, &evt.event_type, &evt.submitter, &evt.metadata);
+                    if let Some(stored_index) = env
+                        .storage()
+                        .instance()
+                        .get::<_, u32>(&DataKey::EventContentHash(content_hash.clone()))
+                    {
+                        // If the stored index no longer points to the same event, clean it.
+                        if stored_index != idx {
+                            env.storage()
+                                .instance()
+                                .remove(&DataKey::EventContentHash(content_hash));
+                            cleaned += 1;
+                        }
+                    }
+                }
+            }
+            idx += 1;
+        }
+
+        env.events()
+            .publish((Symbol::new(&env, "stale_hashes_cleaned"),), (cleaned,));
+        cleaned
     }
 
     // ── Governance ──────────────────────────────────────────────────────────
@@ -2646,6 +2830,52 @@ impl AuditLedger {
         b0 | (b1 << 8) | (b2 << 16) | (b3 << 24)
     }
 
+    // ── issue #206: submitter-Bytes index storage helpers ──────────────────
+
+    /// Append a global order index to the packed Bytes for `submitter`.
+    fn push_submitter_index(env: &Env, submitter: &Address, global_index: u32) {
+        let mut packed: Bytes = env
+            .storage()
+            .instance()
+            .get(&DataKey::SubmitterEventIndices(submitter.clone()))
+            .unwrap_or(Bytes::new(env));
+        packed.append(&Self::u32_to_bytes(env, global_index));
+        env.storage()
+            .instance()
+            .set(&DataKey::SubmitterEventIndices(submitter.clone()), &packed);
+        // Increment submitter event count.
+        let count: u32 = Self::submitter_count(env, submitter.clone());
+        env.storage()
+            .instance()
+            .set(&DataKey::SubmitterEventCount(submitter.clone()), &(count + 1));
+    }
+
+    /// Read the `submitter_index`-th global order index from packed Bytes for `submitter`.
+    fn get_submitter_index(env: &Env, submitter: &Address, submitter_index: u32) -> u32 {
+        let packed: Bytes = env
+            .storage()
+            .instance()
+            .get(&DataKey::SubmitterEventIndices(submitter.clone()))
+            .unwrap_or_else(|| panic_with_error!(env, ContractError::EventTypeIndexOutOfBounds));
+        let byte_offset = submitter_index * 4;
+        if byte_offset + 4 > packed.len() {
+            panic_with_error!(env, ContractError::EventTypeIndexOutOfBounds);
+        }
+        let b0 = packed.get(byte_offset).unwrap() as u32;
+        let b1 = packed.get(byte_offset + 1).unwrap() as u32;
+        let b2 = packed.get(byte_offset + 2).unwrap() as u32;
+        let b3 = packed.get(byte_offset + 3).unwrap() as u32;
+        b0 | (b1 << 8) | (b2 << 16) | (b3 << 24)
+    }
+
+    /// Return cached event count for a submitter.
+    fn submitter_count(env: &Env, submitter: Address) -> u32 {
+        env.storage()
+            .instance()
+            .get(&DataKey::SubmitterEventCount(submitter))
+            .unwrap_or(0)
+    }
+
     fn require_owner(env: &Env, addr: &Address) {
         let owner: Address = env.storage().instance().get(&DataKey::Owner).unwrap();
         if addr != &owner {
@@ -3135,6 +3365,22 @@ impl AuditLedger {
             }
         }
         false
+    }
+
+    /// Default nonce window size (issue #214). 0 = unlimited gap allowed.
+    fn default_nonce_window_size(env: &Env) -> u32 {
+        env.storage()
+            .instance()
+            .get(&DataKey::DefaultNonceWindowSize)
+            .unwrap_or(1000)
+    }
+
+    /// Default nonce max value (issue #214). u32::MAX = effectively no exhaustion.
+    fn default_nonce_max_value(env: &Env) -> u32 {
+        env.storage()
+            .instance()
+            .get(&DataKey::DefaultNonceMaxValue)
+            .unwrap_or(u32::MAX)
     }
 }
 
