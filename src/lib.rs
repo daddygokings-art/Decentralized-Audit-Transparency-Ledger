@@ -114,6 +114,10 @@ pub enum DataKey {
     EventCapConfig(Symbol),
     /// Stores packed Bytes of u32 global-order indices (4 bytes each, LE) for a type (issue #54).
     EventTypeIndices(Symbol),
+    /// Stores packed Bytes of u32 global-order indices (4 bytes each, LE) for a submitter (issue #206).
+    SubmitterEventIndices(Address),
+    /// Cached event count per submitter (issue #206).
+    SubmitterEventCount(Address),
     /// Primary storage: event ID → Event.
     EventData(BytesN<32>),
     /// Sequential index → event ID, for ordered retrieval.
@@ -654,6 +658,7 @@ impl AuditLedger {
 
             if !Self::effective_low_cost_mode(&env) {
                 Self::push_type_index(&env, event_type.clone(), index);
+                Self::push_submitter_index(&env, &submitter, index);
                 let mut count: u32 = env
                     .storage()
                     .instance()
@@ -968,6 +973,7 @@ impl AuditLedger {
         // --- issue #54: packed-Bytes index storage ---
         if !low_cost {
             Self::push_type_index(&env, event_type.clone(), index);
+            Self::push_submitter_index(&env, &submitter, index);
             // Task 5: reuse cached count instead of re-reading.
             let new_count = type_count_opt.unwrap_or_else(|| Self::event_type_count(&env, event_type.clone())) + 1;
             env.storage()
@@ -1611,6 +1617,84 @@ impl AuditLedger {
         let mut results = Vec::new(&env);
         for i in start..end {
             results.push_back(Self::get_event_by_type(env.clone(), event_type.clone(), i));
+        }
+        results
+    }
+
+    // ── Submitter-based event filtering (issue #206) ────────────────────────
+
+    /// Return the number of events submitted by a given address (issue #206).
+    pub fn submitter_event_count(env: Env, submitter: Address) -> u32 {
+        Self::require_initialized(&env);
+        Self::submitter_count(&env, submitter)
+    }
+
+    /// Retrieve an event by submitter address and local index (issue #206).
+    /// `submitter_index` is 0-based within the submitter's sub-ledger.
+    pub fn get_event_by_submitter(
+        env: Env,
+        submitter: Address,
+        submitter_index: u32,
+    ) -> Event {
+        Self::require_initialized(&env);
+
+        let count = Self::submitter_count(&env, submitter.clone());
+        if count == 0 {
+            panic_with_error!(&env, ContractError::NoEventsForType);
+        }
+        if submitter_index >= count {
+            panic_with_error!(&env, ContractError::EventTypeIndexOutOfBounds);
+        }
+
+        let global_order = Self::get_submitter_index(&env, &submitter, submitter_index);
+        let event_id: BytesN<32> = env
+            .storage()
+            .instance()
+            .get(&DataKey::EventOrder(global_order))
+            .unwrap_or_else(|| {
+                panic_with_error!(&env, ContractError::EventDoesNotExist);
+            });
+
+        env.storage()
+            .instance()
+            .get(&DataKey::EventData(event_id))
+            .unwrap_or_else(|| {
+                panic_with_error!(&env, ContractError::EventDoesNotExist);
+            })
+    }
+
+    /// Return a paginated list of events for a given submitter (issue #206).
+    ///
+    /// * `submitter` — the address to filter by.
+    /// * `start`     — 0-based index into the submitter's sub-ledger.
+    /// * `limit`     — maximum number of events to return (capped at 100).
+    ///
+    /// Returns an empty `Vec` when `start` is beyond the last index, or when
+    /// the submitter has no events — no panics for out-of-range inputs.
+    pub fn get_events_by_submitter(
+        env: Env,
+        submitter: Address,
+        start: u32,
+        limit: u32,
+    ) -> Vec<Event> {
+        Self::require_initialized(&env);
+
+        if limit == 0 {
+            return Vec::new(&env);
+        }
+        if limit > 100 {
+            panic_with_error!(&env, ContractError::InvalidPaginationParams);
+        }
+
+        let total = Self::submitter_count(&env, submitter.clone());
+        if total == 0 || start >= total {
+            return Vec::new(&env);
+        }
+
+        let end = (start.saturating_add(limit)).min(total);
+        let mut results = Vec::new(&env);
+        for i in start..end {
+            results.push_back(Self::get_event_by_submitter(env.clone(), submitter.clone(), i));
         }
         results
     }
@@ -2700,6 +2784,52 @@ impl AuditLedger {
         let b2 = packed.get(byte_offset + 2).unwrap() as u32;
         let b3 = packed.get(byte_offset + 3).unwrap() as u32;
         b0 | (b1 << 8) | (b2 << 16) | (b3 << 24)
+    }
+
+    // ── issue #206: submitter-Bytes index storage helpers ──────────────────
+
+    /// Append a global order index to the packed Bytes for `submitter`.
+    fn push_submitter_index(env: &Env, submitter: &Address, global_index: u32) {
+        let mut packed: Bytes = env
+            .storage()
+            .instance()
+            .get(&DataKey::SubmitterEventIndices(submitter.clone()))
+            .unwrap_or(Bytes::new(env));
+        packed.append(&Self::u32_to_bytes(env, global_index));
+        env.storage()
+            .instance()
+            .set(&DataKey::SubmitterEventIndices(submitter.clone()), &packed);
+        // Increment submitter event count.
+        let count: u32 = Self::submitter_count(env, submitter.clone());
+        env.storage()
+            .instance()
+            .set(&DataKey::SubmitterEventCount(submitter.clone()), &(count + 1));
+    }
+
+    /// Read the `submitter_index`-th global order index from packed Bytes for `submitter`.
+    fn get_submitter_index(env: &Env, submitter: &Address, submitter_index: u32) -> u32 {
+        let packed: Bytes = env
+            .storage()
+            .instance()
+            .get(&DataKey::SubmitterEventIndices(submitter.clone()))
+            .unwrap_or_else(|| panic_with_error!(env, ContractError::EventTypeIndexOutOfBounds));
+        let byte_offset = submitter_index * 4;
+        if byte_offset + 4 > packed.len() {
+            panic_with_error!(env, ContractError::EventTypeIndexOutOfBounds);
+        }
+        let b0 = packed.get(byte_offset).unwrap() as u32;
+        let b1 = packed.get(byte_offset + 1).unwrap() as u32;
+        let b2 = packed.get(byte_offset + 2).unwrap() as u32;
+        let b3 = packed.get(byte_offset + 3).unwrap() as u32;
+        b0 | (b1 << 8) | (b2 << 16) | (b3 << 24)
+    }
+
+    /// Return cached event count for a submitter.
+    fn submitter_count(env: &Env, submitter: Address) -> u32 {
+        env.storage()
+            .instance()
+            .get(&DataKey::SubmitterEventCount(submitter))
+            .unwrap_or(0)
     }
 
     fn require_owner(env: &Env, addr: &Address) {
