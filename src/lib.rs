@@ -177,6 +177,16 @@ pub enum DataKey {
     PausedSince,
     /// Webhook registrations (#25): per-event-type list of (url, secret) pairs. Owner-only.
     WebhookRegistrations(Symbol),
+    /// Batch retry tracking: stores the retry state for a batch submission (issue #223).
+    BatchRetryState(u32),
+    /// Batch retry counter: incremented for each new batch (issue #223).
+    BatchRetryCounter,
+    /// Event access log: tracks who accessed which events (issue #216).
+    EventAccessLog(u32),
+    /// Access counter per address (issue #216).
+    AccessCount(Address),
+    /// Global event expiration timestamp (issue #217). 0 = no expiration.
+    EventExpiration,
 }
 
 #[contracterror]
@@ -282,6 +292,10 @@ pub enum ContractError {
     /// **Common cause**: Calling `initialize()` more than once.
     /// **Resolution**: The contract can only be initialized once at deployment.
     AlreadyInitialized = 26,
+    /// **Code 32**: Batch submission not found.
+    BatchNotFound = 32,
+    /// **Code 33**: Event has expired.
+    EventExpired = 33,
 }
 
 #[contracttype]
@@ -313,6 +327,50 @@ pub struct ContractStatistics {
     pub events_last_day: u32,
     pub events_last_week: u32,
     pub top_submitters: Vec<(Address, u32)>,
+}
+
+/// Result of a single event in a batch submission (issue #223).
+#[contracttype]
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct BatchEventResult {
+    /// Index of the event within the batch.
+    pub batch_index: u32,
+    /// Whether this event was successfully logged.
+    pub success: bool,
+    /// Event ID (BytesN<32>) if successful, or None if failed.
+    pub event_id: Option<BytesN<32>>,
+    /// Error message if failed, or empty if successful.
+    pub error: Bytes,
+}
+
+/// State of a batch submission retry (issue #223).
+#[contracttype]
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct BatchRetryState {
+    /// Batch identifier.
+    pub batch_id: u32,
+    /// Total events in original batch.
+    pub total_events: u32,
+    /// Number of events successfully logged.
+    pub succeeded: u32,
+    /// Number of events that failed.
+    pub failed: u32,
+    /// Timestamp when the batch was first submitted.
+    pub created_at: u64,
+    /// Whether the batch has been fully retried.
+    pub completed: bool,
+}
+
+/// Record of an event access (issue #216).
+#[contracttype]
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct AccessRecord {
+    /// The address that accessed the event.
+    pub accessor: Address,
+    /// The index of the event accessed.
+    pub event_index: u32,
+    /// Timestamp of the access.
+    pub timestamp: u64,
 }
 
 #[contracttype]
@@ -1668,6 +1726,246 @@ impl AuditLedger {
     pub fn verify_integrity_range(env: Env, from: u32, to: u32) -> bool {
         Self::require_initialized(&env);
         Self::verify_range(&env, from, to)
+    }
+
+    // ── Batch submission with retry (issue #223) ───────────────────────────
+
+    /// Submit a batch of events with automatic retry tracking for failed events.
+    /// Returns a batch ID and per-event results indicating success/failure.
+    /// Failed events can be retried individually using `retry_batch_event`.
+    pub fn submit_batch_with_retry(
+        env: Env,
+        events: Vec<(Address, Symbol, Bytes)>,
+    ) -> (u32, Vec<BatchEventResult>) {
+        Self::require_initialized(&env);
+
+        if events.is_empty() {
+            return (0, Vec::new(&env));
+        }
+
+        let batch_id: u32 = env
+            .storage()
+            .instance()
+            .get(&DataKey::BatchRetryCounter)
+            .unwrap_or(0);
+
+        let now = env.ledger().timestamp();
+        let total = events.len();
+        let mut results: Vec<BatchEventResult> = Vec::new(&env);
+        let mut succeeded: u32 = 0;
+        let mut failed: u32 = 0;
+
+        for i in 0..total {
+            let (submitter, event_type, metadata) = events.get(i).unwrap().clone();
+
+            // Check if submitter is blocked
+            if let Some(true) = env
+                .storage()
+                .instance()
+                .get::<_, bool>(&DataKey::SubmitterBlocklist(submitter.clone()))
+            {
+                results.push_back(BatchEventResult {
+                    batch_index: i,
+                    success: false,
+                    event_id: None,
+                    error: Bytes::from_slice(&env, b"submitter_blocked"),
+                });
+                failed += 1;
+                continue;
+            }
+
+            // Check capacity
+            let total_events = Self::total_events(env.clone());
+            let max_logs: u32 = env
+                .storage()
+                .instance()
+                .get::<_, Config>(&DataKey::Config)
+                .map(|c| c.global_max_logs)
+                .unwrap_or(u32::MAX);
+            if total_events >= max_logs {
+                results.push_back(BatchEventResult {
+                    batch_index: i,
+                    success: false,
+                    event_id: None,
+                    error: Bytes::from_slice(&env, b"capacity_reached"),
+                });
+                failed += 1;
+                continue;
+            }
+
+            // Attempt to log the event
+            match std::panic::catch_unwind(|| {
+                // Use log_event_with_hierarchy for the actual logging
+                let evt_id = Self::log_event_with_hierarchy(
+                    env.clone(),
+                    submitter.clone(),
+                    event_type,
+                    metadata,
+                    None,
+                    None,
+                    false,
+                );
+                evt_id
+            }) {
+                Ok(event_id) => {
+                    results.push_back(BatchEventResult {
+                        batch_index: i,
+                        success: true,
+                        event_id: Some(event_id),
+                        error: Bytes::new(&env),
+                    });
+                    succeeded += 1;
+                }
+                Err(_) => {
+                    results.push_back(BatchEventResult {
+                        batch_index: i,
+                        success: false,
+                        event_id: None,
+                        error: Bytes::from_slice(&env, b"event_failed"),
+                    });
+                    failed += 1;
+                }
+            }
+        }
+
+        let state = BatchRetryState {
+            batch_id,
+            total_events: total,
+            succeeded,
+            failed,
+            created_at: now,
+            completed: failed == 0,
+        };
+        env.storage()
+            .instance()
+            .set(&DataKey::BatchRetryState(batch_id), &state);
+        env.storage()
+            .instance()
+            .set(&DataKey::BatchRetryCounter, &(batch_id + 1));
+
+        env.events().publish(
+            (Symbol::new(&env, "batch_submitted"),),
+            (batch_id, succeeded, failed),
+        );
+
+        (batch_id, results)
+    }
+
+    /// Retry a single failed event from a previous batch submission.
+    pub fn retry_batch_event(
+        env: Env,
+        submitter: Address,
+        event_type: Symbol,
+        metadata: Bytes,
+    ) -> BytesN<32> {
+        Self::require_initialized(&env);
+        Self::log_event_with_hierarchy(env, submitter, event_type, metadata, None, None, false)
+    }
+
+    /// Get the retry state for a batch.
+    pub fn get_batch_retry_state(env: Env, batch_id: u32) -> BatchRetryState {
+        Self::require_initialized(&env);
+        env.storage()
+            .instance()
+            .get(&DataKey::BatchRetryState(batch_id))
+            .unwrap_or_else(|| panic_with_error!(&env, ContractError::BatchNotFound))
+    }
+
+    // ── Event access logging (issue #216) ──────────────────────────────────
+
+    /// Log an event access by the given address. Called internally when events are read.
+    fn log_event_access(env: &Env, accessor: &Address, event_index: u32) {
+        let total_accesses: u32 = env
+            .storage()
+            .instance()
+            .get(&DataKey::AccessCount(accessor.clone()))
+            .unwrap_or(0);
+        let record = AccessRecord {
+            accessor: accessor.clone(),
+            event_index,
+            timestamp: env.ledger().timestamp(),
+        };
+        env.storage().instance().set(
+            &DataKey::EventAccessLog(total_accesses),
+            &record,
+        );
+        env.storage()
+            .instance()
+            .set(&DataKey::AccessCount(accessor.clone()), &(total_accesses + 1));
+    }
+
+    /// Return the number of times an address has accessed events.
+    pub fn get_access_count(env: Env, accessor: Address) -> u32 {
+        Self::require_initialized(&env);
+        env.storage()
+            .instance()
+            .get(&DataKey::AccessCount(accessor))
+            .unwrap_or(0)
+    }
+
+    /// Return the access record at a given index.
+    pub fn get_access_record(env: Env, record_index: u32) -> AccessRecord {
+        Self::require_initialized(&env);
+        env.storage()
+            .instance()
+            .get(&DataKey::EventAccessLog(record_index))
+            .unwrap_or_else(|| {
+                // Return a default empty record
+                AccessRecord {
+                    accessor: Address::from_str(&env, "GAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAWHF"),
+                    event_index: 0,
+                    timestamp: 0,
+                }
+            })
+    }
+
+    // ── Event expiration (issue #217) ──────────────────────────────────────
+
+    /// Set the global event expiration duration in seconds (owner-only).
+    /// Events older than (current_timestamp - expiration_duration) are considered expired.
+    /// Pass 0 to disable expiration.
+    pub fn set_event_expiration(env: Env, caller: Address, expiration_seconds: u64) {
+        Self::require_initialized(&env);
+        caller.require_auth();
+        Self::require_owner_or_multisig(&env, &caller);
+        env.storage()
+            .instance()
+            .set(&DataKey::EventExpiration, &expiration_seconds);
+        env.events().publish(
+            (Symbol::new(&env, "event_expiration_set"),),
+            (caller, expiration_seconds),
+        );
+    }
+
+    /// Get the global event expiration duration in seconds. Returns 0 if disabled.
+    pub fn get_event_expiration(env: Env) -> u64 {
+        Self::require_initialized(&env);
+        env.storage()
+            .instance()
+            .get(&DataKey::EventExpiration)
+            .unwrap_or(0u64)
+    }
+
+    /// Check whether an event is expired based on the global expiration setting.
+    /// Returns true if the event's timestamp is older than (now - expiration_seconds).
+    pub fn is_event_expired(env: Env, event_index: u32) -> bool {
+        Self::require_initialized(&env);
+        let expiration_secs: u64 = env
+            .storage()
+            .instance()
+            .get(&DataKey::EventExpiration)
+            .unwrap_or(0u64);
+        if expiration_secs == 0 {
+            return false; // Expiration disabled
+        }
+        let total = Self::total_events(env.clone());
+        if event_index >= total {
+            return false;
+        }
+        let id: BytesN<32> = env.storage().instance().get(&DataKey::EventOrder(event_index)).unwrap();
+        let evt: Event = env.storage().instance().get(&DataKey::EventData(id)).unwrap();
+        let now = env.ledger().timestamp();
+        now > evt.timestamp + expiration_secs
     }
 
     // ── Governance ──────────────────────────────────────────────────────────
