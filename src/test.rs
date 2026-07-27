@@ -2203,6 +2203,134 @@ fn test_update_event_nonexistent_panics() {
     client.update_event(&owner, &0, &Bytes::from_slice(&env, b"updated"));
 }
 
+// ── issue #204: event versioning with rollback ────────────────────────────────
+
+#[test]
+fn test_rollback_event_to_original() {
+    let (env, owner, client) = create_ledger();
+    let submitter = Address::generate(&env);
+    let payment = symbol_short!("payment");
+
+    env.mock_all_auths();
+    let id0 = client.log_event(
+        &submitter,
+        &payment,
+        &Bytes::from_slice(&env, b"original"),
+        &None,
+        &None,
+        &false,
+    );
+    let new_id = client.update_event(&owner, &0, &Bytes::from_slice(&env, b"updated"));
+    assert_ne!(id0, new_id);
+
+    let rolled_id = client.rollback_event(&owner, &0, &0);
+    assert_eq!(rolled_id, id0);
+
+    let evt = client.get_event(&id0);
+    assert_eq!(evt.metadata, Bytes::from_slice(&env, b"original"));
+
+    let history = client.get_event_history(&0);
+    assert_eq!(history.len(), 3);
+    assert_eq!(history.get(2).unwrap().data.metadata, Bytes::from_slice(&env, b"original"));
+}
+
+#[test]
+fn test_rollback_event_to_specific_version() {
+    let (env, owner, client) = create_ledger();
+    let submitter = Address::generate(&env);
+    let payment = symbol_short!("payment");
+
+    env.mock_all_auths();
+    client.log_event(
+        &submitter,
+        &payment,
+        &Bytes::from_slice(&env, b"v0"),
+        &None,
+        &None,
+        &false,
+    );
+    client.update_event(&owner, &0, &Bytes::from_slice(&env, b"v1"));
+    client.update_event(&owner, &0, &Bytes::from_slice(&env, b"v2"));
+
+    let history = client.get_event_history(&0);
+    assert_eq!(history.len(), 4);
+
+    client.rollback_event(&owner, &0, &1);
+    let evt = client.get_event_by_order(&0);
+    assert_eq!(evt.metadata, Bytes::from_slice(&env, b"v1"));
+
+    let new_history = client.get_event_history(&0);
+    assert_eq!(new_history.len(), 5);
+    assert_eq!(new_history.get(4).unwrap().data.metadata, Bytes::from_slice(&env, b"v1"));
+}
+
+#[test]
+fn test_rollback_preserves_hash_chain() {
+    let (env, owner, client) = create_ledger();
+    let submitter = Address::generate(&env);
+
+    env.mock_all_auths();
+    client.log_event(&submitter, &symbol_short!("a"), &Bytes::from_slice(&env, b"1"), &None, &None, &false);
+    client.log_event(&submitter, &symbol_short!("b"), &Bytes::from_slice(&env, b"2"), &None, &None, &false);
+    client.log_event(&submitter, &symbol_short!("c"), &Bytes::from_slice(&env, b"3"), &None, &None, &false);
+
+    assert!(client.verify_integrity());
+
+    client.update_event(&owner, &0, &Bytes::from_slice(&env, b"1-updated"));
+    assert!(client.verify_integrity());
+
+    client.rollback_event(&owner, &0, &0);
+    assert!(client.verify_integrity());
+}
+
+#[test]
+#[should_panic(expected = "HostError: Error(Contract, #33)")]
+fn test_rollback_invalid_version_panics() {
+    let (env, owner, client) = create_ledger();
+    let submitter = Address::generate(&env);
+    env.mock_all_auths();
+    client.log_event(&submitter, &symbol_short!("t"), &Bytes::from_slice(&env, b"x"), &None, &None, &false);
+    client.rollback_event(&owner, &0, &5);
+}
+
+#[test]
+#[should_panic(expected = "HostError: Error(Contract, #1)")]
+fn test_rollback_non_owner_panics() {
+    let (env, _owner, client) = create_ledger();
+    let attacker = Address::generate(&env);
+    env.mock_all_auths();
+    client.rollback_event(&attacker, &0, &0);
+}
+
+#[test]
+fn test_get_event_version_count() {
+    let (env, owner, client) = create_ledger();
+    let submitter = Address::generate(&env);
+    env.mock_all_auths();
+    client.log_event(&submitter, &symbol_short!("t"), &Bytes::from_slice(&env, b"x"), &None, &None, &false);
+    assert_eq!(client.get_event_version_count(&0), 1);
+
+    client.update_event(&owner, &0, &Bytes::from_slice(&env, b"y"));
+    assert_eq!(client.get_event_version_count(&0), 2);
+
+    client.update_event(&owner, &0, &Bytes::from_slice(&env, b"z"));
+    assert_eq!(client.get_event_version_count(&0), 3);
+}
+
+#[test]
+fn test_compare_event_versions() {
+    let (env, owner, client) = create_ledger();
+    let submitter = Address::generate(&env);
+    env.mock_all_auths();
+    client.log_event(&submitter, &symbol_short!("t"), &Bytes::from_slice(&env, b"short"), &None, &None, &false);
+    client.update_event(&owner, &0, &Bytes::from_slice(&env, b"much longer metadata"));
+
+    assert_eq!(client.compare_event_versions(&0, &0, &0), 0);
+    assert_eq!(client.compare_event_versions(&0, &1, &1), 0);
+    assert!(client.compare_event_versions(&0, &0, &1) < 0);
+    assert!(client.compare_event_versions(&0, &1, &0) > 0);
+}
+
 // ── Hash Chain Integrity Verification (Issue #144) ───────────────────────────
 
 #[test]

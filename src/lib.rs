@@ -313,6 +313,10 @@ pub enum ContractError {
     SnapshotNotFound = 30,
     /// **Code 31**: Snapshot verification failed (hash mismatch).
     SnapshotVerificationFailed = 31,
+    /// **Code 33**: Event version does not exist in history.
+    /// **Common cause**: `rollback_event` called with a version number beyond the stored history length.
+    /// **Resolution**: Use `get_event_history` or `get_event_version_count` to discover valid versions.
+    InvalidVersion = 33,
 }
 
 #[contracttype]
@@ -412,6 +416,7 @@ pub enum ProposalAction {
     SetRequiredSignatures(u32),
     SetGlobalMaxLogs(u32),
     SetMetadataSchema(Symbol, Bytes),
+    RollbackEvent(u32, u32),
     Pause,
     Unpause,
 }
@@ -467,6 +472,7 @@ pub enum ProposalAction {
     SetRequiredSignatures(u32),
     SetGlobalMaxLogs(u32),
     SetMetadataSchema(Symbol, Bytes),
+    RollbackEvent(u32, u32),
     Pause,
     Unpause,
 }
@@ -1991,6 +1997,170 @@ impl AuditLedger {
         history
     }
 
+    /// Roll back an event to a specific version from its history (issue #204).
+    ///
+    /// Owner-only. Restores the event data (metadata, timestamps, submitter, etc.)
+    /// to the state recorded at `target_version`, recomputes the event ID and
+    /// hash chain, and appends a new version entry recording the rollback.
+    ///
+    /// Returns the new content-addressed event ID after rollback.
+    pub fn rollback_event(env: Env, caller: Address, index: u32, target_version: u32) -> BytesN<32> {
+        caller.require_auth();
+        Self::require_owner_or_multisig(&env, &caller);
+
+        let total = Self::total_events(env.clone());
+        if index >= total {
+            panic_with_error!(&env, ContractError::EventDoesNotExist);
+        }
+
+        let history = Self::get_event_history(env.clone(), index);
+        if target_version >= history.len() as u32 {
+            panic_with_error!(&env, ContractError::InvalidVersion);
+        }
+
+        let target = history.get(target_version as usize).unwrap();
+        let restored = &target.data;
+
+        let new_id = Self::compute_event_id(
+            &env,
+            &restored.submitter,
+            &restored.event_type,
+            &restored.metadata,
+            restored.timestamp,
+            index,
+        );
+
+        let current_id: BytesN<32> = env
+            .storage()
+            .instance()
+            .get(&DataKey::EventOrder(index))
+            .unwrap();
+
+        if new_id == current_id {
+            return new_id;
+        }
+
+        let prev_hash: BytesN<32> = if index == 0 {
+            BytesN::from_array(&env, &[0u8; 32])
+        } else {
+            let prev_id: BytesN<32> = env
+                .storage()
+                .instance()
+                .get(&DataKey::EventOrder(index - 1))
+                .unwrap();
+            let prev_evt: Event = env
+                .storage()
+                .instance()
+                .get(&DataKey::EventData(prev_id))
+                .unwrap();
+            prev_evt.event_hash.clone()
+        };
+
+        let new_hash = Self::compute_event_hash(&env, &new_id, &prev_hash, index, restored.timestamp);
+
+        let updated_event = Event {
+            index: restored.index,
+            timestamp: restored.timestamp,
+            event_type: restored.event_type.clone(),
+            category: restored.category.clone(),
+            submitter: restored.submitter.clone(),
+            metadata: restored.metadata.clone(),
+            sub_event_type: restored.sub_event_type.clone(),
+            version: Self::current_contract_version(&env),
+            event_hash: new_hash.clone(),
+            prev_hash: prev_hash.clone(),
+        };
+
+        let mut versions = history;
+        let rollback_version = EventVersion {
+            version: versions.len() as u32,
+            data: updated_event.clone(),
+            updated_at: env.ledger().timestamp(),
+            updated_by: caller.clone(),
+        };
+        versions.push_back(rollback_version);
+        env.storage()
+            .instance()
+            .set(&DataKey::EventVersions(index), &versions);
+
+        env.storage()
+            .instance()
+            .set(&DataKey::EventData(new_id.clone()), &updated_event);
+        env.storage()
+            .instance()
+            .set(&DataKey::EventOrder(index), &new_id);
+        env.storage().instance().set(
+            &DataKey::EventHeaderKey(new_id.clone()),
+            &EventHeader {
+                index: updated_event.index,
+                timestamp: updated_event.timestamp,
+                event_type: updated_event.event_type.clone(),
+                submitter: updated_event.submitter.clone(),
+            },
+        );
+        env.storage()
+            .instance()
+            .set(&DataKey::EventMeta(new_id.clone()), &updated_event);
+        env.storage()
+            .instance()
+            .set(&DataKey::EventMetadata(new_id.clone()), &updated_event.metadata);
+
+        let mut next_prev_hash = new_hash;
+        for i in index + 1..total {
+            let event_id: BytesN<32> = env
+                .storage()
+                .instance()
+                .get(&DataKey::EventOrder(i))
+                .unwrap();
+            let mut later_event: Event = env
+                .storage()
+                .instance()
+                .get(&DataKey::EventData(event_id.clone()))
+                .unwrap();
+            later_event.prev_hash = next_prev_hash.clone();
+            later_event.event_hash =
+                Self::compute_event_hash(&env, &event_id, &later_event.prev_hash, i, later_event.timestamp);
+            env.storage()
+                .instance()
+                .set(&DataKey::EventData(event_id.clone()), &later_event);
+            env.storage()
+                .instance()
+                .set(&DataKey::EventMeta(event_id.clone()), &later_event);
+            next_prev_hash = later_event.event_hash.clone();
+        }
+
+        env.events().publish(
+            (Symbol::new(&env, "versioning"), Symbol::new(&env, "event_rolled_back")),
+            (index, target_version, caller, env.ledger().timestamp()),
+        );
+
+        new_id
+    }
+
+    /// Return the number of recorded versions for an event (including version 0).
+    pub fn get_event_version_count(env: Env, index: u32) -> u32 {
+        let history = Self::get_event_history(env.clone(), index);
+        history.len() as u32
+    }
+
+    /// Compare two versions of the same event by metadata length.
+    ///
+    /// Returns -1 if version_a metadata is shorter, 0 if equal, 1 if longer.
+    pub fn compare_event_versions(env: Env, index: u32, version_a: u32, version_b: u32) -> i32 {
+        let history = Self::get_event_history(env.clone(), index);
+        if history.is_empty() {
+            return 0;
+        }
+        let a = version_a as usize;
+        let b = version_b as usize;
+        if a >= history.len() || b >= history.len() {
+            panic_with_error!(&env, ContractError::InvalidVersion);
+        }
+        let len_a = history.get(a).unwrap().data.metadata.len();
+        let len_b = history.get(b).unwrap().data.metadata.len();
+        len_a.cmp(&len_b) as i32
+    }
+
     // ── Integrity verification (issue #66) ──────────────────────────────────
 
     /// Verify the full hash chain. Returns `true` if every event's
@@ -3169,6 +3339,9 @@ impl AuditLedger {
             }
             ProposalAction::SetMetadataSchema(ref event_type, ref schema) => {
                 env.storage().instance().set(&DataKey::MetadataSchema(event_type.clone()), schema);
+            }
+            ProposalAction::RollbackEvent(index, target_version) => {
+                let _ = Self::rollback_event(env.clone(), executor.clone(), *index, *target_version);
             }
             ProposalAction::Pause => {
                 env.storage().instance().set(&DataKey::Paused, &true);
