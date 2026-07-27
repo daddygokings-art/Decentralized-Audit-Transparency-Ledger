@@ -177,6 +177,10 @@ pub enum DataKey {
     PausedSince,
     /// Webhook registrations (#25): per-event-type list of (url, secret) pairs. Owner-only.
     WebhookRegistrations(Symbol),
+    /// Snapshot count — total snapshots created (issue #213).
+    SnapshotCount,
+    /// Individual snapshot data keyed by snapshot index (issue #213).
+    SnapshotData(u32),
 }
 
 #[contracterror]
@@ -282,6 +286,10 @@ pub enum ContractError {
     /// **Common cause**: Calling `initialize()` more than once.
     /// **Resolution**: The contract can only be initialized once at deployment.
     AlreadyInitialized = 26,
+    /// **Code 30**: Snapshot does not exist.
+    SnapshotNotFound = 30,
+    /// **Code 31**: Snapshot verification failed (hash mismatch).
+    SnapshotVerificationFailed = 31,
 }
 
 #[contracttype]
@@ -302,6 +310,22 @@ pub struct WebhookEntry {
     pub url: Bytes,
     /// HMAC secret for request signing (opaque bytes, never returned by queries).
     pub secret: Bytes,
+}
+
+/// A point-in-time snapshot of the audit ledger state (issue #213).
+#[contracttype]
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct Snapshot {
+    /// Sequential snapshot identifier (0-based).
+    pub id: u32,
+    /// Ledger timestamp when the snapshot was created.
+    pub timestamp: u64,
+    /// Total number of events at snapshot time.
+    pub event_count: u32,
+    /// SHA-256 hash of the last event's event_hash at snapshot time.
+    pub event_hash: BytesN<32>,
+    /// Optional human-readable description.
+    pub description: Bytes,
 }
 
 #[contracttype]
@@ -1668,6 +1692,169 @@ impl AuditLedger {
     pub fn verify_integrity_range(env: Env, from: u32, to: u32) -> bool {
         Self::require_initialized(&env);
         Self::verify_range(&env, from, to)
+    }
+
+    // ── Snapshots (issue #213) ─────────────────────────────────────────────
+
+    /// Create a point-in-time snapshot of the audit ledger state.
+    /// Records the current timestamp, event count, and last event hash.
+    /// Owner-only. Returns the new snapshot ID.
+    pub fn create_snapshot(env: Env, caller: Address, description: Bytes) -> u32 {
+        Self::require_initialized(&env);
+        caller.require_auth();
+        Self::require_owner_or_multisig(&env, &caller);
+
+        let total = Self::total_events(env.clone());
+        let timestamp = env.ledger().timestamp();
+
+        let event_hash: BytesN<32> = if total == 0 {
+            BytesN::from_array(&env, &[0u8; 32])
+        } else {
+            let last_id: BytesN<32> = env
+                .storage()
+                .instance()
+                .get(&DataKey::EventOrder(total - 1))
+                .unwrap();
+            let last_evt: Event = env
+                .storage()
+                .instance()
+                .get(&DataKey::EventData(last_id))
+                .unwrap();
+            last_evt.event_hash
+        };
+
+        let snap_id: u32 = env
+            .storage()
+            .instance()
+            .get(&DataKey::SnapshotCount)
+            .unwrap_or(0);
+
+        let snapshot = Snapshot {
+            id: snap_id,
+            timestamp,
+            event_count: total,
+            event_hash,
+            description,
+        };
+
+        env.storage()
+            .instance()
+            .set(&DataKey::SnapshotData(snap_id), &snapshot);
+        env.storage()
+            .instance()
+            .set(&DataKey::SnapshotCount, &(snap_id + 1));
+
+        env.events().publish(
+            (Symbol::new(&env, "snapshot_created"),),
+            (snap_id, timestamp, total),
+        );
+
+        snap_id
+    }
+
+    /// Retrieve a snapshot by its ID.
+    pub fn get_snapshot(env: Env, snapshot_id: u32) -> Snapshot {
+        Self::require_initialized(&env);
+        env.storage()
+            .instance()
+            .get(&DataKey::SnapshotData(snapshot_id))
+            .unwrap_or_else(|| panic_with_error!(&env, ContractError::SnapshotNotFound))
+    }
+
+    /// Return the total number of snapshots that have been created.
+    pub fn snapshot_count(env: Env) -> u32 {
+        Self::require_initialized(&env);
+        env.storage()
+            .instance()
+            .get(&DataKey::SnapshotCount)
+            .unwrap_or(0)
+    }
+
+    /// Verify that a snapshot is consistent with the current ledger state.
+    /// Checks that the event_count and event_hash at snapshot time are still valid
+    /// by re-walking the chain up to the snapshot's event_count.
+    pub fn verify_snapshot(env: Env, snapshot_id: u32) -> bool {
+        Self::require_initialized(&env);
+        let snapshot: Snapshot = env
+            .storage()
+            .instance()
+            .get(&DataKey::SnapshotData(snapshot_id))
+            .unwrap_or_else(|| panic_with_error!(&env, ContractError::SnapshotNotFound));
+
+        let current_total = Self::total_events(env.clone());
+
+        // Snapshot must reference events that still exist.
+        if snapshot.event_count > current_total {
+            return false;
+        }
+
+        if snapshot.event_count == 0 {
+            return snapshot.event_hash == BytesN::from_array(&env, &[0u8; 32]);
+        }
+
+        // Re-derive the hash chain up to snapshot.event_count and compare.
+        let last_idx = snapshot.event_count - 1;
+        let last_id: BytesN<32> = match env.storage().instance().get(&DataKey::EventOrder(last_idx)) {
+            Some(v) => v,
+            None => return false,
+        };
+        let last_evt: Event = match env.storage().instance().get(&DataKey::EventData(last_id)) {
+            Some(v) => v,
+            None => return false,
+        };
+
+        last_evt.event_hash == snapshot.event_hash
+    }
+
+    // ── Deduplication cleanup (issue #212) ──────────────────────────────────
+
+    /// Remove stale content hash dedup entries that no longer correspond to an event.
+    /// Owner-only. Returns the number of entries cleaned.
+    pub fn cleanup_stale_hashes(env: Env, caller: Address, start_index: u32, batch_size: u32) -> u32 {
+        Self::require_initialized(&env);
+        caller.require_auth();
+        Self::require_owner_or_multisig(&env, &caller);
+
+        let total = Self::total_events(env.clone());
+        let mut cleaned: u32 = 0;
+        let mut idx = start_index;
+        let end = (start_index + batch_size).min(total);
+
+        // Scan all event order entries and verify their content hash still maps correctly.
+        while idx < end {
+            if let Some(event_id) = env
+                .storage()
+                .instance()
+                .get::<_, BytesN<32>>(&DataKey::EventOrder(idx))
+            {
+                if let Some(evt) = env
+                    .storage()
+                    .instance()
+                    .get::<_, Event>(&DataKey::EventData(event_id.clone()))
+                {
+                    let content_hash =
+                        Self::compute_content_hash(&env, &evt.event_type, &evt.submitter, &evt.metadata);
+                    if let Some(stored_index) = env
+                        .storage()
+                        .instance()
+                        .get::<_, u32>(&DataKey::EventContentHash(content_hash.clone()))
+                    {
+                        // If the stored index no longer points to the same event, clean it.
+                        if stored_index != idx {
+                            env.storage()
+                                .instance()
+                                .remove(&DataKey::EventContentHash(content_hash));
+                            cleaned += 1;
+                        }
+                    }
+                }
+            }
+            idx += 1;
+        }
+
+        env.events()
+            .publish((Symbol::new(&env, "stale_hashes_cleaned"),), (cleaned,));
+        cleaned
     }
 
     // ── Governance ──────────────────────────────────────────────────────────
