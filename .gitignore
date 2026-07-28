@@ -73,7 +73,11 @@ sdk/python/*.egg-info/
 test_snapshots/
 __snapshots__/
 *.snap
+*.snapshot
 coverage/
+.coverage
+.coverage.*
+htmlcov/
 lcov.info
 lcov-report/
 tarpaulin-report.html
