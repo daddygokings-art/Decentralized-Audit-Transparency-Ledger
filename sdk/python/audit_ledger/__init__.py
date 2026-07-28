@@ -52,6 +52,8 @@ __all__ = [
     # Models
     "Event",
     "Page",
+    # Exceptions (issue #249)
+    "AuditLedgerError",
     "ContractError",
     "RPCError",
     "AuditLedgerError",

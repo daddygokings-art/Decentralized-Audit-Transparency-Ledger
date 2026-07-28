@@ -64,7 +64,7 @@ class TestPythonSDKIntegration:
             "timestamp": 1000,
             "event_type": "payment",
             "submitter": "GA",
-            "metadata": "dHgtZGF0YQ==",
+            "metadata": "74782d64617461",
             "event_hash": "00" * 32,
             "prev_hash": "00" * 32,
         }
@@ -80,7 +80,7 @@ class TestPythonSDKIntegration:
             "timestamp": 2000,
             "event_type": "audit",
             "submitter": "GB",
-            "metadata": "b",
+            "metadata": "",
             "event_hash": "11" * 32,
             "prev_hash": "00" * 32,
         }
@@ -101,7 +101,7 @@ class TestPythonSDKIntegration:
             "timestamp": 1500,
             "event_type": "refund",
             "submitter": "GC",
-            "metadata": "c",
+            "metadata": "",
             "event_hash": "22" * 32,
             "prev_hash": "11" * 32,
         }
@@ -199,7 +199,7 @@ class TestEventModel:
             "timestamp": 1000,
             "event_type": "payment",
             "submitter": "GA",
-            "metadata": "dHgtZGF0YQ==",
+            "metadata": "74782d64617461",
             "event_hash": "ab" * 32,
             "prev_hash": "00" * 32,
         }
