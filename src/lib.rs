@@ -47,6 +47,12 @@ pub struct Event {
     pub event_hash: BytesN<32>,
     /// SHA-256 of the previous event; `[0u8;32]` for the genesis event.
     pub prev_hash: BytesN<32>,
+    /// Optional parent event ID for semantic event chaining.
+    ///
+    /// When `Some(id)`, this event is a child of the referenced event.
+    /// The parent event is identified by its content-addressed event ID.
+    /// Used to form directed acyclic graphs of related audit events.
+    pub parent_event_id: Option<BytesN<32>>,
 }
 
 /// Lightweight event header without metadata (issue #56).
@@ -176,7 +182,6 @@ pub enum DataKey {
     /// Absent = TTL disabled (instance storage, no expiry).
     EventTtl,
     /// Runtime state cache (#114): packed single-read state.
-    RuntimeState,
     /// Contract version marker.
     ContractVersion,
     /// Content-addressed dedup hash → event index.
@@ -432,34 +437,14 @@ pub struct Proposal {
     pub executed: bool,
 }
 
-const NULL_ACCOUNT: &str = "GAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAWHF";
-
-// ── Additional type definitions ──────────────────────────────────────────────
-
-/// A versioned snapshot of an Event, stored when `update_event` is called.
 #[contracttype]
 #[derive(Clone, Debug, Eq, PartialEq)]
-pub struct EventVersion {
-    /// 0-based version counter (0 = original).
-    pub version: u32,
-    /// Full event data at this version.
-    pub data: Event,
-    /// Ledger timestamp when this version was recorded.
-    pub updated_at: u64,
-    /// Address that triggered the update (or original submitter for version 0).
-    pub updated_by: Address,
-}
-
-/// Aggregate statistics returned by `get_statistics`.
-#[contracttype]
-#[derive(Clone, Debug, Eq, PartialEq)]
-pub struct ContractStatistics {
-    pub total_events: u32,
-    pub events_by_type: Vec<(Symbol, u32)>,
-    pub events_last_hour: u32,
-    pub events_last_day: u32,
-    pub events_last_week: u32,
-    pub top_submitters: Vec<(Address, u32)>,
+pub struct Snapshot {
+    pub id: u32,
+    pub timestamp: u64,
+    pub event_count: u32,
+    pub event_hash: BytesN<32>,
+    pub description: Bytes,
 }
 
 /// Governance action carried by a multisig proposal.
@@ -477,17 +462,7 @@ pub enum ProposalAction {
     Unpause,
 }
 
-/// An on-chain governance proposal awaiting multisig approval.
-#[contracttype]
-#[derive(Clone, Debug, Eq, PartialEq)]
-pub struct Proposal {
-    pub id: u32,
-    pub proposer: Address,
-    pub action: ProposalAction,
-    pub approvals: Vec<Address>,
-    pub expires_at: u64,
-    pub executed: bool,
-}
+// ── Additional type definitions ──────────────────────────────────────────────
 
 #[contract]
 pub struct AuditLedger;
@@ -698,6 +673,7 @@ impl AuditLedger {
                 version: Self::current_contract_version(&env),
                 event_hash: event_hash.clone(),
                 prev_hash: prev_hash.clone(),
+                parent_event_id: None,
             };
 
             env.storage()
@@ -1000,6 +976,7 @@ impl AuditLedger {
             version: Self::current_contract_version(&env),
             event_hash: event_hash.clone(),
             prev_hash,
+            parent_event_id: None,
         };
 
         env.storage()
@@ -1907,6 +1884,7 @@ impl AuditLedger {
             version: Self::current_contract_version(&env),
             event_hash: updated_event_hash.clone(),
             prev_hash: prev_hash.clone(),
+            parent_event_id: current_event.parent_event_id.clone(),
         };
 
         let update_version = EventVersion {
@@ -1956,6 +1934,26 @@ impl AuditLedger {
                 .instance()
                 .set(&DataKey::EventMeta(event_id.clone()), &later_event);
             next_prev_hash = later_event.event_hash.clone();
+        }
+
+        for i in 0..total {
+            let event_id: BytesN<32> = env.storage().instance().get(&DataKey::EventOrder(i)).unwrap();
+            let mut later_event: Event = env
+                .storage()
+                .instance()
+                .get(&DataKey::EventData(event_id.clone()))
+                .unwrap();
+            if let Some(parent) = &later_event.parent_event_id {
+                if parent == &current_id {
+                    later_event.parent_event_id = Some(new_id.clone());
+                    env.storage()
+                        .instance()
+                        .set(&DataKey::EventData(event_id.clone()), &later_event);
+                    env.storage()
+                        .instance()
+                        .set(&DataKey::EventMeta(event_id.clone()), &later_event);
+                }
+            }
         }
 
         env.events().publish(
@@ -2907,8 +2905,8 @@ impl AuditLedger {
             submitter,
             event_type,
             metadata.clone(),
-            category,
-            sub_event_type,
+            None,
+            None,
             false,
         );
         env.storage()
@@ -2946,14 +2944,6 @@ impl AuditLedger {
     // ── Private helpers ─────────────────────────────────────────────────────
 
     /// Panic with `ContractNotInitialized` if the contract has not been initialized.
-    fn require_initialized(env: &Env) {
-        if !env.storage().instance().has(&DataKey::Owner) {
-            panic_with_error!(env, ContractError::ContractNotInitialized);
-        }
-    }
-
-    /// Increment the count for `addr` in a (Address, u32) accumulator Vec.
-    /// Returns the NEW count for that address in the batch.
     fn increment_address_count(
         _env: &Env,
         counts: &mut Vec<(Address, u32)>,
@@ -2963,11 +2953,11 @@ impl AuditLedger {
             let pair: (Address, u32) = counts.get(idx).unwrap();
             if pair.0 == addr {
                 let new_count = pair.1 + 1;
-                counts.set(idx, &(addr.clone(), new_count));
+                counts.set(idx, (addr.clone(), new_count));
                 return new_count;
             }
         }
-        counts.push_back(&(addr, 1u32));
+        counts.push_back((addr, 1u32));
         1u32
     }
 
@@ -2982,11 +2972,11 @@ impl AuditLedger {
             let pair: (Symbol, u32) = counts.get(idx).unwrap();
             if pair.0 == sym {
                 let new_count = pair.1 + 1;
-                counts.set(idx, &(sym.clone(), new_count));
+                counts.set(idx, (sym.clone(), new_count));
                 return new_count;
             }
         }
-        counts.push_back(&(sym, 1u32));
+        counts.push_back((sym, 1u32));
         1u32
     }
 
@@ -3521,32 +3511,6 @@ impl AuditLedger {
             }
         }
         counts.push_back((submitter, 1u32));
-    }
-
-    fn increment_address_count(_env: &Env, counts: &mut Vec<(Address, u32)>, submitter: Address) -> u32 {
-        for idx in 0..counts.len() {
-            let pair: (Address, u32) = counts.get(idx).unwrap();
-            if pair.0 == submitter {
-                let next = pair.1 + 1;
-                counts.set(idx, (submitter.clone(), next));
-                return next;
-            }
-        }
-        counts.push_back((submitter, 1u32));
-        1
-    }
-
-    fn increment_symbol_count(_env: &Env, counts: &mut Vec<(Symbol, u32)>, event_type: Symbol) -> u32 {
-        for idx in 0..counts.len() {
-            let pair: (Symbol, u32) = counts.get(idx).unwrap();
-            if pair.0 == event_type {
-                let next = pair.1 + 1;
-                counts.set(idx, (event_type.clone(), next));
-                return next;
-            }
-        }
-        counts.push_back((event_type, 1u32));
-        1
     }
 
     fn u64_to_bytes(env: &Env, v: u64) -> Bytes {
