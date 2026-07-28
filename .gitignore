@@ -16,10 +16,20 @@ target/
 .idea/
 *.swp
 *.swo
+*.suo
+*.user
+*.userosscache
+*.sln.docstates
 
 # OS files
 .DS_Store
+.DS_Store?
+._*
+.Spotlight-V100
+.Trashes
+ehthumbs.db
 Thumbs.db
+desktop.ini
 
 # Python
 __pycache__/
@@ -30,6 +40,9 @@ __pycache__/
 dist/
 .venv/
 venv/
+.python-version
+*.whl
+build/
 
 # Node / JS
 node_modules/
@@ -38,6 +51,8 @@ yarn-debug.log*
 yarn-error.log*
 .npm/
 .pnpm-store/
+.yarn/
+pnpm-lock.yaml
 
 # Next.js
 ui/.next/
@@ -46,13 +61,32 @@ ui/out/
 # TypeScript build outputs
 *.js.map
 *.d.ts.map
+*.tsbuildinfo
+
+# SDK build outputs
+sdk/js/dist/
+sdk/python/dist/
+sdk/python/build/
+sdk/python/*.egg-info/
 
 # Test artifacts & snapshots
 test_snapshots/
+__snapshots__/
 *.snap
+*.snapshot
 coverage/
+.coverage
+.coverage.*
+htmlcov/
 lcov.info
+lcov-report/
 tarpaulin-report.html
+.vitest-cache/
+vitest.config.*.timestamp*
+
+# Hardhat build outputs
+bridge/cache/
+bridge/artifacts/
 
 # Soroban / Stellar
 .soroban/
@@ -61,26 +95,40 @@ soroban-cli-log*
 # Logs
 *.log
 logs/
+*.log.*
 
 # Secrets / keys (never commit)
 *.pem
 *.key
 *.p12
 *.pfx
+*.cert
+*.crt
+keystore/
 
 # Benchmark / profiling outputs
 docs/fees-benchmark.txt
 *.profdata
 *.profraw
+flamegraph.svg
+perf.data*
 
 # Python virtual envs & local build
-.python-version
 *.whl
 build/
-
-# TypeScript declaration map
-*.tsbuildinfo
 
 # Editor local history
 .history/
 .idea/workspace.xml
+
+# Hardhat / Foundry
+cache/
+artifacts/
+typechain/
+typechain-types/
+
+# Grafana local state
+monitoring/grafana/data/
+
+# Docker
+*.pid
