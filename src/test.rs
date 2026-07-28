@@ -2911,3 +2911,106 @@ fn test_get_events_by_type_preserves_insertion_order() {
     assert_eq!(page.get(1).unwrap().metadata, Bytes::from_slice(&env, b"second"));
     assert_eq!(page.get(2).unwrap().metadata, Bytes::from_slice(&env, b"third"));
 }
+
+// ── issue #203: Event chaining ────────────────────────────────────────────────
+
+/// Two events can be chained and retrieved in root-to-leaf order.
+#[test]
+fn test_chain_two_events() {
+    let (env, owner, client) = create_ledger();
+    let submitter = Address::generate(&env);
+    let payment = symbol_short!("payment");
+
+    env.mock_all_auths();
+    let id0 = client.log_event(&submitter, &payment, &Bytes::from_slice(&env, b"genesis"), &None, &None, &false);
+    let id1 = client.log_event(&submitter, &payment, &Bytes::from_slice(&env, b"child"), &None, &None, &false);
+
+    let ids = soroban_sdk::vec![&env, id0.clone(), id1.clone()];
+    client.chain_events(&owner, &ids);
+
+    let chain = client.get_event_chain(&id1);
+    assert_eq!(chain.len(), 2);
+    assert_eq!(chain.get(0).unwrap().metadata, Bytes::from_slice(&env, b"genesis"));
+    assert_eq!(chain.get(1).unwrap().metadata, Bytes::from_slice(&env, b"child"));
+    assert_eq!(chain.get(0).unwrap().parent_event_id, None);
+    assert_eq!(chain.get(1).unwrap().parent_event_id, Some(id0));
+}
+
+/// A three-event chain preserves order root → middle → leaf.
+#[test]
+fn test_chain_three_events() {
+    let (env, owner, client) = create_ledger();
+    let submitter = Address::generate(&env);
+    let action = symbol_short!("action");
+
+    env.mock_all_auths();
+    let id0 = client.log_event(&submitter, &action, &Bytes::from_slice(&env, b"a0"), &None, &None, &false);
+    let id1 = client.log_event(&submitter, &action, &Bytes::from_slice(&env, b"a1"), &None, &None, &false);
+    let id2 = client.log_event(&submitter, &action, &Bytes::from_slice(&env, b"a2"), &None, &None, &false);
+
+    let ids = soroban_sdk::vec![&env, id0.clone(), id1.clone(), id2.clone()];
+    client.chain_events(&owner, &ids);
+
+    let chain = client.get_event_chain(&id2);
+    assert_eq!(chain.len(), 3);
+    assert_eq!(chain.get(0).unwrap().metadata, Bytes::from_slice(&env, b"a0"));
+    assert_eq!(chain.get(1).unwrap().metadata, Bytes::from_slice(&env, b"a1"));
+    assert_eq!(chain.get(2).unwrap().metadata, Bytes::from_slice(&env, b"a2"));
+}
+
+/// chain_events with only one event panics (ChainTooShort).
+#[test]
+#[should_panic(expected = "HostError: Error(Contract, #35)")]
+fn test_chain_events_single_event_panics() {
+    let (env, owner, client) = create_ledger();
+    let submitter = Address::generate(&env);
+    let action = symbol_short!("action");
+
+    env.mock_all_auths();
+    let id0 = client.log_event(&submitter, &action, &Bytes::from_slice(&env, b"a0"), &None, &None, &false);
+
+    let ids = soroban_sdk::vec![&env, id0];
+    client.chain_events(&owner, &ids);
+}
+
+/// Re-linking an already-chained child panics.
+#[test]
+#[should_panic(expected = "HostError: Error(Contract, #32)")]
+fn test_chain_events_already_linked_panics() {
+    let (env, owner, client) = create_ledger();
+    let submitter = Address::generate(&env);
+    let action = symbol_short!("action");
+
+    env.mock_all_auths();
+    let id0 = client.log_event(&submitter, &action, &Bytes::from_slice(&env, b"a0"), &None, &None, &false);
+    let id1 = client.log_event(&submitter, &action, &Bytes::from_slice(&env, b"a1"), &None, &None, &false);
+
+    let ids = soroban_sdk::vec![&env, id0.clone(), id1.clone()];
+    client.chain_events(&owner, &ids);
+    client.chain_events(&owner, &ids);
+}
+
+/// Updating an event preserves its place in a chain (children are repointed).
+#[test]
+fn test_chain_integrity_after_update() {
+    let (env, owner, client) = create_ledger();
+    let submitter = Address::generate(&env);
+    let action = symbol_short!("action");
+
+    env.mock_all_auths();
+    let id0 = client.log_event(&submitter, &action, &Bytes::from_slice(&env, b"original"), &None, &None, &false);
+    let id1 = client.log_event(&submitter, &action, &Bytes::from_slice(&env, b"child"), &None, &None, &false);
+
+    let ids = soroban_sdk::vec![&env, id0.clone(), id1.clone()];
+    client.chain_events(&owner, &ids);
+
+    // Update the parent (index 0)
+    let new_id0 = client.update_event(&owner, &0, &Bytes::from_slice(&env, b"updated"));
+
+    let chain = client.get_event_chain(&id1);
+    assert_eq!(chain.len(), 2);
+    assert_eq!(chain.get(1).unwrap().parent_event_id, Some(new_id0));
+    assert_eq!(chain.get(0).unwrap().metadata, Bytes::from_slice(&env, b"updated"));
+    assert_eq!(chain.get(0).unwrap().event_type, action);
+}
+
