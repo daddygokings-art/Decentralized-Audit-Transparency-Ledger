@@ -2203,6 +2203,134 @@ fn test_update_event_nonexistent_panics() {
     client.update_event(&owner, &0, &Bytes::from_slice(&env, b"updated"));
 }
 
+// ── issue #204: event versioning with rollback ────────────────────────────────
+
+#[test]
+fn test_rollback_event_to_original() {
+    let (env, owner, client) = create_ledger();
+    let submitter = Address::generate(&env);
+    let payment = symbol_short!("payment");
+
+    env.mock_all_auths();
+    let id0 = client.log_event(
+        &submitter,
+        &payment,
+        &Bytes::from_slice(&env, b"original"),
+        &None,
+        &None,
+        &false,
+    );
+    let new_id = client.update_event(&owner, &0, &Bytes::from_slice(&env, b"updated"));
+    assert_ne!(id0, new_id);
+
+    let rolled_id = client.rollback_event(&owner, &0, &0);
+    assert_eq!(rolled_id, id0);
+
+    let evt = client.get_event(&id0);
+    assert_eq!(evt.metadata, Bytes::from_slice(&env, b"original"));
+
+    let history = client.get_event_history(&0);
+    assert_eq!(history.len(), 3);
+    assert_eq!(history.get(2).unwrap().data.metadata, Bytes::from_slice(&env, b"original"));
+}
+
+#[test]
+fn test_rollback_event_to_specific_version() {
+    let (env, owner, client) = create_ledger();
+    let submitter = Address::generate(&env);
+    let payment = symbol_short!("payment");
+
+    env.mock_all_auths();
+    client.log_event(
+        &submitter,
+        &payment,
+        &Bytes::from_slice(&env, b"v0"),
+        &None,
+        &None,
+        &false,
+    );
+    client.update_event(&owner, &0, &Bytes::from_slice(&env, b"v1"));
+    client.update_event(&owner, &0, &Bytes::from_slice(&env, b"v2"));
+
+    let history = client.get_event_history(&0);
+    assert_eq!(history.len(), 4);
+
+    client.rollback_event(&owner, &0, &1);
+    let evt = client.get_event_by_order(&0);
+    assert_eq!(evt.metadata, Bytes::from_slice(&env, b"v1"));
+
+    let new_history = client.get_event_history(&0);
+    assert_eq!(new_history.len(), 5);
+    assert_eq!(new_history.get(4).unwrap().data.metadata, Bytes::from_slice(&env, b"v1"));
+}
+
+#[test]
+fn test_rollback_preserves_hash_chain() {
+    let (env, owner, client) = create_ledger();
+    let submitter = Address::generate(&env);
+
+    env.mock_all_auths();
+    client.log_event(&submitter, &symbol_short!("a"), &Bytes::from_slice(&env, b"1"), &None, &None, &false);
+    client.log_event(&submitter, &symbol_short!("b"), &Bytes::from_slice(&env, b"2"), &None, &None, &false);
+    client.log_event(&submitter, &symbol_short!("c"), &Bytes::from_slice(&env, b"3"), &None, &None, &false);
+
+    assert!(client.verify_integrity());
+
+    client.update_event(&owner, &0, &Bytes::from_slice(&env, b"1-updated"));
+    assert!(client.verify_integrity());
+
+    client.rollback_event(&owner, &0, &0);
+    assert!(client.verify_integrity());
+}
+
+#[test]
+#[should_panic(expected = "HostError: Error(Contract, #33)")]
+fn test_rollback_invalid_version_panics() {
+    let (env, owner, client) = create_ledger();
+    let submitter = Address::generate(&env);
+    env.mock_all_auths();
+    client.log_event(&submitter, &symbol_short!("t"), &Bytes::from_slice(&env, b"x"), &None, &None, &false);
+    client.rollback_event(&owner, &0, &5);
+}
+
+#[test]
+#[should_panic(expected = "HostError: Error(Contract, #1)")]
+fn test_rollback_non_owner_panics() {
+    let (env, _owner, client) = create_ledger();
+    let attacker = Address::generate(&env);
+    env.mock_all_auths();
+    client.rollback_event(&attacker, &0, &0);
+}
+
+#[test]
+fn test_get_event_version_count() {
+    let (env, owner, client) = create_ledger();
+    let submitter = Address::generate(&env);
+    env.mock_all_auths();
+    client.log_event(&submitter, &symbol_short!("t"), &Bytes::from_slice(&env, b"x"), &None, &None, &false);
+    assert_eq!(client.get_event_version_count(&0), 1);
+
+    client.update_event(&owner, &0, &Bytes::from_slice(&env, b"y"));
+    assert_eq!(client.get_event_version_count(&0), 2);
+
+    client.update_event(&owner, &0, &Bytes::from_slice(&env, b"z"));
+    assert_eq!(client.get_event_version_count(&0), 3);
+}
+
+#[test]
+fn test_compare_event_versions() {
+    let (env, owner, client) = create_ledger();
+    let submitter = Address::generate(&env);
+    env.mock_all_auths();
+    client.log_event(&submitter, &symbol_short!("t"), &Bytes::from_slice(&env, b"short"), &None, &None, &false);
+    client.update_event(&owner, &0, &Bytes::from_slice(&env, b"much longer metadata"));
+
+    assert_eq!(client.compare_event_versions(&0, &0, &0), 0);
+    assert_eq!(client.compare_event_versions(&0, &1, &1), 0);
+    assert!(client.compare_event_versions(&0, &0, &1) < 0);
+    assert!(client.compare_event_versions(&0, &1, &0) > 0);
+}
+
 // ── Hash Chain Integrity Verification (Issue #144) ───────────────────────────
 
 #[test]
@@ -2912,105 +3040,172 @@ fn test_get_events_by_type_preserves_insertion_order() {
     assert_eq!(page.get(2).unwrap().metadata, Bytes::from_slice(&env, b"third"));
 }
 
-// ── issue #203: Event chaining ────────────────────────────────────────────────
+// ── issue #202: metadata schema validation ────────────────────────────────────
 
-/// Two events can be chained and retrieved in root-to-leaf order.
 #[test]
-fn test_chain_two_events() {
+fn test_set_metadata_schema_and_get() {
+    let (env, owner, client) = create_ledger();
+    let event_type = symbol_short!("payment");
+    env.mock_all_auths();
+    // schema: min_len = 5
+    let schema = Bytes::from_slice(&env, &[5u8, 0, 0, 0]);
+    client.set_metadata_schema(&owner, &event_type, &schema);
+    let retrieved = client.get_metadata_schema(&event_type);
+    assert_eq!(retrieved, schema);
+}
+
+#[test]
+fn test_get_metadata_schema_returns_empty_when_not_set() {
+    let (env, _owner, client) = create_ledger();
+    let event_type = symbol_short!("payment");
+    let schema = client.get_metadata_schema(&event_type);
+    assert_eq!(schema.len(), 0);
+}
+
+#[test]
+fn test_metadata_schema_passes_when_met() {
+    let (env, owner, client) = create_ledger();
+    let submitter = Address::generate(&env);
+    let event_type = symbol_short!("payment");
+    env.mock_all_auths();
+    // schema: min_len = 5
+    let schema = Bytes::from_slice(&env, &[5u8, 0, 0, 0]);
+    client.set_metadata_schema(&owner, &event_type, &schema);
+    // 5 bytes passes
+    let id = client.log_event(
+        &submitter,
+        &event_type,
+        &Bytes::from_slice(&env, b"12345"),
+        &None,
+        &None,
+        &false,
+    );
+    assert_eq!(client.total_events(), 1);
+    // 10 bytes also passes
+    client.log_event(
+        &submitter,
+        &event_type,
+        &Bytes::from_slice(&env, b"0123456789"),
+        &None,
+        &None,
+        &false,
+    );
+    assert_eq!(client.total_events(), 2);
+}
+
+#[test]
+#[should_panic(expected = "HostError: Error(Contract, #32)")]
+fn test_metadata_schema_fails_when_too_short() {
+    let (env, owner, client) = create_ledger();
+    let submitter = Address::generate(&env);
+    let event_type = symbol_short!("payment");
+    env.mock_all_auths();
+    // schema: min_len = 10
+    let schema = Bytes::from_slice(&env, &[10u8, 0, 0, 0]);
+    client.set_metadata_schema(&owner, &event_type, &schema);
+    // 5 bytes is too short
+    client.log_event(
+        &submitter,
+        &event_type,
+        &Bytes::from_slice(&env, b"12345"),
+        &None,
+        &None,
+        &false,
+    );
+}
+
+#[test]
+fn test_metadata_schema_empty_passes_any() {
+    let (env, owner, client) = create_ledger();
+    let submitter = Address::generate(&env);
+    let event_type = symbol_short!("payment");
+    env.mock_all_auths();
+    // empty schema = no constraint
+    client.set_metadata_schema(&owner, &event_type, &Bytes::new(&env));
+    client.log_event(
+        &submitter,
+        &event_type,
+        &Bytes::new(&env),
+        &None,
+        &None,
+        &false,
+    );
+    assert_eq!(client.total_events(), 1);
+}
+
+#[test]
+fn test_metadata_schema_non_owner_cannot_set() {
+    let (env, _owner, client) = create_ledger();
+    let attacker = Address::generate(&env);
+    let event_type = symbol_short!("payment");
+    env.mock_all_auths();
+    let schema = Bytes::from_slice(&env, &[5u8, 0, 0, 0]);
+    let result = client.try_set_metadata_schema(&attacker, &event_type, &schema);
+    assert!(result.is_err());
+}
+
+#[test]
+#[should_panic(expected = "HostError: Error(Contract, #32)")]
+fn test_metadata_schema_enforced_on_update() {
+    let (env, owner, client) = create_ledger();
+    let submitter = Address::generate(&env);
+    let event_type = symbol_short!("payment");
+    env.mock_all_auths();
+    // schema: min_len = 10
+    let schema = Bytes::from_slice(&env, &[10u8, 0, 0, 0]);
+    client.set_metadata_schema(&owner, &event_type, &schema);
+    // log a valid event first
+    let id = client.log_event(
+        &submitter,
+        &event_type,
+        &Bytes::from_slice(&env, b"0123456789"),
+        &None,
+        &None,
+        &false,
+    );
+    // attempt to update with too-short metadata
+    client.update_event(&owner, &0, &Bytes::from_slice(&env, b"short"));
+}
+
+#[test]
+fn test_metadata_schema_per_type_isolation() {
     let (env, owner, client) = create_ledger();
     let submitter = Address::generate(&env);
     let payment = symbol_short!("payment");
-
+    let refund = symbol_short!("refund");
     env.mock_all_auths();
-    let id0 = client.log_event(&submitter, &payment, &Bytes::from_slice(&env, b"genesis"), &None, &None, &false);
-    let id1 = client.log_event(&submitter, &payment, &Bytes::from_slice(&env, b"child"), &None, &None, &false);
-
-    let ids = soroban_sdk::vec![&env, id0.clone(), id1.clone()];
-    client.chain_events(&owner, &ids);
-
-    let chain = client.get_event_chain(&id1);
-    assert_eq!(chain.len(), 2);
-    assert_eq!(chain.get(0).unwrap().metadata, Bytes::from_slice(&env, b"genesis"));
-    assert_eq!(chain.get(1).unwrap().metadata, Bytes::from_slice(&env, b"child"));
-    assert_eq!(chain.get(0).unwrap().parent_event_id, None);
-    assert_eq!(chain.get(1).unwrap().parent_event_id, Some(id0));
+    // payment requires min 8 bytes
+    let schema_payment = Bytes::from_slice(&env, &[8u8, 0, 0, 0]);
+    client.set_metadata_schema(&owner, &payment, &schema_payment);
+    // refund has no schema
+    // refund short metadata passes
+    client.log_event(
+        &submitter,
+        &refund,
+        &Bytes::from_slice(&env, b"1"),
+        &None,
+        &None,
+        &false,
+    );
+    assert_eq!(client.total_events(), 1);
+    // payment short metadata fails
+    let result = client.try_log_event(
+        &submitter,
+        &payment,
+        &Bytes::from_slice(&env, b"1"),
+        &None,
+        &None,
+        &false,
+    );
+    assert!(result.is_err());
+    // payment long metadata passes
+    client.log_event(
+        &submitter,
+        &payment,
+        &Bytes::from_slice(&env, b"01234567"),
+        &None,
+        &None,
+        &false,
+    );
+    assert_eq!(client.total_events(), 2);
 }
-
-/// A three-event chain preserves order root → middle → leaf.
-#[test]
-fn test_chain_three_events() {
-    let (env, owner, client) = create_ledger();
-    let submitter = Address::generate(&env);
-    let action = symbol_short!("action");
-
-    env.mock_all_auths();
-    let id0 = client.log_event(&submitter, &action, &Bytes::from_slice(&env, b"a0"), &None, &None, &false);
-    let id1 = client.log_event(&submitter, &action, &Bytes::from_slice(&env, b"a1"), &None, &None, &false);
-    let id2 = client.log_event(&submitter, &action, &Bytes::from_slice(&env, b"a2"), &None, &None, &false);
-
-    let ids = soroban_sdk::vec![&env, id0.clone(), id1.clone(), id2.clone()];
-    client.chain_events(&owner, &ids);
-
-    let chain = client.get_event_chain(&id2);
-    assert_eq!(chain.len(), 3);
-    assert_eq!(chain.get(0).unwrap().metadata, Bytes::from_slice(&env, b"a0"));
-    assert_eq!(chain.get(1).unwrap().metadata, Bytes::from_slice(&env, b"a1"));
-    assert_eq!(chain.get(2).unwrap().metadata, Bytes::from_slice(&env, b"a2"));
-}
-
-/// chain_events with only one event panics (ChainTooShort).
-#[test]
-#[should_panic(expected = "HostError: Error(Contract, #35)")]
-fn test_chain_events_single_event_panics() {
-    let (env, owner, client) = create_ledger();
-    let submitter = Address::generate(&env);
-    let action = symbol_short!("action");
-
-    env.mock_all_auths();
-    let id0 = client.log_event(&submitter, &action, &Bytes::from_slice(&env, b"a0"), &None, &None, &false);
-
-    let ids = soroban_sdk::vec![&env, id0];
-    client.chain_events(&owner, &ids);
-}
-
-/// Re-linking an already-chained child panics.
-#[test]
-#[should_panic(expected = "HostError: Error(Contract, #32)")]
-fn test_chain_events_already_linked_panics() {
-    let (env, owner, client) = create_ledger();
-    let submitter = Address::generate(&env);
-    let action = symbol_short!("action");
-
-    env.mock_all_auths();
-    let id0 = client.log_event(&submitter, &action, &Bytes::from_slice(&env, b"a0"), &None, &None, &false);
-    let id1 = client.log_event(&submitter, &action, &Bytes::from_slice(&env, b"a1"), &None, &None, &false);
-
-    let ids = soroban_sdk::vec![&env, id0.clone(), id1.clone()];
-    client.chain_events(&owner, &ids);
-    client.chain_events(&owner, &ids);
-}
-
-/// Updating an event preserves its place in a chain (children are repointed).
-#[test]
-fn test_chain_integrity_after_update() {
-    let (env, owner, client) = create_ledger();
-    let submitter = Address::generate(&env);
-    let action = symbol_short!("action");
-
-    env.mock_all_auths();
-    let id0 = client.log_event(&submitter, &action, &Bytes::from_slice(&env, b"original"), &None, &None, &false);
-    let id1 = client.log_event(&submitter, &action, &Bytes::from_slice(&env, b"child"), &None, &None, &false);
-
-    let ids = soroban_sdk::vec![&env, id0.clone(), id1.clone()];
-    client.chain_events(&owner, &ids);
-
-    // Update the parent (index 0)
-    let new_id0 = client.update_event(&owner, &0, &Bytes::from_slice(&env, b"updated"));
-
-    let chain = client.get_event_chain(&id1);
-    assert_eq!(chain.len(), 2);
-    assert_eq!(chain.get(1).unwrap().parent_event_id, Some(new_id0));
-    assert_eq!(chain.get(0).unwrap().metadata, Bytes::from_slice(&env, b"updated"));
-    assert_eq!(chain.get(0).unwrap().event_type, action);
-}
-

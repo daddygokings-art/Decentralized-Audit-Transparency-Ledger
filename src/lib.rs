@@ -132,6 +132,8 @@ pub enum DataKey {
     EventMetadataMaxSize(Symbol),
     /// Global metadata size cap (issue #67). Absent = DEFAULT_MAX_METADATA_SIZE.
     GlobalMetadataMaxSize,
+    /// Per-event-type metadata validation schema (issue #202). Absent = no schema constraint.
+    MetadataSchema(Symbol),
     /// Cached full runtime state for fast reads.
     RuntimeState,
     /// Signature stored for an event (issue #69): (pubkey, signature).
@@ -242,6 +244,11 @@ pub enum ContractError {
     /// **Resolution**: Reduce metadata size, or owner should increase limit via `set_global_metadata_max_size()` or `set_event_metadata_max_size()`.
     MetadataTooLarge = 8,
 
+    /// **Code 32**: Metadata does not satisfy the configured min-length schema for its event type.
+    /// **Common cause**: Owner configured a min-bytes schema for this event type and the submitted metadata is too short.
+    /// **Resolution**: Include more metadata bytes or have the owner reduce the constraint via `set_metadata_schema`.
+    MetadataSchemaViolation = 32,
+
     /// **Code 9**: Contract has not been initialized.
     /// **Common cause**: Attempting to call functions before `initialize(owner, global_max_logs)`.
     /// **Resolution**: Owner must call `initialize()` once at contract deployment.
@@ -311,14 +318,10 @@ pub enum ContractError {
     SnapshotNotFound = 30,
     /// **Code 31**: Snapshot verification failed (hash mismatch).
     SnapshotVerificationFailed = 31,
-    /// **Code 32**: Event is already part of a chain and cannot be re-linked.
-    EventAlreadyInChain = 32,
-    /// **Code 33**: Event is not part of the requested chain.
-    EventNotInChain = 33,
-    /// **Code 34**: Circular reference detected in event chain.
-    CircularChainDetected = 34,
-    /// **Code 35**: Cannot create a chain with fewer than 2 events.
-    ChainTooShort = 35,
+    /// **Code 33**: Event version does not exist in history.
+    /// **Common cause**: `rollback_event` called with a version number beyond the stored history length.
+    /// **Resolution**: Use `get_event_history` or `get_event_version_count` to discover valid versions.
+    InvalidVersion = 33,
 }
 
 #[contracttype]
@@ -417,6 +420,8 @@ pub enum ProposalAction {
     RemoveOwner(Address),
     SetRequiredSignatures(u32),
     SetGlobalMaxLogs(u32),
+    SetMetadataSchema(Symbol, Bytes),
+    RollbackEvent(u32, u32),
     Pause,
     Unpause,
 }
@@ -442,7 +447,20 @@ pub struct Snapshot {
     pub description: Bytes,
 }
 
-const NULL_ACCOUNT: &str = "GAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAWHF";
+/// Governance action carried by a multisig proposal.
+#[contracttype]
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub enum ProposalAction {
+    TransferOwnership(Address),
+    AddOwner(Address),
+    RemoveOwner(Address),
+    SetRequiredSignatures(u32),
+    SetGlobalMaxLogs(u32),
+    SetMetadataSchema(Symbol, Bytes),
+    RollbackEvent(u32, u32),
+    Pause,
+    Unpause,
+}
 
 // ── Additional type definitions ──────────────────────────────────────────────
 
@@ -585,6 +603,9 @@ impl AuditLedger {
             if metadata.len() > max_meta {
                 panic_with_error!(&env, ContractError::MetadataTooLarge);
             }
+
+            // --- issue #202: validate metadata against optional per-type schema ---
+            Self::validate_metadata_against_schema(&env, &event_type, &metadata);
 
             if let Some(limit) = env
                 .storage()
@@ -870,6 +891,9 @@ impl AuditLedger {
         if metadata.len() > max_meta {
             panic_with_error!(&env, ContractError::MetadataTooLarge);
         }
+
+        // --- issue #202: validate metadata against optional per-type schema ---
+        Self::validate_metadata_against_schema(&env, &event_type, &metadata);
 
         if rs.total_events >= rs.global_max_logs {
             panic_with_error!(&env, ContractError::GlobalMaxLogsReached);
@@ -1807,6 +1831,9 @@ impl AuditLedger {
             panic_with_error!(&env, ContractError::MetadataTooLarge);
         }
 
+        // --- issue #202: validate new metadata against optional per-type schema ---
+        Self::validate_metadata_against_schema(&env, &current_event.event_type, &new_metadata);
+
         let new_id = Self::compute_event_id(
             &env,
             &current_event.submitter,
@@ -1968,106 +1995,168 @@ impl AuditLedger {
         history
     }
 
-    // ── Event chaining (issue #203) ──────────────────────────────────────────
-
-    /// Link a sequence of events into a chain by setting each event's
-    /// `parent_event_id` to the previous event in the sequence.
+    /// Roll back an event to a specific version from its history (issue #204).
     ///
-    /// Events must not already have a parent. Owner-only.
-    pub fn chain_events(env: Env, caller: Address, event_ids: Vec<BytesN<32>>) {
+    /// Owner-only. Restores the event data (metadata, timestamps, submitter, etc.)
+    /// to the state recorded at `target_version`, recomputes the event ID and
+    /// hash chain, and appends a new version entry recording the rollback.
+    ///
+    /// Returns the new content-addressed event ID after rollback.
+    pub fn rollback_event(env: Env, caller: Address, index: u32, target_version: u32) -> BytesN<32> {
         caller.require_auth();
         Self::require_owner_or_multisig(&env, &caller);
-        Self::require_initialized(&env);
 
-        let len = event_ids.len();
-        if len <= 1 {
-            panic_with_error!(&env, ContractError::ChainTooShort);
+        let total = Self::total_events(env.clone());
+        if index >= total {
+            panic_with_error!(&env, ContractError::EventDoesNotExist);
         }
 
-        for i in 1..len {
-            let child_id = event_ids.get(i).unwrap().clone();
-            let child_evt: Event = env
-                .storage()
-                .instance()
-                .get(&DataKey::EventData(child_id.clone()))
-                .unwrap_or_else(|| panic_with_error!(&env, ContractError::EventDoesNotExist));
-
-            if child_evt.parent_event_id.is_some() {
-                panic_with_error!(&env, ContractError::EventAlreadyInChain);
-            }
+        let history = Self::get_event_history(env.clone(), index);
+        if target_version >= history.len() as u32 {
+            panic_with_error!(&env, ContractError::InvalidVersion);
         }
 
-        for i in 1..len {
-            let parent_id = event_ids.get(i - 1).unwrap().clone();
-            let child_id = event_ids.get(i).unwrap().clone();
+        let target = history.get(target_version as usize).unwrap();
+        let restored = &target.data;
 
-            let mut child_evt: Event = env
+        let new_id = Self::compute_event_id(
+            &env,
+            &restored.submitter,
+            &restored.event_type,
+            &restored.metadata,
+            restored.timestamp,
+            index,
+        );
+
+        let current_id: BytesN<32> = env
+            .storage()
+            .instance()
+            .get(&DataKey::EventOrder(index))
+            .unwrap();
+
+        if new_id == current_id {
+            return new_id;
+        }
+
+        let prev_hash: BytesN<32> = if index == 0 {
+            BytesN::from_array(&env, &[0u8; 32])
+        } else {
+            let prev_id: BytesN<32> = env
                 .storage()
                 .instance()
-                .get(&DataKey::EventData(child_id.clone()))
+                .get(&DataKey::EventOrder(index - 1))
                 .unwrap();
-            child_evt.parent_event_id = Some(parent_id.clone());
+            let prev_evt: Event = env
+                .storage()
+                .instance()
+                .get(&DataKey::EventData(prev_id))
+                .unwrap();
+            prev_evt.event_hash.clone()
+        };
 
+        let new_hash = Self::compute_event_hash(&env, &new_id, &prev_hash, index, restored.timestamp);
+
+        let updated_event = Event {
+            index: restored.index,
+            timestamp: restored.timestamp,
+            event_type: restored.event_type.clone(),
+            category: restored.category.clone(),
+            submitter: restored.submitter.clone(),
+            metadata: restored.metadata.clone(),
+            sub_event_type: restored.sub_event_type.clone(),
+            version: Self::current_contract_version(&env),
+            event_hash: new_hash.clone(),
+            prev_hash: prev_hash.clone(),
+        };
+
+        let mut versions = history;
+        let rollback_version = EventVersion {
+            version: versions.len() as u32,
+            data: updated_event.clone(),
+            updated_at: env.ledger().timestamp(),
+            updated_by: caller.clone(),
+        };
+        versions.push_back(rollback_version);
+        env.storage()
+            .instance()
+            .set(&DataKey::EventVersions(index), &versions);
+
+        env.storage()
+            .instance()
+            .set(&DataKey::EventData(new_id.clone()), &updated_event);
+        env.storage()
+            .instance()
+            .set(&DataKey::EventOrder(index), &new_id);
+        env.storage().instance().set(
+            &DataKey::EventHeaderKey(new_id.clone()),
+            &EventHeader {
+                index: updated_event.index,
+                timestamp: updated_event.timestamp,
+                event_type: updated_event.event_type.clone(),
+                submitter: updated_event.submitter.clone(),
+            },
+        );
+        env.storage()
+            .instance()
+            .set(&DataKey::EventMeta(new_id.clone()), &updated_event);
+        env.storage()
+            .instance()
+            .set(&DataKey::EventMetadata(new_id.clone()), &updated_event.metadata);
+
+        let mut next_prev_hash = new_hash;
+        for i in index + 1..total {
+            let event_id: BytesN<32> = env
+                .storage()
+                .instance()
+                .get(&DataKey::EventOrder(i))
+                .unwrap();
+            let mut later_event: Event = env
+                .storage()
+                .instance()
+                .get(&DataKey::EventData(event_id.clone()))
+                .unwrap();
+            later_event.prev_hash = next_prev_hash.clone();
+            later_event.event_hash =
+                Self::compute_event_hash(&env, &event_id, &later_event.prev_hash, i, later_event.timestamp);
             env.storage()
                 .instance()
-                .set(&DataKey::EventData(child_id.clone()), &child_evt);
+                .set(&DataKey::EventData(event_id.clone()), &later_event);
             env.storage()
                 .instance()
-                .set(&DataKey::EventMeta(child_id.clone()), &child_evt);
+                .set(&DataKey::EventMeta(event_id.clone()), &later_event);
+            next_prev_hash = later_event.event_hash.clone();
         }
 
         env.events().publish(
-            (Symbol::new(&env, "chain"), Symbol::new(&env, "events_linked")),
-            (len as u32,),
+            (Symbol::new(&env, "versioning"), Symbol::new(&env, "event_rolled_back")),
+            (index, target_version, caller, env.ledger().timestamp()),
         );
+
+        new_id
     }
 
-    /// Retrieve all events in the chain that ends at `leaf_event_id`.
+    /// Return the number of recorded versions for an event (including version 0).
+    pub fn get_event_version_count(env: Env, index: u32) -> u32 {
+        let history = Self::get_event_history(env.clone(), index);
+        history.len() as u32
+    }
+
+    /// Compare two versions of the same event by metadata length.
     ///
-    /// Returns events in root-to-leaf order (ancestors first, leaf last).
-    /// Traverses `parent_event_id` links. Panics with `EventDoesNotExist`
-    /// if any linked event is missing, or `CircularChainDetected` if the
-    /// chain exceeds 1000 hops.
-    pub fn get_event_chain(env: Env, leaf_event_id: BytesN<32>) -> Vec<Event> {
-        Self::require_initialized(&env);
-        let mut ids: Vec<BytesN<32>> = Vec::new(&env);
-        let mut evt: Event = env
-            .storage()
-            .instance()
-            .get(&DataKey::EventData(leaf_event_id.clone()))
-            .unwrap_or_else(|| panic_with_error!(&env, ContractError::EventDoesNotExist));
-
-        ids.push_back(leaf_event_id);
-        let mut hops: u32 = 0;
-        const MAX_CHAIN_HOPS: u32 = 1000;
-
-        while let Some(parent_id) = &evt.parent_event_id {
-            if hops >= MAX_CHAIN_HOPS {
-                panic_with_error!(&env, ContractError::CircularChainDetected);
-            }
-            let parent_clone = parent_id.clone();
-            evt = env
-                .storage()
-                .instance()
-                .get(&DataKey::EventData(parent_clone.clone()))
-                .unwrap_or_else(|| panic_with_error!(&env, ContractError::EventDoesNotExist));
-            ids.push_back(parent_clone);
-            hops += 1;
+    /// Returns -1 if version_a metadata is shorter, 0 if equal, 1 if longer.
+    pub fn compare_event_versions(env: Env, index: u32, version_a: u32, version_b: u32) -> i32 {
+        let history = Self::get_event_history(env.clone(), index);
+        if history.is_empty() {
+            return 0;
         }
-
-        let total = ids.len();
-        let mut result: Vec<Event> = Vec::new(&env);
-        for i in 0..total {
-            let id = ids.get(total - 1 - i).unwrap();
-            let evt = env
-                .storage()
-                .instance()
-                .get(&DataKey::EventData(id.clone()))
-                .unwrap_or_else(|| panic_with_error!(&env, ContractError::EventDoesNotExist));
-            result.push_back(evt);
+        let a = version_a as usize;
+        let b = version_b as usize;
+        if a >= history.len() || b >= history.len() {
+            panic_with_error!(&env, ContractError::InvalidVersion);
         }
-
-        result
+        let len_a = history.get(a).unwrap().data.metadata.len();
+        let len_b = history.get(b).unwrap().data.metadata.len();
+        len_a.cmp(&len_b) as i32
     }
 
     // ── Integrity verification (issue #66) ──────────────────────────────────
@@ -2414,6 +2503,34 @@ impl AuditLedger {
         env.storage()
             .instance()
             .set(&DataKey::EventMetadataMaxSize(event_type), &max_size);
+    }
+
+    /// Set a metadata validation schema for a specific event type (owner-only, issue #202).
+    ///
+    /// The schema format is length-prefixed: the first 4 bytes (LE u32) encode the
+    /// minimum required metadata length in bytes.  If `schema` is empty or shorter
+    /// than 4 bytes, the constraint is removed (any metadata passes).
+    pub fn set_metadata_schema(env: Env, caller: Address, event_type: Symbol, schema: Bytes) {
+        Self::require_initialized(&env);
+        caller.require_auth();
+        if let Some(true) = env.storage().instance().get::<_, bool>(&DataKey::Paused) {
+            panic_with_error!(&env, ContractError::ContractPaused);
+        }
+        Self::require_owner_or_multisig(&env, &caller);
+        env.storage().instance().set(&DataKey::MetadataSchema(event_type.clone()), &schema);
+        env.events().publish(
+            (Symbol::new(&env, "governance"), Symbol::new(&env, "set_metadata_schema")),
+            (caller, event_type, schema.len() as u32),
+        );
+    }
+
+    /// Return the metadata validation schema for `event_type`, or empty `Bytes` if none is configured (issue #202).
+    pub fn get_metadata_schema(env: Env, event_type: Symbol) -> Bytes {
+        Self::require_initialized(&env);
+        env.storage()
+            .instance()
+            .get(&DataKey::MetadataSchema(event_type))
+            .unwrap_or_else(|| Bytes::new(&env))
     }
 
     /// Set the TTL for events written to persistent storage (#121).
@@ -2886,6 +3003,21 @@ impl AuditLedger {
         metadata.len() >= min_len
     }
 
+    /// Panic with `MetadataSchemaViolation` if `metadata` does not satisfy the
+    /// optional schema configured for `event_type`.  When no schema is configured,
+    /// validation is a no-op (issue #202).
+    fn validate_metadata_against_schema(env: &Env, event_type: &Symbol, metadata: &Bytes) {
+        if let Some(schema) = env
+            .storage()
+            .instance()
+            .get::<_, Bytes>(&DataKey::MetadataSchema(event_type.clone()))
+        {
+            if !Self::validate_metadata_schema(metadata, &schema) {
+                panic_with_error!(env, ContractError::MetadataSchemaViolation);
+            }
+        }
+    }
+
     // ── issue #54: packed-Bytes index storage helpers ────────────────────────
 
     /// Append a global order index (u32, 4 bytes LE) to the packed Bytes for `event_type`.
@@ -3194,6 +3326,12 @@ impl AuditLedger {
                     c.global_max_logs = v;
                     env.storage().instance().set(&DataKey::Config, &c);
                 }
+            }
+            ProposalAction::SetMetadataSchema(ref event_type, ref schema) => {
+                env.storage().instance().set(&DataKey::MetadataSchema(event_type.clone()), schema);
+            }
+            ProposalAction::RollbackEvent(index, target_version) => {
+                let _ = Self::rollback_event(env.clone(), executor.clone(), *index, *target_version);
             }
             ProposalAction::Pause => {
                 env.storage().instance().set(&DataKey::Paused, &true);
