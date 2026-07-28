@@ -92,7 +92,7 @@ export class AuditLedgerClient {
         throw err;
       }
     };
-    return new AuditLedgerClient(transport, contractId, retryOptions);
+    return new AuditLedgerClient(transport, contractId, retryOptions, rateLimit, compression);
   }
 
   private async sleep(ms: number) {
@@ -119,6 +119,7 @@ export class AuditLedgerClient {
     const start = Date.now();
     let attempt = 0;
     for (;;) {
+      await this.rateLimiter?.acquire();
       try {
         const result = await this.transport(method, params);
         // #237 — log response + performance
@@ -132,7 +133,10 @@ export class AuditLedgerClient {
         if (attempt >= this.maxRetries || !this.isRetryableError(err)) {
           throw err;
         }
-        const delay = this.baseDelayMs * (2 ** attempt);
+        const delay =
+          err instanceof AuditLedgerError && err.retryAfterSeconds !== undefined
+            ? err.retryAfterSeconds * 1000
+            : this.baseDelayMs * (2 ** attempt);
         attempt += 1;
         await this.sleep(delay);
       }
@@ -281,6 +285,140 @@ export class AuditLedgerClient {
 
   async getStatistics(): Promise<ContractStatistics> {
     return this.callTransport('get_statistics', []);
+  }
+
+  async getEventByOrder(order: number): Promise<Event> {
+    return this.callTransport('get_event_by_order', [order]);
+  }
+
+  async listEvents(offset: number, limit: number): Promise<Event[]> {
+    return this.callTransport('list_events', [offset, limit]);
+  }
+
+  async getEventsByTimeRange(
+    startTime: number,
+    endTime: number,
+    offset: number,
+    limit: number,
+  ): Promise<Event[]> {
+    return this.callTransport('get_events_by_time_range', [startTime, endTime, offset, limit]);
+  }
+
+  // ── Event replay (issue #238) ─────────────────────────────────────────
+
+  /**
+   * Replay events in order, from a specific index or timestamp, optionally
+   * filtered, invoking `onEvent` for each match and reporting progress.
+   */
+  async replayEvents(
+    options: ReplayOptions,
+    onEvent: (evt: Event) => void | Promise<void>,
+  ): Promise<ReplayProgress> {
+    const pageSize = options.pageSize ?? 50;
+    const total = await this.totalEvents();
+    let processed = 0;
+    let matched = 0;
+
+    const matchesFilter = (evt: Event): boolean => {
+      const filter = options.filter;
+      if (!filter) return true;
+      if (filter.eventType !== undefined && evt.event_type !== filter.eventType) return false;
+      if (filter.submitter !== undefined && evt.submitter !== filter.submitter) return false;
+      if (filter.predicate && !filter.predicate(evt)) return false;
+      return true;
+    };
+
+    const handle = async (evt: Event) => {
+      processed += 1;
+      if (matchesFilter(evt)) {
+        matched += 1;
+        await onEvent(evt);
+      }
+      options.onProgress?.({ processed, total, matched });
+    };
+
+    if (options.fromTimestamp !== undefined) {
+      const endTime = options.toTimestamp ?? Number.MAX_SAFE_INTEGER;
+      let offset = 0;
+      for (;;) {
+        const batch = await this.getEventsByTimeRange(options.fromTimestamp, endTime, offset, pageSize);
+        if (batch.length === 0) break;
+        for (const evt of batch) await handle(evt);
+        offset += batch.length;
+        if (batch.length < pageSize) break;
+      }
+      return { processed, total, matched };
+    }
+
+    let offset = options.fromIndex ?? 0;
+    for (;;) {
+      const batch = await this.listEvents(offset, pageSize);
+      if (batch.length === 0) break;
+      for (const evt of batch) await handle(evt);
+      offset += batch.length;
+      if (batch.length < pageSize) break;
+    }
+    return { processed, total, matched };
+  }
+
+  // ── Event signing (issue #236) ────────────────────────────────────────
+
+  /** Sign an event ID/message and submit it via `log_event_signed`. */
+  async logEventSigned(
+    submitter: string,
+    eventType: string,
+    metadata: string,
+    privateKey: Buffer | Uint8Array,
+    message: Buffer | Uint8Array,
+  ): Promise<string> {
+    const signaturePayload = buildSignaturePayload(privateKey, message);
+    return this.callTransport('log_event_signed', [
+      submitter,
+      eventType,
+      metadata,
+      signaturePayload.toString('base64'),
+    ]);
+  }
+
+  /** Verify a 96-byte (pubkey || signature) payload against the signed message. */
+  verifyEventSignature(payload: Buffer | Uint8Array, message: Buffer | Uint8Array): boolean {
+    return verifySignaturePayload(payload, message);
+  }
+
+  /** Sign a batch of messages with one private key, e.g. for a batch of pending event IDs. */
+  signEventBatch(privateKey: Buffer | Uint8Array, messages: Array<Buffer | Uint8Array>): Buffer[] {
+    return signBatch(privateKey, messages);
+  }
+
+  async getEventSignature(eventId: string): Promise<string | null> {
+    return this.callTransport('get_event_signature', [eventId]);
+  }
+
+  // ── Event compression (issue #234) ────────────────────────────────────
+
+  /** Compress metadata (per this client's compression config, or an override) and log the event. */
+  async logEventCompressed(
+    submitter: string,
+    eventType: string,
+    metadata: Buffer | Uint8Array,
+    config?: CompressionConfig,
+  ): Promise<{ id: string; stats: CompressionStats }> {
+    const { payload, stats } = encodeMetadata(metadata, config ?? this.compressionConfig ?? {});
+    this.compressionStats.record(stats);
+    const id = await this.logEvent(submitter, eventType, payload.toString('base64'));
+    return { id, stats };
+  }
+
+  /** Fetch an event and decompress its metadata (auto-detected from the envelope tag). */
+  async getEventDecompressed(id: string): Promise<{ event: Event; metadata: Buffer }> {
+    const event = await this.getEvent(id);
+    const raw = Buffer.from(event.metadata, 'base64');
+    return { event, metadata: decodeMetadata(raw) };
+  }
+
+  /** Cumulative compression statistics across all `logEventCompressed` calls on this client. */
+  getCompressionStatistics(): CompressionTotals {
+    return this.compressionStats.totals();
   }
 
   // Governance helpers (examples)
