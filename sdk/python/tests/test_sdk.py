@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import json
 import sys
 import types
 import pytest
@@ -32,14 +33,16 @@ class TestEvent:
         assert ev.submitter == "GABC123"
         assert ev.metadata == bytes.fromhex("deadbeef")
         assert ev.event_hash == bytes.fromhex("ab" * 32)
+        # "00" * 32 is a valid non-empty hex string → decoded to bytes(32)
         assert ev.prev_hash == bytes(32)
 
     def test_from_dict_defaults_missing_hashes(self):
         from audit_ledger.models import Event
         d = {"index": 1, "timestamp": 0, "event_type": "X", "submitter": "G", "metadata": ""}
         ev = Event.from_dict(d)
-        assert ev.event_hash == bytes(32)
-        assert ev.prev_hash == bytes(32)
+        # Missing hash fields → None
+        assert ev.event_hash is None
+        assert ev.prev_hash is None
 
     def test_from_dict_empty_metadata(self):
         from audit_ledger.models import Event
@@ -86,13 +89,31 @@ class TestContractError:
 def _stub_stellar_sdk():
     """Inject a minimal stub for stellar_sdk so client.py can be imported."""
     stub = types.ModuleType("stellar_sdk")
-    stub.SorobanServer = MagicMock  # type: ignore[attr-defined]
-    stub.Keypair = MagicMock  # type: ignore[attr-defined]
+    stub.SorobanServer = MagicMock
+    stub.Keypair = MagicMock
     stub.soroban = types.ModuleType("stellar_sdk.soroban")
-    stub.soroban.SorobanClient = MagicMock  # type: ignore[attr-defined]
+    stub.soroban.SorobanClient = MagicMock
     sys.modules.setdefault("stellar_sdk", stub)
     sys.modules.setdefault("stellar_sdk.soroban", stub.soroban)
     return stub
+
+
+def _make_bare_client():
+    """Return an AuditLedgerClient with no live server (server is a MagicMock)."""
+    _stub_stellar_sdk()
+    for mod in ["audit_ledger.client", "audit_ledger.cache",
+                "audit_ledger.streaming", "audit_ledger.batch"]:
+        sys.modules.pop(mod, None)
+    from audit_ledger.client import AuditLedgerClient
+    from audit_ledger.cache import LRUCache, CacheConfig
+    client = AuditLedgerClient.__new__(AuditLedgerClient)
+    client.contract_id = "CTEST"
+    client.rpc_url = "https://soroban-testnet.stellar.org"
+    client.network_passphrase = "Test SDF Network ; September 2015"
+    client.server = MagicMock()
+    client.source = None
+    client._cache = LRUCache(CacheConfig(max_size=64, ttl_seconds=60.0))
+    return client
 
 
 class TestAuditLedgerClientOffline:
@@ -100,7 +121,6 @@ class TestAuditLedgerClientOffline:
 
     def _make_client(self):
         _stub_stellar_sdk()
-        # Force re-import with sdk available
         if "audit_ledger.client" in sys.modules:
             del sys.modules["audit_ledger.client"]
         from audit_ledger.client import AuditLedgerClient
@@ -114,8 +134,7 @@ class TestAuditLedgerClientOffline:
 
     def test_compute_event_id_is_deterministic(self):
         _stub_stellar_sdk()
-        if "audit_ledger.client" in sys.modules:
-            del sys.modules["audit_ledger.client"]
+        sys.modules.pop("audit_ledger.client", None)
         from audit_ledger.client import AuditLedgerClient
         id1 = AuditLedgerClient.compute_event_id("C1", "G1", "TX", b"data", 1000, 0)
         id2 = AuditLedgerClient.compute_event_id("C1", "G1", "TX", b"data", 1000, 0)
@@ -124,8 +143,7 @@ class TestAuditLedgerClientOffline:
 
     def test_compute_event_id_differs_on_params(self):
         _stub_stellar_sdk()
-        if "audit_ledger.client" in sys.modules:
-            del sys.modules["audit_ledger.client"]
+        sys.modules.pop("audit_ledger.client", None)
         from audit_ledger.client import AuditLedgerClient
         id1 = AuditLedgerClient.compute_event_id("C1", "G1", "TX", b"data", 1000, 0)
         id2 = AuditLedgerClient.compute_event_id("C1", "G1", "TX", b"data2", 1000, 0)
@@ -133,18 +151,15 @@ class TestAuditLedgerClientOffline:
 
     def test_verify_signature_invalid(self):
         _stub_stellar_sdk()
-        if "audit_ledger.client" in sys.modules:
-            del sys.modules["audit_ledger.client"]
+        sys.modules.pop("audit_ledger.client", None)
         from audit_ledger.client import AuditLedgerClient
         result = AuditLedgerClient.verify_signature(b"\x00" * 32, b"\x01" * 32, b"\x02" * 64)
         assert result is False
 
     def test_client_raises_without_stellar_sdk(self):
-        # Temporarily hide stellar_sdk
         saved = sys.modules.pop("stellar_sdk", None)
         saved_soroban = sys.modules.pop("stellar_sdk.soroban", None)
-        if "audit_ledger.client" in sys.modules:
-            del sys.modules["audit_ledger.client"]
+        sys.modules.pop("audit_ledger.client", None)
         try:
             from audit_ledger.client import AuditLedgerClient
             with pytest.raises(ImportError, match="stellar-sdk"):
@@ -163,7 +178,9 @@ class TestAuditLedgerClientOffline:
     def test_invoke_raises_contract_error(self):
         from audit_ledger.models import ContractError
         client = self._make_client()
-        client.server.invoke_contract = MagicMock(side_effect=Exception("Error(Contract, #2)"))
+        client.server.invoke_contract = MagicMock(
+            side_effect=Exception("Error(Contract, #2)")
+        )
         with pytest.raises(ContractError) as exc:
             client._invoke("total_events")
         assert exc.value.code == 2
@@ -171,12 +188,72 @@ class TestAuditLedgerClientOffline:
     def test_invoke_raises_rpc_error_on_unknown(self):
         from audit_ledger.models import RPCError
         client = self._make_client()
-        client.server.invoke_contract = MagicMock(side_effect=Exception("network timeout"))
+        client.server.invoke_contract = MagicMock(
+            side_effect=Exception("network timeout")
+        )
         with pytest.raises(RPCError):
             client._invoke("total_events")
 
 
-# ── Pagination tests (#128) ───────────────────────────────────────────────────
+# ── Streaming tests (#127 / #241) ─────────────────────────────────────────────
+
+class TestStreamEvents:
+    """Tests for AuditLedgerClient.stream_events() generator."""
+
+    def _make_streaming_client(self, event_counts):
+        """event_counts: list of totals returned on successive polls."""
+        _stub_stellar_sdk()
+        sys.modules.pop("audit_ledger.client", None)
+        from audit_ledger.client import AuditLedgerClient
+        from audit_ledger.models import Event
+        from audit_ledger.cache import LRUCache, CacheConfig
+
+        def _make_event(i):
+            return Event(
+                index=i, timestamp=1_700_000_000 + i,
+                event_type="TX", submitter="GABC",
+                metadata=b"", event_hash=None, prev_hash=None,
+            )
+
+        client = AuditLedgerClient.__new__(AuditLedgerClient)
+        client.contract_id = "CTEST"
+        client.server = MagicMock()
+        client.source = None
+        client.total_events = MagicMock(side_effect=event_counts)
+        client.get_event_by_order = MagicMock(side_effect=_make_event)
+        return client
+
+    def test_yields_existing_events_in_order(self):
+        client = self._make_streaming_client([3, 3])
+        gen = client.stream_events(after_index=0, poll_interval_s=0)
+        with patch("audit_ledger.streaming.time.sleep"):
+            events = [next(gen) for _ in range(3)]
+        assert [e.index for e in events] == [0, 1, 2]
+
+    def test_resumes_from_after_index(self):
+        client = self._make_streaming_client([5, 5])
+        gen = client.stream_events(after_index=3, poll_interval_s=0)
+        with patch("audit_ledger.streaming.time.sleep"):
+            events = [next(gen) for _ in range(2)]
+        assert [e.index for e in events] == [3, 4]
+
+    def test_yields_new_events_as_they_appear(self):
+        client = self._make_streaming_client([2, 4, 4])
+        gen = client.stream_events(after_index=0, poll_interval_s=0)
+        with patch("audit_ledger.streaming.time.sleep"):
+            events = [next(gen) for _ in range(4)]
+        assert [e.index for e in events] == [0, 1, 2, 3]
+
+    def test_no_events_sleeps(self):
+        client = self._make_streaming_client([0, 0, 1])
+        gen = client.stream_events(after_index=0, poll_interval_s=1.5)
+        with patch("audit_ledger.streaming.time.sleep") as mock_sleep:
+            next(gen)
+        assert mock_sleep.call_count >= 2
+        mock_sleep.assert_called_with(1.5)
+
+
+# ── Pagination tests (#128 / #241) ────────────────────────────────────────────
 
 class TestGetEvents:
     """Tests for AuditLedgerClient.get_events() pagination."""
@@ -200,7 +277,23 @@ class TestGetEvents:
         client.server = MagicMock()
         client.source = None
         client.total_events = MagicMock(return_value=n)
-        client.get_event_by_order = MagicMock(side_effect=_make_event)
+
+        def _invoke(method, params=None):
+            if method == "get_event_by_order":
+                order = params["order"]
+                event = _make_event(order)
+                return {
+                    "index": event.index,
+                    "timestamp": event.timestamp,
+                    "event_type": event.event_type,
+                    "submitter": event.submitter,
+                    "metadata": event.metadata.hex(),
+                    "event_hash": event.event_hash.hex(),
+                    "prev_hash": event.prev_hash.hex(),
+                }
+            return None
+
+        client._invoke = MagicMock(side_effect=_invoke)
         return client
 
     def test_default_limit(self):

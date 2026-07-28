@@ -16,10 +16,20 @@ target/
 .idea/
 *.swp
 *.swo
+*.suo
+*.user
+*.userosscache
+*.sln.docstates
 
 # OS files
 .DS_Store
+.DS_Store?
+._*
+.Spotlight-V100
+.Trashes
+ehthumbs.db
 Thumbs.db
+desktop.ini
 
 # Python
 __pycache__/
@@ -30,10 +40,6 @@ __pycache__/
 dist/
 .venv/
 venv/
-.mypy_cache/
-.ruff_cache/
-*.pyo
-pip-wheel-metadata/
 .python-version
 *.whl
 build/
@@ -45,6 +51,8 @@ yarn-debug.log*
 yarn-error.log*
 .npm/
 .pnpm-store/
+.yarn/
+pnpm-lock.yaml
 
 # Next.js
 ui/.next/
@@ -55,17 +63,30 @@ ui/out/
 *.d.ts.map
 *.tsbuildinfo
 
+# SDK build outputs
+sdk/js/dist/
+sdk/python/dist/
+sdk/python/build/
+sdk/python/*.egg-info/
+
 # Test artifacts & snapshots
 test_snapshots/
-*.snap
 __snapshots__/
+*.snap
+*.snapshot
 coverage/
-lcov.info
-tarpaulin-report.html
 .coverage
+.coverage.*
 htmlcov/
-junit*.xml
-test-results/
+lcov.info
+lcov-report/
+tarpaulin-report.html
+.vitest-cache/
+vitest.config.*.timestamp*
+
+# Hardhat build outputs
+bridge/cache/
+bridge/artifacts/
 
 # Soroban / Stellar
 .soroban/
@@ -74,29 +95,40 @@ soroban-cli-log*
 # Logs
 *.log
 logs/
+*.log.*
 
 # Secrets / keys (never commit)
 *.pem
 *.key
 *.p12
 *.pfx
+*.cert
+*.crt
+keystore/
 
 # Benchmark / profiling outputs
 docs/fees-benchmark.txt
 *.profdata
 *.profraw
+flamegraph.svg
+perf.data*
 
-# TypeScript declaration map
+# Python virtual envs & local build
+*.whl
+build/
 
 # Editor local history
 .history/
 .idea/workspace.xml
 
-# Jupyter
-.ipynb_checkpoints/
-*.ipynb
+# Hardhat / Foundry
+cache/
+artifacts/
+typechain/
+typechain-types/
 
-# Temporary files
-*.tmp
-*.bak
-*.orig
+# Grafana local state
+monitoring/grafana/data/
+
+# Docker
+*.pid
