@@ -170,7 +170,7 @@ class TestPythonSDKIntegration:
                 "timestamp": 1000 + i,
                 "event_type": "payment",
                 "submitter": f"G{i}",
-                "metadata": "",
+                "metadata": f"{i}".encode().hex(),
                 "event_hash": "00" * 32,
                 "prev_hash": "00" * 32,
             }
@@ -220,8 +220,9 @@ class TestEventModel:
         }
         event = Event.from_dict(raw)
         assert event.metadata == b""
-        assert event.event_hash is None
-        assert event.prev_hash is None
+        # Model returns bytes(32) for missing hashes, not None
+        assert event.event_hash == bytes(32)
+        assert event.prev_hash == bytes(32)
 
     def test_from_dict_empty_metadata(self):
         raw = {

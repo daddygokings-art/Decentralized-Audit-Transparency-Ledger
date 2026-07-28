@@ -17,32 +17,16 @@ New in this release
 from __future__ import annotations
 
 import base64
+import csv
 import hashlib
+import io
+import json
 import struct
 import time
-from typing import Any, Dict, Generator, List, Optional, Sequence
+from collections import OrderedDict
+from typing import Any, Callable, Generator, Optional
 
-from .batch import (
-    BatchProgress,
-    BatchResult,
-    BatchSubmitRequest,
-    batch_get,
-    batch_submit,
-    batch_verify,
-)
-from .cache import CacheConfig, CacheStats, LRUCache
-from .models import (
-    Address,
-    AuditLedgerError,
-    ContractError,
-    Event,
-    EventId,
-    EventType,
-    Metadata,
-    Page,
-    RPCError,
-)
-from .streaming import StreamConfig, StreamError, stream_events, stream_by_type
+from .models import Event, ContractError, RPCError, Page
 
 try:
     import stellar_sdk
@@ -82,74 +66,29 @@ class AuditLedgerClient:
         rpc_url: str = "https://soroban-testnet.stellar.org",
         network_passphrase: str = "Test SDF Network ; September 2015",
         source_keypair: Optional[str] = None,
-        cache_config: Optional[CacheConfig] = None,
-    ) -> None:
+        cache_size: int = 128,
+        enable_cache: bool = True,
+        max_page_size: int = 100,
+    ):
         if not STELLAR_SDK_AVAILABLE:
             raise ImportError(
                 "stellar-sdk is required. Install with: pip install stellar-sdk"
             )
-        self.contract_id: str = contract_id
-        self.rpc_url: str = rpc_url
-        self.network_passphrase: str = network_passphrase
-        self.server: Any = SorobanServer(rpc_url)
-        self.source: Optional[Any] = (
-            Keypair.from_secret(source_keypair) if source_keypair else None
-        )
-        # #246 — LRU cache
-        self._cache: LRUCache[Any] = LRUCache(
-            cache_config or CacheConfig(max_size=256, ttl_seconds=60.0)
-        )
+        self.contract_id = contract_id
+        self.rpc_url = rpc_url
+        self.network_passphrase = network_passphrase
+        self.server = SorobanServer(rpc_url)
+        self.source = Keypair.from_secret(source_keypair) if source_keypair else None
+        self._event_cache: OrderedDict[int, Event] = OrderedDict()
+        self._total_events_cache: Optional[int] = None
+        self._cache_hits = 0
+        self._cache_misses = 0
+        self._cache_enabled = enable_cache
+        self._max_cache_size = max(1, cache_size)
+        self._max_page_size = max(1, max_page_size)
 
-    # ------------------------------------------------------------------
-    # Cache management (#246)
-    # ------------------------------------------------------------------
-
-    def configure_cache(self, config: CacheConfig) -> None:
-        """Replace the cache configuration at runtime.
-
-        Args:
-            config: New :class:`~audit_ledger.cache.CacheConfig`.
-        """
-        self._cache.configure(config)
-
-    def cache_stats(self) -> CacheStats:
-        """Return a snapshot of the current cache statistics.
-
-        Returns:
-            :class:`~audit_ledger.cache.CacheStats` with hit/miss counters.
-        """
-        return self._cache.stats
-
-    def invalidate_cache(self, key: Optional[str] = None) -> None:
-        """Invalidate one cache entry or the entire cache.
-
-        Args:
-            key: When given, remove only this key.  When ``None``, clear
-                the whole cache.
-        """
-        if key is None:
-            self._cache.clear()
-        else:
-            self._cache.invalidate(key)
-
-    # ------------------------------------------------------------------
-    # Internal helpers
-    # ------------------------------------------------------------------
-
-    def _invoke(self, method: str, params: Optional[Dict[str, Any]] = None) -> Any:
-        """Invoke a contract function and return the parsed result.
-
-        Args:
-            method: Contract function name.
-            params: Dictionary of call parameters.
-
-        Returns:
-            Raw result from the RPC layer.
-
-        Raises:
-            :class:`~audit_ledger.models.ContractError`: On contract-level errors.
-            :class:`~audit_ledger.models.RPCError`: On RPC/network errors.
-        """
+    def _invoke(self, method: str, params: dict = None):
+        """Invoke a contract function and return the parsed result."""
         if params is None:
             params = {}
 
@@ -182,12 +121,24 @@ class AuditLedgerClient:
                 return int(v)
         return int(result)
 
-    # ------------------------------------------------------------------
-    # Write functions
-    # ------------------------------------------------------------------
+    def _ensure_runtime_state(self) -> None:
+        """Initialize runtime-only state for clients built without __init__."""
+        if not hasattr(self, "_event_cache"):
+            self._event_cache = OrderedDict()
+        if not hasattr(self, "_total_events_cache"):
+            self._total_events_cache = None
+        if not hasattr(self, "_cache_hits"):
+            self._cache_hits = 0
+        if not hasattr(self, "_cache_misses"):
+            self._cache_misses = 0
+        if not hasattr(self, "_cache_enabled"):
+            self._cache_enabled = True
+        if not hasattr(self, "_max_cache_size"):
+            self._max_cache_size = 128
+        if not hasattr(self, "_max_page_size"):
+            self._max_page_size = 100
 
-    def initialize(self, owner: Address, global_max_logs: int) -> None:
-        """Initialize the contract with an owner and global max log count.
+    # ── Write functions ───────────────────────────────────────────────────
 
         Args:
             owner: Stellar address of the contract owner.
@@ -283,25 +234,16 @@ class AuditLedgerClient:
     # Read functions
     # ------------------------------------------------------------------
 
-    def total_events(self) -> int:
-        """Return the total number of events on-chain.
-
-        Result is cached under the key ``"total_events"`` with the
-        configured TTL.
-
-        Returns:
-            Total event count as an integer.
-        """
-        cached = self._cache.get("total_events")
-        if cached is not None:
-            return int(cached)
+    def total_events(self, use_cache: bool = True) -> int:
+        """Return the total number of events on-chain."""
+        self._ensure_runtime_state()
+        if use_cache and self._cache_enabled and self._total_events_cache is not None:
+            return self._total_events_cache
         result = self._invoke("total_events")
-        value = self._parse_u32(result)
-        self._cache.set("total_events", value)
-        return value
-
-    def get_event(self, event_id: EventId) -> Event:
-        """Retrieve an event by its 32-byte content-addressed ID.
+        total = self._parse_u32(result)
+        if self._cache_enabled:
+            self._total_events_cache = total
+        return total
 
         Args:
             event_id: 32-byte event identifier.
@@ -319,28 +261,23 @@ class AuditLedgerClient:
         return event
 
     def get_event_by_order(self, order: int) -> Event:
-        """Retrieve an event by its sequential order index.
+        """Retrieve an event by its sequential order index."""
+        self._ensure_runtime_state()
+        if self._cache_enabled and order in self._event_cache:
+            self._cache_hits += 1
+            self._event_cache.move_to_end(order)
+            return self._event_cache[order]
 
-        Args:
-            order: Zero-based sequential index.
-
-        Returns:
-            :class:`~audit_ledger.models.Event`.
-        """
-        cache_key = f"event_order:{order}"
-        cached = self._cache.get(cache_key)
-        if cached is not None:
-            return cached  # type: ignore[return-value]
+        self._cache_misses += 1
         result = self._invoke("get_event_by_order", {"order": order})
         event = Event.from_dict(result) if isinstance(result, dict) else result
-        self._cache.set(cache_key, event)
+        if self._cache_enabled:
+            self._event_cache[order] = event
+            self._event_cache.move_to_end(order)
+            self._total_events_cache = max(self._total_events_cache or 0, order + 1)
+            while len(self._event_cache) > self._max_cache_size:
+                self._event_cache.popitem(last=False)
         return event
-
-    def event_count(self, event_type: EventType) -> int:
-        """Return the count of events for a specific type.
-
-        Args:
-            event_type: Symbolic event type to query.
 
         Returns:
             Count as an integer.
@@ -372,27 +309,135 @@ class AuditLedgerClient:
             "event_type": event_type,
             "type_index": type_index,
         })
-        event = Event.from_dict(result) if isinstance(result, dict) else result
-        self._cache.set(cache_key, event)
-        return event
+        return Event.from_dict(result) if isinstance(result, dict) else result
 
-    def get_events(self, offset: int = 0, limit: int = 50) -> Page[Event]:
+    def stream_events(
+        self, after_index: int = 0, poll_interval_s: float = 5.0
+    ) -> Generator[Event, None, None]:
+        """Yield new Event objects as they are logged on-chain.
+
+        Resolves merge conflict from fix/127-stream-events.
+
+        Args:
+            after_index: Resume from this sequential order index (exclusive).
+            poll_interval_s: Seconds to wait between polls when no new events.
+
+        Yields:
+            Event objects in ascending order as they appear.
+        """
+        cursor = max(int(after_index), 0)
+        while True:
+            total = self.total_events()
+            while cursor < total:
+                yield self.get_event_by_order(cursor)
+                cursor += 1
+            if poll_interval_s <= 0:
+                return
+            time.sleep(poll_interval_s)
+
+    def get_events(self, offset: int = 0, limit: int = 50) -> "Page[Event]":
         """Return a paginated slice of all events.
 
         Args:
             offset: Zero-based index of the first event to return.
             limit: Maximum number of events to return.
+            cursor: An optional cursor that is treated as the starting offset.
 
         Returns:
             :class:`~audit_ledger.models.Page` with items, total, offset, and
             limit fields.
         """
+        start = max(int(cursor or offset), 0) if cursor is not None else max(int(offset), 0)
+        self._ensure_runtime_state()
+        safe_limit = max(1, min(int(limit), self._max_page_size))
         total = self.total_events()
-        items: List[Event] = []
-        end = min(offset + limit, total)
-        for i in range(offset, end):
+        end = min(start + safe_limit, total)
+        items: list[Event] = []
+        for i in range(start, end):
             items.append(self.get_event_by_order(i))
         return Page(items=items, total=total, offset=offset, limit=limit)
+
+    # ── Health check (#239) ───────────────────────────────────────────────
+
+    def health_check(self) -> dict:
+        """Run a full health check and return a summary dict.
+
+        Returns a dict with keys:
+            - ``ok``: bool — True if all checks passed.
+            - ``rpc_reachable``: bool — RPC endpoint responded.
+            - ``contract_reachable``: bool — contract responded to a read call.
+            - ``rpc_url``: str — the configured RPC URL.
+            - ``contract_id``: str — the configured contract ID.
+            - ``error``: str or None — error message if any check failed.
+
+        Example::
+
+            >>> status = client.health_check()
+            >>> status["ok"]
+            True
+        """
+        status = {
+            "ok": False,
+            "rpc_reachable": False,
+            "contract_reachable": False,
+            "rpc_url": self.rpc_url,
+            "contract_id": self.contract_id,
+            "error": None,
+        }
+        try:
+            if not self.check_connectivity():
+                status["error"] = "RPC endpoint is not reachable"
+                return status
+            status["rpc_reachable"] = True
+
+            self.total_events()
+            status["contract_reachable"] = True
+            status["ok"] = True
+        except Exception as exc:
+            status["error"] = str(exc)
+        return status
+
+    def check_connectivity(self) -> bool:
+        """Return True if the RPC endpoint is reachable.
+
+        Attempts a lightweight server info call. Returns False on any error.
+        """
+        try:
+            self.validate_rpc_endpoint(self.rpc_url)
+            return True
+        except Exception:
+            return False
+
+    @staticmethod
+    def validate_rpc_endpoint(url: str) -> None:
+        """Validate that *url* looks like a well-formed HTTPS/HTTP URL.
+
+        Raises:
+            ValueError: If the URL scheme is missing or unsupported.
+
+        This is a lightweight offline check. Use :meth:`check_connectivity`
+        for a live network probe.
+        """
+        if not url:
+            raise ValueError("RPC URL must not be empty")
+        lower = url.lower()
+        if not (lower.startswith("https://") or lower.startswith("http://")):
+            raise ValueError(
+                f"RPC URL must start with 'https://' or 'http://': {url!r}"
+            )
+
+    def health_status(self) -> str:
+        """Return a human-readable health status string.
+
+        Returns ``"healthy"`` if all checks pass, ``"degraded"`` if the RPC
+        is reachable but the contract is not, or ``"unhealthy"`` otherwise.
+        """
+        result = self.health_check()
+        if result["ok"]:
+            return "healthy"
+        if result["rpc_reachable"]:
+            return "degraded"
+        return "unhealthy"
 
     # ------------------------------------------------------------------
     # Streaming (#244)
@@ -703,18 +748,7 @@ class AuditLedgerClient:
     ) -> EventId:
         """Recompute the content-addressed event ID off-chain.
 
-        Matches ``compute_event_id`` in the Soroban contract.
-
-        Args:
-            contract_id: Stellar contract identifier string.
-            submitter: Stellar address of the submitter.
-            event_type: Symbolic event type string.
-            metadata: Raw binary metadata.
-            timestamp: Unix timestamp of the event.
-            index: Global sequential index of the event.
-
-        Returns:
-            32-byte SHA-256 event ID.
+        Matches ``compute_event_id`` in the contract (issue #70).
         """
         preimage = (
             contract_id.encode()
@@ -743,9 +777,9 @@ class AuditLedgerClient:
             ``True`` if the signature is valid for the given event ID.
         """
         try:
-            from stellar_sdk.keypair import Keypair as _Keypair
+            from stellar_sdk.keypair import Keypair
 
-            verified = _Keypair.from_public_key(pubkey.hex()).verify(
+            verified = Keypair.from_public_key(pubkey.hex()).verify(
                 event_id, signature
             )
             return verified

@@ -1,0 +1,593 @@
+{
+  "__inputs": [],
+  "__requires": [
+    { "type": "grafana", "id": "grafana", "name": "Grafana", "version": "9.0.0" },
+    { "type": "datasource", "id": "prometheus", "name": "Prometheus", "version": "1.0.0" }
+  ],
+  "annotations": { "list": [] },
+  "description": "Bridge operations monitoring — status, event processing, error rates, and latency (#254)",
+  "editable": true,
+  "fiscalYearStartMonth": 0,
+  "graphTooltip": 1,
+  "id": null,
+  "links": [],
+  "liveNow": false,
+  "panels": [
+
+    {
+      "id": 1,
+      "type": "row",
+      "title": "Bridge Status",
+      "gridPos": { "h": 1, "w": 24, "x": 0, "y": 0 },
+      "collapsed": false
+    },
+
+    {
+      "id": 2,
+      "type": "stat",
+      "title": "Relayer Health",
+      "description": "Overall bridge relayer health (ok / degraded). Sourced from /healthz.",
+      "datasource": { "type": "prometheus", "uid": "${DS_PROMETHEUS}" },
+      "gridPos": { "h": 4, "w": 4, "x": 0, "y": 1 },
+      "targets": [
+        {
+          "expr": "bridge_relayer_status",
+          "legendFormat": "",
+          "refId": "A"
+        }
+      ],
+      "options": {
+        "reduceOptions": { "calcs": ["lastNotNull"] },
+        "colorMode": "background",
+        "graphMode": "none",
+        "mappings": [
+          {
+            "type": "value",
+            "options": {
+              "0": { "text": "ok",       "color": "green" },
+              "1": { "text": "degraded", "color": "orange" },
+              "2": { "text": "down",     "color": "red" }
+            }
+          }
+        ]
+      }
+    },
+
+    {
+      "id": 3,
+      "type": "stat",
+      "title": "Last Processed Event Index",
+      "description": "Most recent Stellar event index relayed to EVM.",
+      "datasource": { "type": "prometheus", "uid": "${DS_PROMETHEUS}" },
+      "gridPos": { "h": 4, "w": 4, "x": 4, "y": 1 },
+      "targets": [
+        {
+          "expr": "bridge_relayer_last_processed_index",
+          "legendFormat": "",
+          "refId": "A"
+        }
+      ],
+      "options": {
+        "reduceOptions": { "calcs": ["lastNotNull"] },
+        "colorMode": "value"
+      }
+    },
+
+    {
+      "id": 4,
+      "type": "stat",
+      "title": "Relayer Uptime (s)",
+      "description": "Seconds since the relayer process started.",
+      "datasource": { "type": "prometheus", "uid": "${DS_PROMETHEUS}" },
+      "gridPos": { "h": 4, "w": 4, "x": 8, "y": 1 },
+      "targets": [
+        {
+          "expr": "bridge_relayer_uptime_seconds",
+          "legendFormat": "",
+          "refId": "A"
+        }
+      ],
+      "options": {
+        "reduceOptions": { "calcs": ["lastNotNull"] },
+        "colorMode": "value"
+      },
+      "fieldConfig": {
+        "defaults": { "unit": "s" }
+      }
+    },
+
+    {
+      "id": 5,
+      "type": "stat",
+      "title": "Polls Without Events",
+      "description": "Consecutive Stellar poll cycles with no new events. ≥5 = degraded.",
+      "datasource": { "type": "prometheus", "uid": "${DS_PROMETHEUS}" },
+      "gridPos": { "h": 4, "w": 4, "x": 12, "y": 1 },
+      "targets": [
+        {
+          "expr": "bridge_relayer_polls_without_events",
+          "legendFormat": "",
+          "refId": "A"
+        }
+      ],
+      "options": {
+        "reduceOptions": { "calcs": ["lastNotNull"] },
+        "colorMode": "background"
+      },
+      "fieldConfig": {
+        "defaults": {
+          "thresholds": {
+            "mode": "absolute",
+            "steps": [
+              { "color": "green",  "value": null },
+              { "color": "orange", "value": 3 },
+              { "color": "red",    "value": 5 }
+            ]
+          }
+        }
+      }
+    },
+
+    {
+      "id": 6,
+      "type": "stat",
+      "title": "Proof Cache Size",
+      "description": "Current number of entries in the LRU proof cache.",
+      "datasource": { "type": "prometheus", "uid": "${DS_PROMETHEUS}" },
+      "gridPos": { "h": 4, "w": 4, "x": 16, "y": 1 },
+      "targets": [
+        {
+          "expr": "bridge_proof_cache_size",
+          "legendFormat": "",
+          "refId": "A"
+        }
+      ],
+      "options": {
+        "reduceOptions": { "calcs": ["lastNotNull"] },
+        "colorMode": "value"
+      }
+    },
+
+    {
+      "id": 7,
+      "type": "stat",
+      "title": "Dedup Set Size",
+      "description": "Number of event hashes tracked for deduplication.",
+      "datasource": { "type": "prometheus", "uid": "${DS_PROMETHEUS}" },
+      "gridPos": { "h": 4, "w": 4, "x": 20, "y": 1 },
+      "targets": [
+        {
+          "expr": "bridge_dedup_set_size",
+          "legendFormat": "",
+          "refId": "A"
+        }
+      ],
+      "options": {
+        "reduceOptions": { "calcs": ["lastNotNull"] },
+        "colorMode": "value"
+      }
+    },
+
+    {
+      "id": 10,
+      "type": "row",
+      "title": "Event Processing",
+      "gridPos": { "h": 1, "w": 24, "x": 0, "y": 5 },
+      "collapsed": false
+    },
+
+    {
+      "id": 11,
+      "type": "timeseries",
+      "title": "Events Processed / min",
+      "description": "Rate of Stellar events successfully relayed to EVM per minute.",
+      "datasource": { "type": "prometheus", "uid": "${DS_PROMETHEUS}" },
+      "gridPos": { "h": 8, "w": 12, "x": 0, "y": 6 },
+      "targets": [
+        {
+          "expr": "rate(bridge_events_processed_total[1m]) * 60",
+          "legendFormat": "processed/min",
+          "refId": "A"
+        },
+        {
+          "expr": "rate(bridge_events_submitted_total[1m]) * 60",
+          "legendFormat": "submitted/min",
+          "refId": "B"
+        },
+        {
+          "expr": "rate(bridge_events_skipped_total[1m]) * 60",
+          "legendFormat": "skipped (dedup)/min",
+          "refId": "C"
+        }
+      ],
+      "fieldConfig": {
+        "defaults": {
+          "unit": "short",
+          "color": { "mode": "palette-classic" }
+        }
+      },
+      "options": { "tooltip": { "mode": "multi" } }
+    },
+
+    {
+      "id": 12,
+      "type": "timeseries",
+      "title": "EVM Submission Outcomes",
+      "description": "EVM proof submission results over time.",
+      "datasource": { "type": "prometheus", "uid": "${DS_PROMETHEUS}" },
+      "gridPos": { "h": 8, "w": 12, "x": 12, "y": 6 },
+      "targets": [
+        {
+          "expr": "rate(bridge_evm_submissions_total{result=\"success\"}[5m])",
+          "legendFormat": "success",
+          "refId": "A"
+        },
+        {
+          "expr": "rate(bridge_evm_submissions_total{result=\"failure\"}[5m])",
+          "legendFormat": "failure",
+          "refId": "B"
+        },
+        {
+          "expr": "rate(bridge_evm_submissions_total{result=\"retry\"}[5m])",
+          "legendFormat": "retry",
+          "refId": "C"
+        }
+      ],
+      "fieldConfig": {
+        "defaults": { "color": { "mode": "palette-classic" } }
+      }
+    },
+
+    {
+      "id": 20,
+      "type": "row",
+      "title": "Error Rate Tracking",
+      "gridPos": { "h": 1, "w": 24, "x": 0, "y": 14 },
+      "collapsed": false
+    },
+
+    {
+      "id": 21,
+      "type": "timeseries",
+      "title": "Bridge Error Rate by Category",
+      "description": "Error rate per category: stellar_rpc, evm_submission, proof_build, transform.",
+      "datasource": { "type": "prometheus", "uid": "${DS_PROMETHEUS}" },
+      "gridPos": { "h": 8, "w": 12, "x": 0, "y": 15 },
+      "targets": [
+        {
+          "expr": "sum by (category) (rate(bridge_errors_total[5m]))",
+          "legendFormat": "{{category}}",
+          "refId": "A"
+        }
+      ],
+      "fieldConfig": {
+        "defaults": {
+          "color": { "mode": "fixed", "fixedColor": "red" },
+          "unit": "reqps"
+        },
+        "overrides": [
+          { "matcher": { "id": "byName", "options": "stellar_rpc" },   "properties": [{ "id": "color", "value": { "fixedColor": "orange", "mode": "fixed" } }] },
+          { "matcher": { "id": "byName", "options": "evm_submission" }, "properties": [{ "id": "color", "value": { "fixedColor": "red",    "mode": "fixed" } }] },
+          { "matcher": { "id": "byName", "options": "transform" },      "properties": [{ "id": "color", "value": { "fixedColor": "yellow", "mode": "fixed" } }] }
+        ]
+      },
+      "options": { "tooltip": { "mode": "multi" } }
+    },
+
+    {
+      "id": 22,
+      "type": "gauge",
+      "title": "EVM Submission Error Rate (%)",
+      "description": "Percentage of EVM submissions that failed in the last 5 minutes.",
+      "datasource": { "type": "prometheus", "uid": "${DS_PROMETHEUS}" },
+      "gridPos": { "h": 8, "w": 6, "x": 12, "y": 15 },
+      "targets": [
+        {
+          "expr": "100 * rate(bridge_evm_submissions_total{result=\"failure\"}[5m]) / clamp_min(rate(bridge_evm_submissions_total[5m]), 0.0001)",
+          "legendFormat": "error %",
+          "refId": "A"
+        }
+      ],
+      "options": {
+        "reduceOptions": { "calcs": ["lastNotNull"] },
+        "showThresholdLabels": true,
+        "showThresholdMarkers": true
+      },
+      "fieldConfig": {
+        "defaults": {
+          "unit": "percent",
+          "min": 0,
+          "max": 100,
+          "thresholds": {
+            "mode": "absolute",
+            "steps": [
+              { "color": "green",  "value": null },
+              { "color": "yellow", "value": 5 },
+              { "color": "red",    "value": 20 }
+            ]
+          }
+        }
+      }
+    },
+
+    {
+      "id": 23,
+      "type": "table",
+      "title": "Recent Bridge Errors",
+      "description": "Latest error events from the bridge relayer.",
+      "datasource": { "type": "prometheus", "uid": "${DS_PROMETHEUS}" },
+      "gridPos": { "h": 8, "w": 6, "x": 18, "y": 15 },
+      "targets": [
+        {
+          "expr": "bridge_last_error_timestamp",
+          "legendFormat": "{{category}} | {{message}}",
+          "refId": "A",
+          "instant": true
+        }
+      ],
+      "transformations": [
+        { "id": "labelsToFields", "options": {} },
+        {
+          "id": "organize",
+          "options": {
+            "renameByName": {
+              "category": "Category",
+              "message":  "Message",
+              "Value":    "Time"
+            }
+          }
+        }
+      ]
+    },
+
+    {
+      "id": 30,
+      "type": "row",
+      "title": "Latency Monitoring",
+      "gridPos": { "h": 1, "w": 24, "x": 0, "y": 23 },
+      "collapsed": false
+    },
+
+    {
+      "id": 31,
+      "type": "timeseries",
+      "title": "Stellar Poll Latency (ms)",
+      "description": "P50 / P95 / P99 latency for each Stellar RPC getEvents call.",
+      "datasource": { "type": "prometheus", "uid": "${DS_PROMETHEUS}" },
+      "gridPos": { "h": 8, "w": 8, "x": 0, "y": 24 },
+      "targets": [
+        {
+          "expr": "histogram_quantile(0.50, rate(bridge_stellar_poll_duration_ms_bucket[5m]))",
+          "legendFormat": "p50",
+          "refId": "A"
+        },
+        {
+          "expr": "histogram_quantile(0.95, rate(bridge_stellar_poll_duration_ms_bucket[5m]))",
+          "legendFormat": "p95",
+          "refId": "B"
+        },
+        {
+          "expr": "histogram_quantile(0.99, rate(bridge_stellar_poll_duration_ms_bucket[5m]))",
+          "legendFormat": "p99",
+          "refId": "C"
+        }
+      ],
+      "fieldConfig": {
+        "defaults": {
+          "unit": "ms",
+          "color": { "mode": "palette-classic" }
+        }
+      }
+    },
+
+    {
+      "id": 32,
+      "type": "timeseries",
+      "title": "EVM Submission Latency (ms)",
+      "description": "P50 / P95 / P99 latency for each eth_call / sendRawTransaction to the EVM verifier.",
+      "datasource": { "type": "prometheus", "uid": "${DS_PROMETHEUS}" },
+      "gridPos": { "h": 8, "w": 8, "x": 8, "y": 24 },
+      "targets": [
+        {
+          "expr": "histogram_quantile(0.50, rate(bridge_evm_submission_duration_ms_bucket[5m]))",
+          "legendFormat": "p50",
+          "refId": "A"
+        },
+        {
+          "expr": "histogram_quantile(0.95, rate(bridge_evm_submission_duration_ms_bucket[5m]))",
+          "legendFormat": "p95",
+          "refId": "B"
+        },
+        {
+          "expr": "histogram_quantile(0.99, rate(bridge_evm_submission_duration_ms_bucket[5m]))",
+          "legendFormat": "p99",
+          "refId": "C"
+        }
+      ],
+      "fieldConfig": {
+        "defaults": {
+          "unit": "ms",
+          "color": { "mode": "palette-classic" }
+        }
+      }
+    },
+
+    {
+      "id": 33,
+      "type": "timeseries",
+      "title": "End-to-End Bridge Latency (ms)",
+      "description": "Time from event observed on Stellar to verified on EVM (P50 / P95 / P99).",
+      "datasource": { "type": "prometheus", "uid": "${DS_PROMETHEUS}" },
+      "gridPos": { "h": 8, "w": 8, "x": 16, "y": 24 },
+      "targets": [
+        {
+          "expr": "histogram_quantile(0.50, rate(bridge_e2e_latency_ms_bucket[5m]))",
+          "legendFormat": "e2e p50",
+          "refId": "A"
+        },
+        {
+          "expr": "histogram_quantile(0.95, rate(bridge_e2e_latency_ms_bucket[5m]))",
+          "legendFormat": "e2e p95",
+          "refId": "B"
+        },
+        {
+          "expr": "histogram_quantile(0.99, rate(bridge_e2e_latency_ms_bucket[5m]))",
+          "legendFormat": "e2e p99",
+          "refId": "C"
+        }
+      ],
+      "fieldConfig": {
+        "defaults": {
+          "unit": "ms",
+          "color": { "mode": "palette-classic" }
+        }
+      }
+    },
+
+    {
+      "id": 40,
+      "type": "row",
+      "title": "Replay Queue",
+      "gridPos": { "h": 1, "w": 24, "x": 0, "y": 32 },
+      "collapsed": false
+    },
+
+    {
+      "id": 41,
+      "type": "stat",
+      "title": "Replay Queue Depth",
+      "description": "Events currently waiting for replay.",
+      "datasource": { "type": "prometheus", "uid": "${DS_PROMETHEUS}" },
+      "gridPos": { "h": 4, "w": 4, "x": 0, "y": 33 },
+      "targets": [
+        {
+          "expr": "bridge_replay_queue_depth",
+          "legendFormat": "",
+          "refId": "A"
+        }
+      ],
+      "options": {
+        "reduceOptions": { "calcs": ["lastNotNull"] },
+        "colorMode": "background"
+      },
+      "fieldConfig": {
+        "defaults": {
+          "thresholds": {
+            "mode": "absolute",
+            "steps": [
+              { "color": "green",  "value": null },
+              { "color": "yellow", "value": 10 },
+              { "color": "red",    "value": 100 }
+            ]
+          }
+        }
+      }
+    },
+
+    {
+      "id": 42,
+      "type": "stat",
+      "title": "Replay Succeeded (total)",
+      "datasource": { "type": "prometheus", "uid": "${DS_PROMETHEUS}" },
+      "gridPos": { "h": 4, "w": 4, "x": 4, "y": 33 },
+      "targets": [
+        {
+          "expr": "bridge_replay_total_succeeded",
+          "legendFormat": "",
+          "refId": "A"
+        }
+      ],
+      "options": {
+        "reduceOptions": { "calcs": ["lastNotNull"] },
+        "colorMode": "background"
+      },
+      "fieldConfig": {
+        "defaults": {
+          "thresholds": {
+            "mode": "absolute",
+            "steps": [{ "color": "green", "value": null }]
+          }
+        }
+      }
+    },
+
+    {
+      "id": 43,
+      "type": "stat",
+      "title": "Replay Permanently Failed",
+      "datasource": { "type": "prometheus", "uid": "${DS_PROMETHEUS}" },
+      "gridPos": { "h": 4, "w": 4, "x": 8, "y": 33 },
+      "targets": [
+        {
+          "expr": "bridge_replay_total_failed",
+          "legendFormat": "",
+          "refId": "A"
+        }
+      ],
+      "options": {
+        "reduceOptions": { "calcs": ["lastNotNull"] },
+        "colorMode": "background"
+      },
+      "fieldConfig": {
+        "defaults": {
+          "thresholds": {
+            "mode": "absolute",
+            "steps": [
+              { "color": "green",  "value": null },
+              { "color": "yellow", "value": 1 },
+              { "color": "red",    "value": 10 }
+            ]
+          }
+        }
+      }
+    },
+
+    {
+      "id": 44,
+      "type": "timeseries",
+      "title": "Replay Queue Depth Over Time",
+      "datasource": { "type": "prometheus", "uid": "${DS_PROMETHEUS}" },
+      "gridPos": { "h": 8, "w": 12, "x": 12, "y": 33 },
+      "targets": [
+        {
+          "expr": "bridge_replay_queue_depth",
+          "legendFormat": "queue depth",
+          "refId": "A"
+        },
+        {
+          "expr": "rate(bridge_replay_total_succeeded[5m])",
+          "legendFormat": "success rate",
+          "refId": "B"
+        }
+      ],
+      "fieldConfig": {
+        "defaults": { "color": { "mode": "palette-classic" } }
+      }
+    }
+
+  ],
+  "refresh": "30s",
+  "schemaVersion": 37,
+  "style": "dark",
+  "tags": ["bridge", "stellar", "evm", "relay", "audit"],
+  "templating": {
+    "list": [
+      {
+        "current": {},
+        "hide": 0,
+        "includeAll": false,
+        "name": "DS_PROMETHEUS",
+        "options": [],
+        "query": "prometheus",
+        "refresh": 1,
+        "type": "datasource"
+      }
+    ]
+  },
+  "time": { "from": "now-6h", "to": "now" },
+  "timepicker": {},
+  "timezone": "browser",
+  "title": "Bridge Monitoring Dashboard",
+  "uid": "bridge-monitoring-main",
+  "version": 1
+}

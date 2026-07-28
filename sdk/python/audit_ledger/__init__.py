@@ -33,47 +33,33 @@ from .batch import (
 )
 from .cache import CacheConfig, CacheStats, LRUCache
 from .client import AuditLedgerClient
-from .models import (
-    Address,
-    AuditLedgerError,
-    ContractError,
-    Event,
-    EventId,
-    EventType,
-    Metadata,
-    Page,
-    RPCError,
+from .models import Event, ContractError, RPCError, AuditLedgerError, Page
+from .async_client import AsyncAuditLedgerClient
+from .validation import (
+    SchemaRegistry,
+    SchemaValidationError,
+    SchemaNotFoundError,
+    get_default_registry,
+    validate_event,
+    BASE_EVENT_SCHEMA,
 )
-from .streaming import StreamConfig, StreamError, stream_by_type, stream_events
 
 __all__ = [
-    # Client
+    # Sync client
     "AuditLedgerClient",
+    # Async client (#242)
+    "AsyncAuditLedgerClient",
     # Models
     "Event",
     "Page",
     "ContractError",
     "RPCError",
     "AuditLedgerError",
-    # Type aliases
-    "Address",
-    "EventId",
-    "EventType",
-    "Metadata",
-    # Cache (#246)
-    "CacheConfig",
-    "CacheStats",
-    "LRUCache",
-    # Streaming (#244)
-    "StreamConfig",
-    "StreamError",
-    "stream_events",
-    "stream_by_type",
-    # Batch (#245)
-    "BatchSubmitRequest",
-    "BatchResult",
-    "BatchProgress",
-    "batch_submit",
-    "batch_get",
-    "batch_verify",
+    # Validation (#240)
+    "SchemaRegistry",
+    "SchemaValidationError",
+    "SchemaNotFoundError",
+    "get_default_registry",
+    "validate_event",
+    "BASE_EVENT_SCHEMA",
 ]
