@@ -6,6 +6,7 @@ import yaml from "js-yaml";
 
 import { resolvers } from "../graphql/src/resolvers";
 import { exportCsv, exportJson, createStreamingExporter, ExportOptions } from "./export";
+import { validateKey, type Role } from "./keys";
 
 const app = express();
 const port = process.env.PORT || 3002;
@@ -13,6 +14,13 @@ const port = process.env.PORT || 3002;
 app.use(cors());
 app.use(express.json());
 app.use(rateLimiter);
+
+function resolveContext(req: express.Request): { apiKey?: string; role?: Role } {
+  const apiKey = (req.headers["x-api-key"] ?? req.headers["authorization"]?.replace("Bearer ", "")) as string | undefined;
+  if (!apiKey) return {};
+  const record = validateKey(apiKey);
+  return record ? { apiKey, role: record.role } : {};
+}
 
 // ── Health Check Endpoints (#268) ─────────────────────────────────────────────
 
@@ -129,7 +137,8 @@ v1.get("/events/:index", (req, res) => {
     return res.status(400).json({ error: "index must be a non-negative integer" });
   }
 
-  const result = resolvers.Query.event(null, { index }, null);
+  const ctx = resolveContext(req);
+  const result = resolvers.Query.event(null, { index }, ctx);
 
     if (!result) {
       return res.status(404).json({
@@ -157,8 +166,9 @@ v1.get("/events/type/:type", (req, res) => {
     offset = decoded.index;
   }
 
+  const ctx = resolveContext(req);
   const allByType = Array.from({ length: 1000 }, (_, i) => i)
-    .map((typeIndex) => resolvers.Query.eventByType(null, { type, typeIndex }, null))
+    .map((typeIndex) => resolvers.Query.eventByType(null, { type, typeIndex }, ctx))
     .filter(Boolean);
 
   const total = allByType.length;
@@ -172,8 +182,9 @@ v1.get("/events/type/:type", (req, res) => {
 });
 
 // GET /stats - Get statistics
-v1.get("/stats", (_req, res) => {
-  const result = resolvers.Query.statistics(null, {}, null);
+v1.get("/stats", (req, res) => {
+  const ctx = resolveContext(req);
+  const result = resolvers.Query.statistics(null, {}, ctx);
   res.json({ data: result });
 });
 

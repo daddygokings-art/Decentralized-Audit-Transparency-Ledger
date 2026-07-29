@@ -8,6 +8,8 @@ import { makeExecutableSchema } from "@graphql-tools/schema";
 import { GraphQLError } from "graphql";
 import { typeDefs } from "./schema";
 import { resolvers } from "./resolvers";
+import { validateKey } from "../../rest/src/keys";
+import type { Role } from "../../rest/src/keys";
 
 const PORT = parseInt(process.env.PORT ?? "4000", 10);
 const API_KEY = process.env.API_KEY ?? "dev-key";
@@ -57,9 +59,17 @@ async function main() {
   app.use(
     "/graphql",
     expressMiddleware(apollo, {
-      context: async ({ req }) => ({
-        apiKey: req.headers["x-api-key"] ?? req.headers["authorization"]?.replace("Bearer ", ""),
-      }),
+      context: async ({ req }) => {
+        const apiKey = (req.headers["x-api-key"] ?? req.headers["authorization"]?.replace("Bearer ", "")) as string | undefined;
+        let role: Role | undefined;
+        if (apiKey) {
+          const record = validateKey(apiKey);
+          if (record) {
+            role = record.role;
+          }
+        }
+        return { apiKey, role };
+      },
     })
   );
 
