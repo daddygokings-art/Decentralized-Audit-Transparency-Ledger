@@ -1,4 +1,5 @@
 import { PubSub, withFilter } from "graphql-subscriptions";
+import { requireRole, Role } from "./auth";
 
 export const pubsub = new PubSub();
 export const EVENT_LOGGED = "EVENT_LOGGED";
@@ -59,15 +60,19 @@ export const resolvers = {
     events: (_: any, { limit = 50, offset = 0, filter }: any) =>
       events.filter((e) => matchesFilter(e, filter)).slice(offset, offset + limit),
 
-    event: (_: any, { index }: any) =>
-      events.find((e) => e.index === index) ?? null,
+    event: (_: any, { index }: any, ctx: any) => {
+      requireRole(ctx, Role.Viewer);
+      return events.find((e) => e.index === index) ?? null;
+    },
 
-    eventByType: (_: any, { type, typeIndex }: any) => {
+    eventByType: (_: any, { type, typeIndex }: any, ctx: any) => {
+      requireRole(ctx, Role.Viewer);
       const typed = events.filter((e) => e.event_type === type);
       return typed[typeIndex] ?? null;
     },
 
-    statistics: () => {
+    statistics: (_: any, __: any, ctx: any) => {
+      requireRole(ctx, Role.Auditor);
       const byType: Record<string, number> = {};
       for (const e of events) {
         byType[e.event_type] = (byType[e.event_type] ?? 0) + 1;
