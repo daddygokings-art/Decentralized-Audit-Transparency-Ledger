@@ -1,5 +1,6 @@
 import { describe, expect, it, jest, beforeEach } from "@jest/globals";
-import { Notifier, matches, AuditEvent, Rule } from "./notifier";
+import { Notifier, matches, render, validateTemplate, getAvailableTemplateVariables, DEFAULT_TEMPLATES, AuditEvent, Rule } from "./notifier";
+import { TemplateEngine, buildTemplateContext } from "./template-engine";
 
 const baseEvent: AuditEvent = {
   index: 1,
@@ -205,5 +206,276 @@ describe("Notifier — rate limit enforcement", () => {
     expect(sent).toBe(3);
 
     emitSpy.mockRestore();
+  });
+});
+
+describe("render() — template engine", () => {
+  const event: AuditEvent = {
+    index: 42,
+    timestamp: 1_700_000_000,
+    event_type: "payment",
+    submitter: "GABCDEF123",
+    metadata: '{"amount":100,"currency":"USD","items":["a","b"]}',
+  };
+
+  it("renders simple {{variable}} placeholders", () => {
+    const result = render("Event: {{event_type}} #{{index}}", event);
+    expect(result).toBe("Event: payment #42");
+  });
+
+  it("renders with chain info context", () => {
+    const chain = { id: "stellar", network: "testnet", name: "Stellar" };
+    const result = render("Chain: {{chain.name}} ({{chain.network}})", event, chain);
+    expect(result).toBe("Chain: Stellar (testnet)");
+  });
+
+  it("renders with links context", () => {
+    const links = { explorerUrl: "https://stellar.expert/explorer/testnet" };
+    const result = render("Explorer: {{links.explorer_url}}", event, undefined, links);
+    expect(result).toBe("Explorer: https://stellar.expert/explorer/testnet");
+  });
+
+  it("renders formatted timestamps", () => {
+    const result = render("Date: {{formatted.date}}", event);
+    expect(result).toContain("Nov");
+    expect(result).toContain("2023");
+  });
+
+  it("renders blank for unknown variables", () => {
+    const result = render("{{unknown_var}}", event);
+    expect(result).toBe("");
+  });
+
+  it("handles empty template", () => {
+    expect(render("", event)).toBe("");
+  });
+
+  it("handles template with no placeholders", () => {
+    expect(render("plain text", event)).toBe("plain text");
+  });
+});
+
+describe("TemplateEngine — helpers", () => {
+  const event: AuditEvent = {
+    index: 1,
+    timestamp: 1_700_000_000,
+    event_type: "payment",
+    submitter: "gabc123",
+    metadata: '{"role":"admin"}',
+  };
+
+  it("uppercase helper", () => {
+    const result = render("{{uppercase submitter}}", event);
+    expect(result).toBe("GABC123");
+  });
+
+  it("lowercase helper", () => {
+    const result = render("{{lowercase event_type}}", event);
+    expect(result).toBe("payment");
+  });
+
+  it("capitalize helper", () => {
+    const result = render("{{capitalize event_type}}", event);
+    expect(result).toBe("Payment");
+  });
+
+  it("date helper formats with timestamp argument", () => {
+    const result = render("{{date timestamp}}", event);
+    expect(result).toContain("Nov");
+  });
+
+  it("datetime helper formats with timestamp argument", () => {
+    const result = render("{{datetime timestamp}}", event);
+    expect(result).toContain("2023");
+  });
+
+  it("truncate helper truncates long strings", () => {
+    const longEvent = { ...event, metadata: "a".repeat(100) };
+    const result = render("{{truncate metadata 10}}", longEvent);
+    expect(result).toBe("aaaaaaaaaa...");
+  });
+
+  it("truncate uses default length of 50", () => {
+    const longEvent = { ...event, metadata: "a".repeat(100) };
+    const result = render("{{truncate metadata}}", longEvent);
+    expect(result.length).toBe(53);
+    expect(result.endsWith("...")).toBe(true);
+  });
+
+  it("json helper pretty-prints JSON strings", () => {
+    const result = render("{{json metadata}}", event);
+    expect(result).toContain('"role"');
+    expect(result).toContain('"admin"');
+  });
+
+  it("default helper provides fallback when variable is falsy", () => {
+    const tpl = "{{#if unknown_var}}{{default unknown_var 'fallback'}}{{else}}fallback{{/if}}";
+    const result = render(tpl, event);
+    expect(result).toBe("fallback");
+  });
+
+  it("default helper passes through truthy value", () => {
+    const result = render("{{default event_type 'fallback'}}", event);
+    expect(result).toBe("payment");
+  });
+
+  it("pipe syntax: {{variable | helper}}", () => {
+    const result = render("{{submitter | uppercase}}", event);
+    expect(result).toBe("GABC123");
+  });
+});
+
+describe("TemplateEngine — conditionals", () => {
+  const event: AuditEvent = {
+    index: 1,
+    timestamp: 1_700_000_000,
+    event_type: "payment",
+    submitter: "GABCDEF123",
+    metadata: "high_value",
+  };
+
+  it("{{#if variable}} renders body when truthy", () => {
+    const tpl = "{{#if event_type}}has type{{/if}}";
+    expect(render(tpl, event)).toBe("has type");
+  });
+
+  it("{{#if variable}} skips body when falsy", () => {
+    const tpl = "{{#if unknown_var}}shown{{/if}}";
+    expect(render(tpl, event)).toBe("");
+  });
+
+  it("{{#unless variable}} renders body when falsy", () => {
+    const tpl = "{{#unless unknown_var}}shown{{/unless}}";
+    expect(render(tpl, event)).toBe("shown");
+  });
+
+  it("{{#unless variable}} skips body when truthy", () => {
+    const tpl = "{{#unless event_type}}hidden{{/unless}}";
+    expect(render(tpl, event)).toBe("");
+  });
+
+  it("{{#if}}...{{else}}...{{/if}} works", () => {
+    const tpl = "{{#if event_type}}yes{{else}}no{{/if}}";
+    expect(render(tpl, event)).toBe("yes");
+  });
+
+  it("{{#if}}...{{else}}...{{/if}} renders else branch when falsy", () => {
+    const tpl = "{{#if unknown_var}}yes{{else}}no{{/if}}";
+    expect(render(tpl, event)).toBe("no");
+  });
+});
+
+describe("TemplateEngine — each loops", () => {
+  const event: AuditEvent = {
+    index: 1,
+    timestamp: 1_700_000_000,
+    event_type: "payment",
+    submitter: "GABCDEF123",
+    metadata: '{"tags":["urgent","high","audit"],"count":3}',
+  };
+
+  it("iterates over arrays", () => {
+    const tpl = "{{#each metadata_json.tags}}{{this}} {{/each}}";
+    const result = render(tpl, event);
+    expect(result).toBe("urgent high audit ");
+  });
+
+  it("iterates over object keys", () => {
+    const tpl = "{{#each metadata_json}}{{@key}}: {{this}}; {{/each}}";
+    const result = render(tpl, event);
+    expect(result).toContain("tags:");
+    expect(result).toContain("count: 3");
+  });
+});
+
+describe("TemplateEngine — validation", () => {
+  it("validates a correct template", () => {
+    const result = validateTemplate("{{event_type}} - {{index}}");
+    expect(result.valid).toBe(true);
+    expect(result.errors).toHaveLength(0);
+  });
+
+  it("detects unclosed block tags", () => {
+    const result = validateTemplate("{{#if event_type}}content");
+    expect(result.valid).toBe(false);
+    expect(result.errors.length).toBeGreaterThan(0);
+  });
+
+  it("detects mismatched closing tags", () => {
+    const result = validateTemplate("{{#if event_type}}{{/each}}");
+    expect(result.valid).toBe(false);
+    expect(result.errors.length).toBeGreaterThan(0);
+  });
+});
+
+describe("getAvailableTemplateVariables()", () => {
+  it("returns variable definitions", () => {
+    const vars = getAvailableTemplateVariables();
+    expect(vars.length).toBeGreaterThan(0);
+    expect(vars.find((v) => v.name === "event_type")).toBeDefined();
+    expect(vars.find((v) => v.name === "chain.id")).toBeDefined();
+    expect(vars.find((v) => v.name === "links.explorer_url")).toBeDefined();
+    expect(vars.find((v) => v.name === "formatted.datetime")).toBeDefined();
+    expect(vars.find((v) => v.name === "metadata_json")).toBeDefined();
+    vars.forEach((v) => {
+      expect(v.name).toBeDefined();
+      expect(v.description).toBeDefined();
+      expect(v.example).toBeDefined();
+    });
+  });
+});
+
+describe("TemplateEngine — custom helpers", () => {
+  it("supports registered custom helpers", () => {
+    const engine = new TemplateEngine();
+    engine.registerHelper("stars", (s: string) => `***${s}***`);
+    const context = buildTemplateContext(baseEvent);
+    const result = engine.render("{{stars event_type}}", context);
+    expect(result).toBe("***payment***");
+  });
+
+  it("supports custom helper with multiple args", () => {
+    const engine = new TemplateEngine();
+    engine.registerHelper("repeat", (s: string, n?: string) => s.repeat(parseInt(n ?? "1", 10)));
+    const context = buildTemplateContext(baseEvent);
+    const result = engine.render("{{repeat event_type 3}}", context);
+    expect(result).toBe("paymentpaymentpayment");
+  });
+});
+
+describe("TemplateEngine — backward compatibility", () => {
+  it("does not interpret {var} as template syntax", () => {
+    const result = render("use {index} as a literal", baseEvent);
+    expect(result).toBe("use {index} as a literal");
+  });
+
+  it("mixed content renders correctly", () => {
+    const tpl = "Event #{{index}}: {{event_type}} by {{submitter}}";
+    const result = render(tpl, baseEvent);
+    expect(result).toBe("Event #1: payment by GABCDEF123");
+  });
+});
+
+describe("render() — default templates", () => {
+  const event: AuditEvent = {
+    index: 5,
+    timestamp: 1_700_000_000,
+    event_type: "compliance_alert",
+    submitter: "GCONTRACT123",
+    metadata: "unusual activity detected",
+  };
+
+  it("compliance_alert template renders all fields", () => {
+    const result = render(DEFAULT_TEMPLATES.compliance_alert, event);
+    expect(result).toContain("compliance_alert");
+    expect(result).toContain("GCONTRACT123");
+    expect(result).toContain("unusual activity detected");
+  });
+
+  it("detailed template includes chain info", () => {
+    const chain = { id: "stellar", network: "testnet", name: "Stellar" };
+    const result = render(DEFAULT_TEMPLATES.detailed, event, chain);
+    expect(result).toContain("Stellar");
+    expect(result).toContain("testnet");
   });
 });
