@@ -5,7 +5,14 @@ import path from "path";
 import yaml from "js-yaml";
 
 import { resolvers } from "../graphql/src/resolvers";
-import { exportCsv, exportJson, createStreamingExporter, ExportOptions } from "./export";
+import {
+  export_events,
+  exportCsv,
+  exportJson,
+  createStreamingExporter,
+  ExportOptions,
+  ExportFilter,
+} from "./export";
 import { validateKey, type Role } from "./keys";
 
 const app = express();
@@ -188,62 +195,99 @@ v1.get("/stats", (req, res) => {
   res.json({ data: result });
 });
 
-// ── Export Endpoints (#273) ───────────────────────────────────────────────────
+// ── Export Endpoints (#201) ───────────────────────────────────────────────────
 
-// GET /export/events.json - JSON export
+/**
+ * Parse export filter from query params.
+ * Supports: startTime, endTime (epoch seconds), type, submitter, and a
+ * legacy JSON `filter` param for backwards compatibility.
+ */
+function parseExportFilter(query: Record<string, unknown>): ExportFilter {
+  const filter: ExportFilter = {};
+
+  if (query.filter) {
+    try {
+      const parsed = JSON.parse(query.filter as string) as ExportFilter;
+      Object.assign(filter, parsed);
+    } catch {
+      // ignore malformed legacy filter
+    }
+  }
+
+  if (query.startTime) {
+    const v = parseInt(query.startTime as string, 10);
+    if (!isNaN(v)) filter.startTime = v;
+  }
+  if (query.endTime) {
+    const v = parseInt(query.endTime as string, 10);
+    if (!isNaN(v)) filter.endTime = v;
+  }
+  if (query.type) filter.type = query.type as string;
+  if (query.submitter) filter.submitter = query.submitter as string;
+
+  return filter;
+}
+
+// GET /export/events.json - JSON export with time range + integrity proof
 v1.get("/export/events.json", (req, res) => {
   const options: ExportOptions = {
     format: "json",
+    filter: parseExportFilter(req.query as Record<string, unknown>),
     limit: parseInt(req.query.limit as string) || undefined,
     offset: parseInt(req.query.offset as string) || undefined,
     fields: req.query.fields ? (req.query.fields as string).split(",") : undefined,
+    includeProof: req.query.proof !== "false",
   };
-
-  if (req.query.filter) {
-    options.filter = JSON.parse(req.query.filter as string);
-  }
 
   const result = exportJson(options);
   res.setHeader("Content-Disposition", `attachment; filename="${result.filename}"`);
   res.setHeader("Content-Type", result.contentType);
+  if (result.proof) {
+    res.setHeader("X-Export-Event-Count", String(result.proof.eventCount));
+    res.setHeader("X-Export-Hash", result.proof.exportHash);
+  }
   res.json(JSON.parse(result.data));
 });
 
-// GET /export/events.csv - CSV export
+// GET /export/events.csv - CSV export with time range + integrity proof
 v1.get("/export/events.csv", (req, res) => {
   const options: ExportOptions = {
     format: "csv",
+    filter: parseExportFilter(req.query as Record<string, unknown>),
     limit: parseInt(req.query.limit as string) || undefined,
     offset: parseInt(req.query.offset as string) || undefined,
     fields: req.query.fields ? (req.query.fields as string).split(",") : undefined,
+    includeProof: req.query.proof !== "false",
   };
-
-  if (req.query.filter) {
-    options.filter = JSON.parse(req.query.filter as string);
-  }
 
   const result = exportCsv(options);
   res.setHeader("Content-Disposition", `attachment; filename="${result.filename}"`);
   res.setHeader("Content-Type", result.contentType);
+  if (result.proof) {
+    res.setHeader("X-Export-Event-Count", String(result.proof.eventCount));
+    res.setHeader("X-Export-Hash", result.proof.exportHash);
+  }
   res.send(result.data);
 });
 
-// GET /export/events/stream - Streaming JSON export (#273 streaming)
+// GET /export/events/stream - Streaming export for large datasets (#201)
 v1.get("/export/events/stream", async (req, res) => {
+  const fmt = (req.query.format as string) === "csv" ? "csv" : "json";
   const options: ExportOptions = {
-    format: "json",
+    format: fmt,
+    filter: parseExportFilter(req.query as Record<string, unknown>),
     limit: parseInt(req.query.limit as string) || undefined,
     offset: parseInt(req.query.offset as string) || undefined,
     fields: req.query.fields ? (req.query.fields as string).split(",") : undefined,
     stream: true,
+    includeProof: req.query.proof !== "false",
   };
 
-  if (req.query.filter) {
-    options.filter = JSON.parse(req.query.filter as string);
-  }
-
   const exporter = createStreamingExporter(options);
-  res.setHeader("Content-Type", "application/json; charset=utf-8");
+  const contentType =
+    fmt === "csv" ? "text/csv; charset=utf-8" : "application/json; charset=utf-8";
+
+  res.setHeader("Content-Type", contentType);
   res.setHeader("Transfer-Encoding", "chunked");
   res.setHeader("X-Export-Status", "running");
 
@@ -252,6 +296,7 @@ v1.get("/export/events/stream", async (req, res) => {
       res.write(chunk);
     }
     res.setHeader("X-Export-Status", "completed");
+    res.setHeader("X-Export-Event-Count", String(exporter.progress.exported));
     res.end();
   } catch (err) {
     res.setHeader("X-Export-Status", "failed");
@@ -260,11 +305,12 @@ v1.get("/export/events/stream", async (req, res) => {
   }
 });
 
-// GET /export/progress - Export progress check (#273 progress)
+// GET /export/progress - Status info for streaming exports (#201)
 v1.get("/export/progress", (_req, res) => {
   res.json({
     status: "idle",
-    message: "Use export endpoints to start an export. Progress is tracked via X-Export-Status header for streaming exports.",
+    message:
+      "Use export endpoints to start an export. Progress is tracked via X-Export-Status and X-Export-Event-Count response headers for streaming exports.",
   });
 });
 

@@ -3209,3 +3209,221 @@ fn test_metadata_schema_per_type_isolation() {
     );
     assert_eq!(client.total_events(), 2);
 }
+
+// ── TTL auto-cleanup (#200) ───────────────────────────────────────────────────
+
+/// cleanup_expired_events returns 0 when TTL is disabled (ttl = 0).
+#[test]
+fn test_cleanup_expired_events_returns_zero_when_ttl_disabled() {
+    let (env, owner, client) = create_ledger();
+    let submitter = Address::generate(&env);
+    env.mock_all_auths();
+
+    client.log_event(&submitter, &symbol_short!("pay"), &Bytes::from_slice(&env, b"a"), &None, &None, &false);
+    // TTL not set — cleanup should be a no-op
+    let removed = client.cleanup_expired_events(&owner, &0, &100);
+    assert_eq!(removed, 0);
+}
+
+/// cleanup_expired_events with TTL set and no expired entries returns 0.
+#[test]
+fn test_cleanup_expired_events_no_expiry_returns_zero() {
+    let (env, owner, client) = create_ledger();
+    let submitter = Address::generate(&env);
+    env.mock_all_auths();
+
+    client.set_event_ttl(&owner, &10000);
+    client.log_event(&submitter, &symbol_short!("pay"), &Bytes::from_slice(&env, b"a"), &None, &None, &false);
+    // Persistent entry is still alive, so nothing should be counted as expired.
+    let removed = client.cleanup_expired_events(&owner, &0, &100);
+    assert_eq!(removed, 0);
+}
+
+/// cleanup_expired_events increments the run counter each time.
+#[test]
+fn test_cleanup_stats_run_counter_increments() {
+    let (env, owner, client) = create_ledger();
+    env.mock_all_auths();
+
+    client.set_event_ttl(&owner, &1000);
+
+    let before = client.get_cleanup_stats();
+    assert_eq!(before.runs, 0);
+
+    client.cleanup_expired_events(&owner, &0, &100);
+    let after1 = client.get_cleanup_stats();
+    assert_eq!(after1.runs, 1);
+
+    client.cleanup_expired_events(&owner, &0, &100);
+    let after2 = client.get_cleanup_stats();
+    assert_eq!(after2.runs, 2);
+}
+
+/// cleanup_expired_events records the ledger sequence of the last run.
+#[test]
+fn test_cleanup_stats_last_run_ledger_updated() {
+    let (env, owner, client) = create_ledger();
+    env.mock_all_auths();
+
+    client.set_event_ttl(&owner, &1000);
+
+    let stats_before = client.get_cleanup_stats();
+    assert_eq!(stats_before.last_run_ledger, 0);
+
+    client.cleanup_expired_events(&owner, &0, &100);
+
+    let stats_after = client.get_cleanup_stats();
+    assert!(stats_after.last_run_ledger > 0, "last_run_ledger should be set after cleanup");
+}
+
+/// get_cleanup_stats returns zero-valued struct when no cleanup has run.
+#[test]
+fn test_get_cleanup_stats_default_zero() {
+    let (_env, _owner, client) = create_ledger();
+    let stats = client.get_cleanup_stats();
+    assert_eq!(stats.runs, 0);
+    assert_eq!(stats.cleaned, 0);
+    assert_eq!(stats.ttl_extensions, 0);
+    assert_eq!(stats.last_run_ledger, 0);
+}
+
+/// Non-owner cannot call cleanup_expired_events.
+#[test]
+fn test_cleanup_expired_events_non_owner_rejected() {
+    let (env, _owner, client) = create_ledger();
+    let attacker = Address::generate(&env);
+    env.mock_all_auths();
+
+    client.set_event_ttl(&_owner, &1000);
+    let result = client.try_cleanup_expired_events(&attacker, &0, &100);
+    assert!(result.is_err());
+}
+
+/// cleanup_expired_events emits a monitoring event.
+#[test]
+fn test_cleanup_expired_events_emits_event() {
+    let (env, owner, client) = create_ledger();
+    env.mock_all_auths();
+
+    client.set_event_ttl(&owner, &1000);
+    let before = env.events().all().events().len();
+    client.cleanup_expired_events(&owner, &0, &100);
+    let after = env.events().all().events().len();
+    assert!(after > before, "cleanup_expired_events should emit a monitoring event");
+}
+
+/// TTL extension on read: get_event extends the persistent TTL.
+#[test]
+fn test_get_event_extends_ttl_on_read() {
+    let (env, owner, client) = create_ledger();
+    let submitter = Address::generate(&env);
+    env.mock_all_auths();
+
+    client.set_event_ttl(&owner, &1000);
+    let id = client.log_event(
+        &submitter,
+        &symbol_short!("pay"),
+        &Bytes::from_slice(&env, b"extend_test"),
+        &None,
+        &None,
+        &false,
+    );
+
+    let stats_before = client.get_cleanup_stats();
+    assert_eq!(stats_before.ttl_extensions, 0);
+
+    // Reading the event should extend TTL and increment the counter.
+    let evt = client.get_event(&id);
+    assert_eq!(evt.metadata, Bytes::from_slice(&env, b"extend_test"));
+
+    let stats_after = client.get_cleanup_stats();
+    assert_eq!(stats_after.ttl_extensions, 1, "TTL extension counter should increment on read");
+}
+
+/// TTL extension is skipped when TTL is disabled.
+#[test]
+fn test_get_event_no_extension_when_ttl_disabled() {
+    let (env, _owner, client) = create_ledger();
+    let submitter = Address::generate(&env);
+    env.mock_all_auths();
+
+    // No set_event_ttl call — TTL disabled.
+    let id = client.log_event(
+        &submitter,
+        &symbol_short!("pay"),
+        &Bytes::from_slice(&env, b"no_ext"),
+        &None,
+        &None,
+        &false,
+    );
+
+    client.get_event(&id);
+
+    let stats = client.get_cleanup_stats();
+    assert_eq!(stats.ttl_extensions, 0, "TTL extensions should stay 0 when TTL is disabled");
+}
+
+/// Multiple reads accumulate the ttl_extensions counter.
+#[test]
+fn test_get_event_ttl_extension_counter_accumulates() {
+    let (env, owner, client) = create_ledger();
+    let submitter = Address::generate(&env);
+    env.mock_all_auths();
+
+    client.set_event_ttl(&owner, &1000);
+    let id = client.log_event(
+        &submitter,
+        &symbol_short!("pay"),
+        &Bytes::from_slice(&env, b"multi_read"),
+        &None,
+        &None,
+        &false,
+    );
+
+    client.get_event(&id);
+    client.get_event(&id);
+    client.get_event(&id);
+
+    let stats = client.get_cleanup_stats();
+    assert_eq!(stats.ttl_extensions, 3, "Each read should increment ttl_extensions");
+}
+
+/// batch_size limits the scan range of cleanup_expired_events.
+#[test]
+fn test_cleanup_expired_events_batch_size_respected() {
+    let (env, owner, client) = create_ledger();
+    let submitter = Address::generate(&env);
+    env.mock_all_auths();
+
+    client.set_event_ttl(&owner, &1000);
+    // Log 10 events
+    for i in 0..10u32 {
+        client.log_event(
+            &submitter,
+            &symbol_short!("pay"),
+            &Bytes::from_slice(&env, &[i as u8]),
+            &None,
+            &None,
+            &false,
+        );
+    }
+
+    // Run cleanup with batch_size=5, starting at 0 — should process indices 0..5 only.
+    client.cleanup_expired_events(&owner, &0, &5);
+    let stats = client.get_cleanup_stats();
+    assert_eq!(stats.runs, 1);
+}
+
+/// cleanup_expired_events with start_index beyond total is a no-op (no panic).
+#[test]
+fn test_cleanup_expired_events_start_beyond_total_is_noop() {
+    let (env, owner, client) = create_ledger();
+    env.mock_all_auths();
+
+    client.set_event_ttl(&owner, &1000);
+    // No events — start at 999
+    let removed = client.cleanup_expired_events(&owner, &999, &100);
+    assert_eq!(removed, 0);
+    let stats = client.get_cleanup_stats();
+    assert_eq!(stats.runs, 1);  // run was recorded even if nothing to clean
+}

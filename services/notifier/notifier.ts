@@ -3,11 +3,16 @@
  *
  * Connects to the WebSocket event stream, matches events against user-defined
  * rules, and dispatches notifications via Email, Slack, Telegram, or Webhook.
+ *
+ * Template Engine (#362, #361, #360):
+ *   Uses Handlebars/Mustache-style {{variable}} syntax with support for
+ *   helpers, conditionals, and iteration. See template-engine.ts for details.
  */
 
 import { EventEmitter } from "events";
 import https from "https";
 import http from "http";
+import { TemplateEngine, buildTemplateContext } from "./template-engine";
 
 // ── Types ─────────────────────────────────────────────────────────────────────
 
@@ -32,7 +37,7 @@ export interface Rule {
   event_type: string;
   filters?: RuleFilters;
   channel: ChannelType;
-  template: string; // supports {index}, {event_type}, {submitter}, {metadata}, {timestamp}
+  template: string;
 }
 
 export interface ChannelConfig {
@@ -49,22 +54,57 @@ export interface ChannelConfig {
   webhook?: { url: string; method?: string; headers?: Record<string, string> };
 }
 
+export interface ChainInfo {
+  id: string;
+  network: string;
+  name: string;
+}
+
+export interface LinksConfig {
+  explorerUrl: string;
+  transactionUrlTemplate?: string;
+  eventUrlTemplate?: string;
+}
+
 export interface NotifierConfig {
   wsUrl: string;
   channels: ChannelConfig;
   rules: Rule[];
   rateLimitPerMinute: number;
+  chain?: ChainInfo;
+  links?: LinksConfig;
+  templateConfig?: {
+    strictMode?: boolean;
+    missingPlaceholder?: string;
+  };
 }
 
 // ── Template rendering ────────────────────────────────────────────────────────
 
-function render(template: string, event: AuditEvent): string {
-  return template
-    .replace(/\{index\}/g, String(event.index))
-    .replace(/\{event_type\}/g, event.event_type)
-    .replace(/\{submitter\}/g, event.submitter)
-    .replace(/\{metadata\}/g, event.metadata)
-    .replace(/\{timestamp\}/g, new Date(event.timestamp * 1000).toISOString());
+const templateEngine = new TemplateEngine({
+  strictMode: false,
+  missingPlaceholder: "",
+});
+
+export function render(template: string, event: AuditEvent, chain?: ChainInfo, links?: LinksConfig): string {
+  const context = buildTemplateContext(event, chain, {
+    explorer_url: links?.explorerUrl,
+    transaction_url: links?.transactionUrlTemplate
+      ? links.transactionUrlTemplate.replace("{index}", String(event.index))
+      : "",
+    event_url: links?.eventUrlTemplate
+      ? links.eventUrlTemplate.replace("{index}", String(event.index))
+      : "",
+  });
+  return templateEngine.render(template, context);
+}
+
+export function validateTemplate(template: string): { valid: boolean; errors: string[] } {
+  return templateEngine.validate(template);
+}
+
+export function getAvailableTemplateVariables(): ReturnType<typeof templateEngine.getAvailableVariables> {
+  return templateEngine.getAvailableVariables();
 }
 
 // ── Rule matching ─────────────────────────────────────────────────────────────
@@ -127,6 +167,8 @@ export class Notifier extends EventEmitter {
   private rules: Rule[];
   private channels: ChannelConfig;
   private rateLimitPerMinute: number;
+  private chain?: ChainInfo;
+  private links?: LinksConfig;
   private notificationCount = 0;
   private windowStart = Date.now();
   private ws: any = null;
@@ -136,6 +178,8 @@ export class Notifier extends EventEmitter {
     this.rules = cfg.rules;
     this.channels = cfg.channels;
     this.rateLimitPerMinute = cfg.rateLimitPerMinute;
+    this.chain = cfg.chain;
+    this.links = cfg.links;
   }
 
   // ── Rule management ─────────────────────────────────────────────────────────
@@ -168,7 +212,7 @@ export class Notifier extends EventEmitter {
       console.warn(`[notifier] rate limit reached — dropping notification for rule "${rule.name}"`);
       return;
     }
-    const message = render(rule.template, event);
+    const message = render(rule.template, event, this.chain, this.links);
     try {
       switch (rule.channel) {
         case "slack":
@@ -240,9 +284,20 @@ export class Notifier extends EventEmitter {
 // ── Default templates ─────────────────────────────────────────────────────────
 
 export const DEFAULT_TEMPLATES: Record<string, string> = {
-  compliance_alert: "⚠️ Compliance event [{event_type}] logged at {timestamp} by {submitter}. Metadata: {metadata}",
-  large_transaction: "💰 Large transaction event [{event_type}] at index {index}. Submitter: {submitter}",
-  generic: "AuditLedger event [{event_type}] #{index} at {timestamp}",
+  compliance_alert:
+    "⚠️ Compliance event [{{event_type}}] logged at {{formatted.datetime}} by {{submitter}}. Metadata: {{metadata}}",
+  large_transaction:
+    "💰 Large transaction event [{{event_type}}] at index {{index}}. Submitter: {{submitter}}",
+  generic:
+    "AuditLedger event [{{event_type}}] #{{index}} at {{formatted.datetime}}",
+  detailed:
+    "[{{event_type}}] #{{index}}\n" +
+    "  Submitter: {{submitter}}\n" +
+    "  Time: {{formatted.datetime}}\n" +
+    "  Chain: {{chain.name}} ({{chain.network}})\n" +
+    "  Metadata: {{metadata}}{{#if links.explorer_url}}\n  Explorer: {{links.explorer_url}}{{/if}}",
+  json:
+    '{"event_type":"{{event_type}}","index":{{index}},"timestamp":{{timestamp}},"submitter":"{{submitter}}","metadata":{{#if metadata_json}}{{metadata_json | json}}{{else}}"{{metadata}}"{{/if}}}',
 };
 
 // ── Entry point ───────────────────────────────────────────────────────────────
@@ -257,6 +312,16 @@ if (require.main === module) {
         ? { botToken: process.env.TELEGRAM_TOKEN, chatId: process.env.TELEGRAM_CHAT }
         : undefined,
       webhook: process.env.WEBHOOK_URL ? { url: process.env.WEBHOOK_URL } : undefined,
+    },
+    chain: {
+      id: process.env.CHAIN_ID ?? "stellar",
+      network: process.env.CHAIN_NETWORK ?? "testnet",
+      name: process.env.CHAIN_NAME ?? "Stellar",
+    },
+    links: {
+      explorerUrl: process.env.EXPLORER_URL ?? "https://stellar.expert/explorer/testnet",
+      transactionUrlTemplate: process.env.TRANSACTION_URL_TEMPLATE,
+      eventUrlTemplate: process.env.EVENT_URL_TEMPLATE,
     },
     rules: [
       { name: "all-events", event_type: "*", channel: "webhook", template: DEFAULT_TEMPLATES.generic },

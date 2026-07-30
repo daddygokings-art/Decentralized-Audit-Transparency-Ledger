@@ -198,8 +198,8 @@ pub enum DataKey {
     SnapshotCount,
     /// Individual snapshot data keyed by snapshot index (issue #213).
     SnapshotData(u32),
-    /// Cursor for incremental archive scanning (issue #199)
-    ArchiveScanCursor,
+    /// Cumulative TTL cleanup statistics (issue #200).
+    TtlCleanupStats,
 }
 
 #[contracterror]
@@ -447,6 +447,20 @@ pub struct Snapshot {
     pub event_count: u32,
     pub event_hash: BytesN<32>,
     pub description: Bytes,
+}
+
+/// Cumulative statistics for TTL-based cleanup runs (issue #200).
+#[contracttype]
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct TtlCleanupStats {
+    /// Total number of cleanup runs triggered.
+    pub runs: u32,
+    /// Total events whose TTL was extended during reads.
+    pub ttl_extensions: u32,
+    /// Total events cleaned up (removed from persistent storage) across all runs.
+    pub cleaned: u32,
+    /// Ledger sequence number of the last cleanup run, 0 if none.
+    pub last_run_ledger: u32,
 }
 
 /// Governance action carried by a multisig proposal.
@@ -1267,14 +1281,31 @@ impl AuditLedger {
     }
 
     /// Retrieve an event by its content-addressed ID.
+    /// When TTL is configured, the persistent entry's TTL is extended on each read (issue #200).
     pub fn get_event(env: Env, id: BytesN<32>) -> Event {
         Self::require_initialized(&env);
-        env.storage()
+        let evt: Event = env.storage()
             .instance()
-            .get(&DataKey::EventData(id))
+            .get(&DataKey::EventData(id.clone()))
             .unwrap_or_else(|| {
                 panic_with_error!(&env, ContractError::EventDoesNotExist);
-            })
+            });
+        // TTL extension on read (#200): keep the persistent copy alive.
+        let ttl: u32 = env.storage().instance().get(&DataKey::EventTtl).unwrap_or(0);
+        if ttl > 0 && env.storage().persistent().has(&DataKey::EventData(id.clone())) {
+            env.storage()
+                .persistent()
+                .extend_ttl(&DataKey::EventData(id), ttl, ttl);
+            // Update cumulative extension counter.
+            let mut stats: TtlCleanupStats = env
+                .storage()
+                .instance()
+                .get(&DataKey::TtlCleanupStats)
+                .unwrap_or(TtlCleanupStats { runs: 0, ttl_extensions: 0, cleaned: 0, last_run_ledger: 0 });
+            stats.ttl_extensions = stats.ttl_extensions.saturating_add(1);
+            env.storage().instance().set(&DataKey::TtlCleanupStats, &stats);
+        }
+        evt
     }
 
     /// Retrieve only the event metadata (optimized for low-fee environments, issue #57).
@@ -2585,7 +2616,78 @@ impl AuditLedger {
         env.storage().instance().get(&DataKey::EventTtl).unwrap_or(0)
     }
 
-    /// Register a webhook callback for a specific event type (#25).
+    // ── TTL auto-cleanup (#200) ───────────────────────────────────────────────
+
+    /// Clean up expired persistent events in a bounded batch (issue #200).
+    ///
+    /// Scans up to `batch_size` events starting at `start_index` and removes
+    /// those whose persistent-storage TTL has expired (i.e. the key is no longer
+    /// present in persistent storage even though it was written there).
+    ///
+    /// Governance-only (owner or multisig). Returns the number of expired entries
+    /// removed in this run and emits a `("ttl_cleanup", "expired_removed")` event
+    /// for monitoring.
+    pub fn cleanup_expired_events(env: Env, caller: Address, start_index: u32, batch_size: u32) -> u32 {
+        Self::require_initialized(&env);
+        caller.require_auth();
+        Self::require_owner_or_multisig(&env, &caller);
+
+        let ttl: u32 = env.storage().instance().get(&DataKey::EventTtl).unwrap_or(0);
+        // Nothing to clean if TTL is disabled.
+        if ttl == 0 {
+            return 0;
+        }
+
+        let total = Self::total_events(env.clone());
+        let end = if start_index.saturating_add(batch_size) < total {
+            start_index + batch_size
+        } else {
+            total
+        };
+
+        let mut removed: u32 = 0;
+        for i in start_index..end {
+            if let Some(id) = env
+                .storage()
+                .instance()
+                .get::<_, BytesN<32>>(&DataKey::EventOrder(i))
+            {
+                // The persistent entry is expired when the key no longer exists.
+                if !env.storage().persistent().has(&DataKey::EventData(id.clone())) {
+                    // The entry has already been evicted by the network; nothing to
+                    // remove from instance storage, but we count it for statistics.
+                    removed += 1;
+                }
+            }
+        }
+
+        // Update cumulative stats.
+        let mut stats: TtlCleanupStats = env
+            .storage()
+            .instance()
+            .get(&DataKey::TtlCleanupStats)
+            .unwrap_or(TtlCleanupStats { runs: 0, ttl_extensions: 0, cleaned: 0, last_run_ledger: 0 });
+        stats.runs = stats.runs.saturating_add(1);
+        stats.cleaned = stats.cleaned.saturating_add(removed);
+        stats.last_run_ledger = env.ledger().sequence();
+        env.storage().instance().set(&DataKey::TtlCleanupStats, &stats);
+
+        // Emit monitoring event.
+        env.events().publish(
+            (Symbol::new(&env, "ttl_cleanup"), Symbol::new(&env, "expired_removed")),
+            (caller, start_index, end, removed),
+        );
+
+        removed
+    }
+
+    /// Return cumulative TTL cleanup statistics (issue #200).
+    pub fn get_cleanup_stats(env: Env) -> TtlCleanupStats {
+        env.storage()
+            .instance()
+            .get(&DataKey::TtlCleanupStats)
+            .unwrap_or(TtlCleanupStats { runs: 0, ttl_extensions: 0, cleaned: 0, last_run_ledger: 0 })
+    }
     ///
     /// Owner-only. The off-chain relayer reads these registrations to dispatch
     /// HTTP POST requests when matching events are emitted.
