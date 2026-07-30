@@ -1271,6 +1271,15 @@ impl AuditLedger {
             .unwrap_or(0)
     }
 
+    /// Return the cached count of events for a given `event_type`.
+    /// This provides a lightweight aggregation query (issue #205).
+    pub fn get_event_type_count(env: Env, event_type: Symbol) -> u32 {
+        env.storage()
+            .instance()
+            .get::<_, u32>(&DataKey::EventTypeCount(event_type))
+            .unwrap_or(0u32)
+    }
+
     /// Retrieve an event by its content-addressed ID.
     /// When TTL is configured, the persistent entry's TTL is extended on each read (issue #200).
     pub fn get_event(env: Env, id: BytesN<32>) -> Event {
@@ -1409,46 +1418,59 @@ impl AuditLedger {
             .get(&DataKey::ArchivedTotalEvents)
             .unwrap_or(0u32);
         let mut moved: u32 = 0;
-        for i in 0..total {
+        // Resume scanning from the last position to avoid re-scanning entire history on each call.
+        let mut i: u32 = env
+            .storage()
+            .instance()
+            .get(&DataKey::ArchiveScanCursor)
+            .unwrap_or(0u32);
+        while i < total {
             let id: BytesN<32> = env.storage().instance().get(&DataKey::EventOrder(i)).unwrap();
             // skip if already archived
             if env.storage().instance().has(&DataKey::EventArchivedFlag(id.clone())) {
+                i += 1;
                 continue;
             }
             let evt: Event = env.storage().instance().get(&DataKey::EventData(id.clone())).unwrap();
-            if evt.timestamp < cutoff_timestamp {
-                // copy into archived storage
-                env.storage()
-                    .instance()
-                    .set(&DataKey::ArchivedEventData(id.clone()), &evt);
-                if let Some(header) = env
-                    .storage()
-                    .instance()
-                    .get::<_, EventHeader>(&DataKey::EventHeaderKey(id.clone()))
-                {
-                    env.storage()
-                        .instance()
-                        .set(&DataKey::ArchivedEventHeaderKey(id.clone()), &header);
-                }
-                if let Some(meta) = env
-                    .storage()
-                    .instance()
-                    .get::<_, Bytes>(&DataKey::EventMetadata(id.clone()))
-                {
-                    env.storage()
-                        .instance()
-                        .set(&DataKey::ArchivedEventMetadata(id.clone()), &meta);
-                }
-                env.storage()
-                    .instance()
-                    .set(&DataKey::EventArchivedFlag(id.clone()), &true);
-                env.storage()
-                    .instance()
-                    .set(&DataKey::ArchivedEventOrder(archived), &id.clone());
-                archived += 1;
-                moved += 1;
+            // Events are appended sequentially; once we reach a timestamp >= cutoff, later
+            // events will be newer and can be skipped (early exit).
+            if evt.timestamp >= cutoff_timestamp {
+                break;
             }
+            // copy into archived storage
+            env.storage()
+                .instance()
+                .set(&DataKey::ArchivedEventData(id.clone()), &evt);
+            if let Some(header) = env
+                .storage()
+                .instance()
+                .get::<_, EventHeader>(&DataKey::EventHeaderKey(id.clone()))
+            {
+                env.storage()
+                    .instance()
+                    .set(&DataKey::ArchivedEventHeaderKey(id.clone()), &header);
+            }
+            if let Some(meta) = env
+                .storage()
+                .instance()
+                .get::<_, Bytes>(&DataKey::EventMetadata(id.clone()))
+            {
+                env.storage()
+                    .instance()
+                    .set(&DataKey::ArchivedEventMetadata(id.clone()), &meta);
+            }
+            env.storage()
+                .instance()
+                .set(&DataKey::EventArchivedFlag(id.clone()), &true);
+            env.storage()
+                .instance()
+                .set(&DataKey::ArchivedEventOrder(archived), &id.clone());
+            archived += 1;
+            moved += 1;
+            i += 1;
         }
+        // persist scan cursor so subsequent calls resume where we left off
+        env.storage().instance().set(&DataKey::ArchiveScanCursor, &i);
         env.storage().instance().set(&DataKey::ArchivedTotalEvents, &archived);
         env.events().publish((Symbol::new(&env, "events_archived"),), (moved,));
         moved
