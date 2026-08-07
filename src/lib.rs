@@ -7,6 +7,9 @@ use soroban_sdk::{
     Vec,
 };
 
+/// Zero/invalid Stellar address (all zeroes) used to reject `NewOwnerIsZero`.
+const NULL_ACCOUNT: &str = "GAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAWHF";
+
 /// Default maximum metadata size (1 KB). Used when no explicit cap is set.
 const DEFAULT_MAX_METADATA_SIZE: u32 = 1024;
 
@@ -200,6 +203,8 @@ pub enum DataKey {
     SnapshotData(u32),
     /// Cumulative TTL cleanup statistics (issue #200).
     TtlCleanupStats,
+    /// Resume cursor for `archive_events` scans (issue #199).
+    ArchiveScanCursor,
 }
 
 #[contracterror]
@@ -463,21 +468,6 @@ pub struct TtlCleanupStats {
     pub last_run_ledger: u32,
 }
 
-/// Governance action carried by a multisig proposal.
-#[contracttype]
-#[derive(Clone, Debug, Eq, PartialEq)]
-pub enum ProposalAction {
-    TransferOwnership(Address),
-    AddOwner(Address),
-    RemoveOwner(Address),
-    SetRequiredSignatures(u32),
-    SetGlobalMaxLogs(u32),
-    SetMetadataSchema(Symbol, Bytes),
-    RollbackEvent(u32, u32),
-    Pause,
-    Unpause,
-}
-
 // ── Additional type definitions ──────────────────────────────────────────────
 
 #[contract]
@@ -530,17 +520,6 @@ impl AuditLedger {
             );
         env.storage().instance().set(&DataKey::TotalEvents, &0u32);
         env.storage().instance().set(&DataKey::Paused, &false);
-
-        let rs = RuntimeState {
-            global_max_logs,
-            total_events: 0,
-            paused: false,
-            allowlist_mode: false,
-            low_cost_mode: false,
-            emission_mode: 1,
-            global_metadata_max_size: 0,
-        };
-        env.storage().instance().set(&DataKey::RuntimeState, &rs);
 
         // Set version to 1 (marks contract as initialized, immutable)
         env.storage().instance().set(&DataKey::ContractVersion, &1u32);
@@ -846,8 +825,10 @@ impl AuditLedger {
                     global_metadata_max_size: env.storage().instance().get::<_, u32>(&DataKey::GlobalMetadataMaxSize).unwrap_or(0),
                 }
             });
-
-        // --- issue #62: enforce per-submitter rate limit (per-submitter key, optional) ---
+        let mut cfg: Config = env.storage().instance().get(&DataKey::Config).unwrap_or(Config {
+            global_max_logs: rs.global_max_logs,
+            total_events: rs.total_events,
+        });
         if let Some(limit) = env
             .storage()
             .instance()
@@ -875,32 +856,6 @@ impl AuditLedger {
                     .set(&DataKey::SubmitterRateState(submitter.clone()), &(now, 1u32));
             }
         }
-
-        // --- issue #114: single read for RuntimeState + Config ---
-        let rs: RuntimeState = env.storage().instance().get(&DataKey::RuntimeState).unwrap_or_else(|| {
-            let cfg_rs: Config = env.storage().instance().get(&DataKey::Config).unwrap();
-            RuntimeState {
-                global_max_logs: cfg_rs.global_max_logs,
-                total_events: cfg_rs.total_events,
-                paused: env
-                    .storage()
-                    .instance()
-                    .get::<_, bool>(&DataKey::Paused)
-                    .unwrap_or(false),
-                allowlist_mode: false,
-                low_cost_mode: false,
-                emission_mode: env
-                    .storage()
-                    .instance()
-                    .get::<_, u32>(&DataKey::EventEmissionConfig)
-                    .unwrap_or(1),
-                global_metadata_max_size: 0,
-            }
-        });
-        let mut cfg: Config = env.storage().instance().get(&DataKey::Config).unwrap_or(Config {
-            global_max_logs: rs.global_max_logs,
-            total_events: rs.total_events,
-        });
 
         // --- issue #67: enforce metadata size cap ---
         let max_meta = Self::effective_metadata_max_size(&env, &event_type);
@@ -970,17 +925,11 @@ impl AuditLedger {
         // --- issue #66: compute this event's hash (includes prev_hash) ---
         let event_hash = Self::compute_event_hash(&env, &event_id, &prev_hash, index, timestamp);
 
-        let cat = category.unwrap_or(Symbol::new(&env, "general"));
         // Reject categories exceeding max length to prevent storage cost attacks.
-        let _max_cat_len: u32 = env
-            .storage()
-            .instance()
-            .get(&DataKey::CategoryMaxLen)
-            .unwrap_or(MAX_CATEGORY_LEN);
-        // Category length validation skipped because Symbol does not expose
-        // a byte-level read API in soroban-sdk no_std. Soroban protocol
-        // limits all Symbols to ≤32 bytes, which is sufficient for the
-        // intended max_cat_len constraints.
+        // Category length validation is a no-op: Symbol does not expose a
+        // byte-level read API in soroban-sdk no_std, and the Soroban protocol
+        // already limits all Symbols to ≤32 bytes, which is sufficient for the
+        // intended `MAX_CATEGORY_LEN` constraint.
         let evt = Event {
             index,
             timestamp,
@@ -1597,15 +1546,9 @@ impl AuditLedger {
             (Symbol::new(&env, "contract_upgraded"),),
             (old_hash_opt, new_wasm_hash.clone()),
         );
-        #[cfg(test)]
-        {
-        }
-        #[cfg(not(test))]
-        {
-            // Perform upgrade via deployer API (Soroban deployer helper).
-            // This is a best-effort call and may vary by runtime.
-            env.deployer().update_current_contract_wasm(new_wasm_hash.clone());
-        }
+        // Perform upgrade via deployer API (Soroban deployer helper).
+        // This is a best-effort call and may vary by runtime.
+        env.deployer().update_current_contract_wasm(new_wasm_hash.clone());
     }
 
     pub fn get_event_by_type(env: Env, event_type: Symbol, type_index: u32) -> Event {
@@ -2036,16 +1979,12 @@ impl AuditLedger {
         let event_id: BytesN<32> = env.storage().instance().get(&DataKey::EventOrder(index)).unwrap();
         let event: Event = env.storage().instance().get(&DataKey::EventData(event_id)).unwrap();
 
-        let evt_timestamp = event.timestamp;
-        let evt_submitter = event.submitter.clone();
         let mut history = Vec::new(&env);
-        let ts = event.timestamp;
-        let sub = event.submitter.clone();
         history.push_back(EventVersion {
             version: 0,
-            data: event,
-            updated_at: ts,
-            updated_by: sub,
+            data: event.clone(),
+            updated_at: event.timestamp,
+            updated_by: event.submitter,
         });
         history
     }
@@ -2071,7 +2010,7 @@ impl AuditLedger {
             panic_with_error!(&env, ContractError::InvalidVersion);
         }
 
-        let target = history.get(target_version as usize).unwrap();
+        let target = history.get(target_version).unwrap();
         let restored = &target.data;
 
         let new_id = Self::compute_event_id(
@@ -2122,6 +2061,7 @@ impl AuditLedger {
             version: Self::current_contract_version(&env),
             event_hash: new_hash.clone(),
             prev_hash: prev_hash.clone(),
+            parent_event_id: restored.parent_event_id.clone(),
         };
 
         let mut versions = history;
@@ -2204,8 +2144,8 @@ impl AuditLedger {
         if history.is_empty() {
             return 0;
         }
-        let a = version_a as usize;
-        let b = version_b as usize;
+        let a = version_a;
+        let b = version_b;
         if a >= history.len() || b >= history.len() {
             panic_with_error!(&env, ContractError::InvalidVersion);
         }
@@ -3457,7 +3397,7 @@ impl AuditLedger {
                 env.storage().instance().set(&DataKey::MetadataSchema(event_type.clone()), schema);
             }
             ProposalAction::RollbackEvent(index, target_version) => {
-                let _ = Self::rollback_event(env.clone(), executor.clone(), *index, *target_version);
+                let _ = Self::rollback_event(env.clone(), executor.clone(), index, target_version);
             }
             ProposalAction::Pause => {
                 env.storage().instance().set(&DataKey::Paused, &true);

@@ -334,8 +334,6 @@ fn standalone_event_signatures() {
         &submitter,
         &symbol_short!("signed"),
         &Bytes::from_slice(&env, b"data"),
-        &None,
-        &None,
         &sig_payload,
     );
 

@@ -105,7 +105,7 @@ fn boundary_global_max_logs_at_u32_max() {
     let mut owners = Vec::new(&env);
     owners.push_back(owner.clone());
     // Setting global_max_logs to u32::MAX should work
-    client.initialize(&owner, &u32::MAX, &4096);
+    client.initialize(&owners, &u32::MAX, &4096);
 
     // Verify it was set
     // (cannot directly read, but initialization succeeded)

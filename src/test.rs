@@ -1,6 +1,6 @@
 use super::*;
 use soroban_sdk::testutils::{Address as _, Events, Ledger};
-use soroban_sdk::{symbol_short, Bytes, BytesN, Env, IntoVal, Symbol, Vec};
+use soroban_sdk::{symbol_short, Bytes, BytesN, Env, Vec};
 
 fn create_ledger() -> (Env, Address, AuditLedgerClient<'static>) {
     let env = Env::default();
@@ -122,9 +122,11 @@ fn test_initialize_reinitialization_panics() {
     let client = AuditLedgerClient::new(&env, &contract_id);
 
     env.mock_all_auths();
-    client.initialize(&owner, &100, &4096);
+    let mut owners = Vec::new(&env);
+    owners.push_back(owner.clone());
+    client.initialize(&owners, &100, &4096);
     // Try to re-initialize — should fail with AlreadyInitialized (error #19)
-    client.initialize(&owner, &200, &4096);
+    client.initialize(&owners, &200, &4096);
 }
 
 #[test]
@@ -137,14 +139,16 @@ fn test_initialize_reinitialization_after_ownership_transfer_panics() {
     let client = AuditLedgerClient::new(&env, &contract_id);
 
     env.mock_all_auths();
-    client.initialize(&owner, &100, &4096);
+    let mut owners = Vec::new(&env);
+    owners.push_back(owner.clone());
+    client.initialize(&owners, &100, &4096);
     
     // Transfer ownership
     client.transfer_ownership(&owner, &new_owner);
 
     // Try to re-initialize with new owner — should still fail with AlreadyInitialized
     // (demonstrates that version counter protects against re-init even if owner changes)
-    client.initialize(&new_owner, &200, &4096);
+    client.initialize(&owners, &200, &4096);
 }
 
 #[test]
@@ -809,7 +813,7 @@ fn test_log_event_metadata_too_large_reverts() {
     let (env, _owner, client) = create_ledger();
     let submitter = Address::generate(&env);
     let payment = symbol_short!("payment");
-    let mut meta_vec = vec![0u8; 4097];
+    let meta_vec = [0u8; 4097];
     let metadata = Bytes::from_slice(&env, &meta_vec);
 
     env.mock_all_auths();
@@ -822,7 +826,7 @@ fn test_log_events_metadata_too_large_reverts() {
     let (env, _owner, client) = create_ledger();
     let submitter = Address::generate(&env);
     let payment = symbol_short!("payment");
-    let mut meta_vec = vec![0u8; 4097];
+    let meta_vec = [0u8; 4097];
     let metadata = Bytes::from_slice(&env, &meta_vec);
     let events = soroban_sdk::vec![
         &env,
@@ -1037,7 +1041,9 @@ fn test_log_event_rejects_total_events_overflow() {
     let client = AuditLedgerClient::new(&env, &contract_id);
 
     env.mock_all_auths();
-    client.initialize(&owner, &u32::MAX, &4096);
+    let mut owners = Vec::new(&env);
+    owners.push_back(owner.clone());
+    client.initialize(&owners, &u32::MAX, &4096);
     env.storage()
         .instance()
         .set(&super::DataKey::TotalEvents, &u32::MAX);
@@ -1295,8 +1301,6 @@ fn test_log_event_signed_stores_signature() {
         &submitter,
         &symbol_short!("pay"),
         &Bytes::from_slice(&env, b"data"),
-        &None,
-        &None,
         &sig_payload,
     );
     let stored = client.get_event_signature(&id);
@@ -1316,8 +1320,6 @@ fn test_log_event_signed_rejects_wrong_length() {
         &submitter,
         &symbol_short!("pay"),
         &Bytes::from_slice(&env, b"data"),
-        &None,
-        &None,
         &short_payload,
     );
 }
