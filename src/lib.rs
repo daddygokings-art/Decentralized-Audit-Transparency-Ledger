@@ -3677,3 +3677,55 @@ mod security_tests;
 
 #[cfg(test)]
 mod comprehensive_fuzz;
+
+// CBDC Integration Modules
+pub mod cbdc_types;
+pub mod cbdc_logging;
+pub mod cbdc_interop;
+pub mod cbdc_offline;
+pub mod cbdc_privacy;
+
+#[cfg(test)]
+mod cbdc_tests;
+
+use cbdc_types::*;
+use cbdc_logging::*;
+use cbdc_interop::*;
+use cbdc_offline::*;
+use cbdc_privacy::*;
+
+// SupTech Integration Modules
+pub mod suptech_types;
+pub mod suptech_feeds;
+pub mod suptech_reporting;
+pub mod suptech_api;
+pub mod suptech_rules;
+pub mod suptech_integration;
+
+#[cfg(test)]
+mod suptech_tests;
+
+use suptech_types::*;
+use suptech_feeds::*;
+use suptech_reporting::*;
+use suptech_api::*;
+use suptech_rules::*;
+use suptech_integration::*;
+
+// Regulatory Sandbox Modules
+pub mod sandbox_types;
+pub mod sandbox_mgmt;
+pub mod sandbox_env;
+pub mod sandbox_supervision;
+pub mod sandbox_innovation;
+pub mod sandbox_graduation;
+
+#[cfg(test)]
+mod sandbox_tests;
+
+use sandbox_types::*;
+use sandbox_mgmt::*;
+use sandbox_env::*;
+use sandbox_supervision::*;
+use sandbox_innovation::*;
+use sandbox_graduation::*;
