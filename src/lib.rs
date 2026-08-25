@@ -3677,3 +3677,34 @@ mod security_tests;
 
 #[cfg(test)]
 mod comprehensive_fuzz;
+
+/// Responsible Sourcing Verification Module
+/// 
+/// Provides comprehensive certification, audit, and traceability systems
+/// for precious metals, minerals, and conflict-free materials with blockchain
+/// integration for consumer claim verification.
+pub mod responsible_sourcing;
+
+/// Anti-Corruption & Anti-Bribery Compliance Module
+///
+/// Implements FCPA, UK Bribery Act, SOX, and COSO compliance framework with
+/// risk assessment, policy management, training tracking, third-party due
+/// diligence, transaction monitoring, whistleblower mechanisms, and incident
+/// reporting for comprehensive anti-corruption governance.
+pub mod anti_corruption;
+
+/// Export Controls & Sanctions Compliance Module
+///
+/// Comprehensive export controls and sanctions compliance implementing OFAC,
+/// EU sanctions, UN Security Council restrictions, and BIS regulations with
+/// denied party screening, end-use checks, license determination, re-export
+/// controls, controlled commodities tracking, and automated screening.
+pub mod export_controls;
+
+/// Trade Compliance Automation Module
+///
+/// Comprehensive trade compliance automation framework implementing HS
+/// classification, origin determination, FTA qualification, customs valuation,
+/// license management, customs broker integration, and AEO certification for
+/// streamlined cross-border trade compliance.
+pub mod trade_compliance;
