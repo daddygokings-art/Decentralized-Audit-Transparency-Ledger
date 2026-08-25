@@ -7,6 +7,11 @@ use soroban_sdk::{
     Vec,
 };
 
+pub mod supply_chain;
+pub mod digital_passport;
+pub mod carbon_credits;
+pub mod esg_reporting;
+
 /// Zero/invalid Stellar address (all zeroes) used to reject `NewOwnerIsZero`.
 const NULL_ACCOUNT: &str = "GAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAWHF";
 
@@ -3677,3 +3682,15 @@ mod security_tests;
 
 #[cfg(test)]
 mod comprehensive_fuzz;
+
+#[cfg(test)]
+mod digital_passport_tests;
+
+#[cfg(test)]
+mod carbon_credits_tests;
+
+#[cfg(test)]
+mod esg_reporting_tests;
+
+#[cfg(test)]
+mod supply_chain_tests;
