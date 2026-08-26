@@ -1,0 +1,33 @@
+version: 2
+updates:
+  - package-ecosystem: cargo
+    directory: /
+    schedule:
+      interval: weekly
+      day: monday
+    open-pull-requests-limit: 5
+    labels:
+      - "dependencies"
+      - "security"
+    reviewers:
+      - "daddygokings-art"
+    commit-message:
+      prefix: "chore(deps)"
+      prefix-development: "chore(deps)"
+      include: "scope"
+
+  - package-ecosystem: github-actions
+    directory: /
+    schedule:
+      interval: weekly
+      day: monday
+    open-pull-requests-limit: 3
+    labels:
+      - "dependencies"
+      - "github-actions"
+    reviewers:
+      - "daddygokings-art"
+    commit-message:
+      prefix: "chore(actions)"
+      prefix-development: "chore(actions)"
+      include: "scope"
