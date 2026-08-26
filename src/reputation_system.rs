@@ -185,7 +185,7 @@ impl ReputationSystem {
     pub fn get_reputation(env: Env, submitter: Address) -> ReputationScore {
         env.storage()
             .instance()
-            .get(&ReputationKey::ReputationScore(subter.clone()))
+            .get(&ReputationKey::ReputationScore(submitter.clone()))
             .unwrap_or_else(|| {
                 let config = Self::get_config(&env);
                 ReputationScore {
