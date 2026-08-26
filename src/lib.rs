@@ -2,10 +2,43 @@
 // Migration to #[contractevent] macro is deferred (issue tracked separately)
 #![allow(deprecated)]
 
+// Stablecoin reserve auditing modules
+pub mod stablecoin_reserves;
+pub mod stablecoin_reserves_impl;
+
+#[cfg(test)]
+mod stablecoin_reserves_tests;
+
+// DeFi protocol auditing modules
+pub mod defi_auditing;
+pub mod defi_auditing_impl;
+
+#[cfg(test)]
+mod defi_auditing_tests;
+
+// NFT provenance tracking modules
+pub mod nft_provenance;
+pub mod nft_provenance_impl;
+
+#[cfg(test)]
+mod nft_provenance_tests;
+
+// Tokenized asset lifecycle modules
+pub mod asset_lifecycle;
+pub mod asset_lifecycle_impl;
+
+#[cfg(test)]
+mod asset_lifecycle_tests;
+
 use soroban_sdk::{
     bytes, contract, contracterror, contractimpl, contracttype, panic_with_error, Address, Bytes, BytesN, Env, Symbol,
     Vec,
 };
+
+pub mod supply_chain;
+pub mod digital_passport;
+pub mod carbon_credits;
+pub mod esg_reporting;
 
 /// Zero/invalid Stellar address (all zeroes) used to reject `NewOwnerIsZero`.
 const NULL_ACCOUNT: &str = "GAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAWHF";
@@ -205,6 +238,74 @@ pub enum DataKey {
     TtlCleanupStats,
     /// Resume cursor for `archive_events` scans (issue #199).
     ArchiveScanCursor,
+
+    // ── Circular Economy ────────────────────────────────────────────────────
+
+    /// Material passport keyed by a 32-byte material ID.
+    MaterialPassport(BytesN<32>),
+    /// All material IDs registered (packed 32-byte chunks).
+    AllMaterialIds,
+    /// Loop events for a material, stored as a Vec<LoopEvent>.
+    MaterialLoopEvents(BytesN<32>),
+    /// Circularity snapshot keyed by ledger sequence (u32).
+    CircularitySnapshot(u32),
+    /// Total number of circularity snapshots taken.
+    CircularitySnapshotCount,
+    /// Running totals for circularity metric aggregates.
+    CircularityTotals,
+
+    // ── Lifecycle Assessment (LCA) ───────────────────────────────────────────
+
+    /// LCA profile keyed by product ID (32-byte content-addressed).
+    LcaProfile(BytesN<32>),
+    /// Phase impacts stored per (product_id, phase_discriminant).
+    LcaPhaseImpact(BytesN<32>, u32),
+    /// Finalized LCA result (aggregated across all phases).
+    LcaResult(BytesN<32>),
+    /// Normalization reference values set keyed by a short name Symbol.
+    LcaNormRef(Symbol),
+    /// Weighting scheme keyed by a short name Symbol.
+    LcaWeightingScheme(Symbol),
+    /// Uncertainty bounds (interval arithmetic) for a product's aggregated impacts.
+    LcaUncertainty(BytesN<32>),
+    /// LCA database entry keyed by a 32-byte reference ID.
+    LcaDbEntry(BytesN<32>),
+    /// Total number of LCA profiles registered.
+    LcaProfileCount,
+
+    // ── Biodiversity ─────────────────────────────────────────────────────────
+
+    /// Biodiversity impact record keyed by a 32-byte supply-chain event ID.
+    BioImpact(BytesN<32>),
+    /// Biodiversity offset record keyed by a 32-byte offset ID.
+    BioOffset(BytesN<32>),
+    /// Running global biodiversity totals (accumulator across all impact records).
+    BioTotals,
+    /// Nature-positive snapshot keyed by a 0-based ordinal.
+    BioSnapshot(u32),
+    /// Total nature-positive snapshots taken.
+    BioSnapshotCount,
+    /// Ecosystem service valuation record keyed by a 32-byte site/project ID.
+    EcoServiceRecord(BytesN<32>),
+    /// Species observation record keyed by a 32-byte observation ID.
+    SpeciesObservation(BytesN<32>),
+
+    // ── Water Footprint ───────────────────────────────────────────────────────
+
+    /// Water footprint record keyed by a 32-byte event-linked ID.
+    WaterFootprint(BytesN<32>),
+    /// Water risk assessment keyed by a 32-byte site/basin ID.
+    WaterRiskAssessment(BytesN<32>),
+    /// Water stewardship programme record keyed by a 32-byte programme ID.
+    WaterStewardship(BytesN<32>),
+    /// CDP water disclosure record keyed by a 32-byte disclosure ID.
+    WaterDisclosure(BytesN<32>),
+    /// Running global water totals (accumulator updated on every write).
+    WaterTotals,
+    /// Water snapshot keyed by a 0-based ordinal.
+    WaterSnapshot(u32),
+    /// Total water snapshots taken.
+    WaterSnapshotCount,
 }
 
 #[contracterror]
@@ -329,6 +430,140 @@ pub enum ContractError {
     /// **Common cause**: `rollback_event` called with a version number beyond the stored history length.
     /// **Resolution**: Use `get_event_history` or `get_event_version_count` to discover valid versions.
     InvalidVersion = 33,
+
+    /// **Code 34**: The material passport for this ID already exists.
+    /// **Common cause**: `register_material_passport` called twice with the same material ID.
+    /// **Resolution**: Use a unique material ID per asset.
+    MaterialPassportAlreadyExists = 34,
+
+    /// **Code 35**: No material passport found for the given material ID.
+    /// **Common cause**: Querying or recording a loop event for an unregistered material.
+    /// **Resolution**: Call `register_material_passport` first.
+    MaterialPassportNotFound = 35,
+
+    /// **Code 36**: Invalid loop event type. Must be one of: recycle, reuse, repair, remanufacture, return, dispose.
+    /// **Common cause**: Caller supplied an unrecognised loop-event-type Symbol.
+    /// **Resolution**: Use a recognised loop event type Symbol.
+    InvalidLoopEventType = 36,
+
+    /// **Code 37**: Material flow quantity must be greater than zero.
+    /// **Common cause**: A zero-weight or zero-volume quantity was submitted.
+    /// **Resolution**: Provide a positive quantity in milligrams.
+    InvalidFlowQuantity = 37,
+
+    // ── LCA errors (codes 38–46) ─────────────────────────────────────────────
+
+    /// **Code 38**: An LCA profile for this product ID already exists.
+    /// **Common cause**: `register_lca_entry` called twice with the same product ID.
+    /// **Resolution**: Use a unique product ID per functional unit.
+    LcaProfileAlreadyExists = 38,
+
+    /// **Code 39**: No LCA profile found for the given product ID.
+    /// **Common cause**: `record_phase_impact` or `finalize_lca` called before `register_lca_entry`.
+    /// **Resolution**: Call `register_lca_entry` first.
+    LcaProfileNotFound = 39,
+
+    /// **Code 40**: Invalid lifecycle phase. Must be one of the seven recognised phase Symbols.
+    /// **Common cause**: Caller supplied an unrecognised phase Symbol.
+    /// **Resolution**: Use `raw_mat`, `mfg`, `transport`, `use`, `maint`, `eol`, or `recycling`.
+    InvalidLcaPhase = 40,
+
+    /// **Code 41**: Invalid impact category index (must be 0–7).
+    /// **Common cause**: Category index out of the defined 8-category set.
+    /// **Resolution**: Use indices 0 (GWP) through 7 (LU) as defined in the LCA documentation.
+    InvalidImpactCategory = 41,
+
+    /// **Code 42**: LCA profile is already finalized; no further phase impacts may be recorded.
+    /// **Common cause**: `record_phase_impact` called after `finalize_lca`.
+    /// **Resolution**: LCA profiles are immutable once finalized.
+    LcaAlreadyFinalized = 42,
+
+    /// **Code 43**: LCA profile has not been finalized yet; result is not available.
+    /// **Common cause**: `get_lca_profile` or `get_lca_uncertainty` called before `finalize_lca`.
+    /// **Resolution**: Call `finalize_lca` to lock in the aggregated result.
+    LcaNotFinalized = 43,
+
+    /// **Code 44**: Named normalization reference set not found.
+    /// **Common cause**: `normalize_impacts` called with a name not registered via `register_norm_ref`.
+    /// **Resolution**: Register a normalization reference set first with `register_norm_ref`.
+    LcaNormRefNotFound = 44,
+
+    /// **Code 45**: Named weighting scheme not found.
+    /// **Common cause**: `apply_weighting_scheme` called with a name not registered via `register_weighting_scheme`.
+    /// **Resolution**: Register the scheme first with `register_weighting_scheme`.
+    LcaWeightingSchemeNotFound = 45,
+
+    /// **Code 46**: Named LCA database reference not found.
+    /// **Common cause**: `get_lca_db_entry` called with an ID not registered via `register_lca_db_entry`.
+    /// **Resolution**: Register the database entry first.
+    LcaDbEntryNotFound = 46,
+
+    // ── Biodiversity errors (codes 47–55) ────────────────────────────────────
+
+    /// **Code 47**: Biodiversity impact record not found for the given event ID.
+    /// **Common cause**: `get_bio_impact` called before `record_bio_impact`.
+    /// **Resolution**: Ensure the supply-chain event has been linked to a biodiversity impact record first.
+    BioImpactNotFound = 47,
+
+    /// **Code 48**: Biodiversity offset record not found.
+    /// **Common cause**: `get_bio_offset` called with an unregistered offset ID.
+    /// **Resolution**: Register the offset via `register_bio_offset`.
+    BioOffsetNotFound = 48,
+
+    /// **Code 49**: Invalid land-use type symbol.
+    /// **Common cause**: Caller supplied an unrecognised land-use-type Symbol.
+    /// **Resolution**: Use one of the recognised types: `crop`, `pasture`, `forest`,
+    ///   `urban`, `wetland`, `water`, `barren`, or `protected`.
+    InvalidLandUseType = 49,
+
+    /// **Code 50**: Invalid ecosystem service category symbol.
+    /// **Common cause**: Caller supplied an unrecognised ecosystem service category.
+    /// **Resolution**: Use one of: `provision`, `regul`, `culture`, `support`.
+    InvalidEcoServiceCat = 50,
+
+    /// **Code 51**: Land area must be greater than zero (in square metres × 10⁻⁶, i.e. m² micro-units).
+    InvalidLandArea = 51,
+
+    /// **Code 52**: Offset quantity must be greater than zero.
+    InvalidOffsetQuantity = 52,
+
+    /// **Code 53**: Offset is already fully retired; no further retirement possible.
+    OffsetAlreadyRetired = 53,
+
+    /// **Code 54**: Retirement quantity exceeds remaining available balance.
+    OffsetRetirementExceedsBalance = 54,
+
+    /// **Code 55**: Species observation record not found.
+    SpeciesObservationNotFound = 55,
+
+    // ── Water Footprint errors (codes 56–63) ─────────────────────────────────
+
+    /// **Code 56**: Water footprint record not found for the given ID.
+    /// **Common cause**: `get_water_footprint` called before `record_water_footprint`.
+    WaterFootprintNotFound = 56,
+
+    /// **Code 57**: Water risk assessment not found for the given site ID.
+    /// **Common cause**: `get_water_risk_assessment` or `record_water_footprint` with unregistered site.
+    WaterRiskNotFound = 57,
+
+    /// **Code 58**: Water stewardship programme not found.
+    WaterStewardshipNotFound = 58,
+
+    /// **Code 59**: Water disclosure record not found.
+    WaterDisclosureNotFound = 59,
+
+    /// **Code 60**: Invalid water-use sector symbol.
+    /// **Resolution**: Use one of: `agri`, `indust`, `munici`, `energy`, `mining`.
+    InvalidWaterSector = 60,
+
+    /// **Code 61**: Water volume must be greater than zero (litres × 10⁻⁶ micro-units).
+    InvalidWaterVolume = 61,
+
+    /// **Code 62**: Water scarcity factor out of range (must be 0–100_000, i.e. 0–10.000×).
+    InvalidScarcityFactor = 62,
+
+    /// **Code 63**: CDP disclosure reporting year is invalid (must be > 2000).
+    InvalidDisclosureYear = 63,
 }
 
 #[contracttype]
@@ -469,6 +704,745 @@ pub struct TtlCleanupStats {
 }
 
 // ── Additional type definitions ──────────────────────────────────────────────
+
+// ── Circular Economy types ───────────────────────────────────────────────────
+
+/// Loop event types (encoded as a u32 discriminant for compact on-chain storage).
+///
+/// | Value | Symbol      | Description                                             |
+/// |-------|-------------|----------------------------------------------------------|
+/// | 0     | `recycle`   | Material sent to recycling process                       |
+/// | 1     | `reuse`     | Item used again without transformation                   |
+/// | 2     | `repair`    | Item repaired to extend its service life                 |
+/// | 3     | `remanuf`   | Product remanufactured to original specification         |
+/// | 4     | `return`    | Item returned to manufacturer / supplier                 |
+/// | 5     | `dispose`   | Material disposed (landfill, incineration)               |
+#[contracttype]
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct LoopEvent {
+    /// Sequential position within the material's loop history.
+    pub seq: u32,
+    /// Ledger timestamp when this loop event was recorded.
+    pub timestamp: u64,
+    /// Loop type discriminant: 0=recycle, 1=reuse, 2=repair, 3=remanuf, 4=return, 5=dispose.
+    pub loop_type: u32,
+    /// Mass of material in milligrams (avoids floating-point; divide by 1_000 for grams).
+    pub quantity_mg: u64,
+    /// Address of the actor recording this event (facility, logistics provider, etc.).
+    pub actor: Address,
+    /// Optional reference to another material that this flow feeds into (e.g., recycled output).
+    pub target_material_id: Option<BytesN<32>>,
+    /// Opaque metadata (e.g., batch ID, certification reference, GPS coordinates as bytes).
+    pub metadata: Bytes,
+}
+
+/// Material passport — the on-chain identity record for a physical asset.
+///
+/// Each unique asset (product, component, batch) gets exactly one passport.
+/// The passport stores intrinsic material properties and is updated by
+/// appending `LoopEvent`s via `record_loop_event`.
+#[contracttype]
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct MaterialPassport {
+    /// Content-addressed 32-byte ID (sha256 of owner || name || initial timestamp).
+    pub id: BytesN<32>,
+    /// Human-readable material name (up to 32 ASCII bytes, encoded in Bytes).
+    pub name: Bytes,
+    /// Material category (e.g., `plastic`, `metal`, `glass`, `textile`, `organic`).
+    pub category: Symbol,
+    /// Mass of virgin material in milligrams at time of registration.
+    pub virgin_mass_mg: u64,
+    /// Recyclability score: 0–10000 basis points (100.00 % = 10000).
+    pub recyclability_bps: u32,
+    /// Address of the entity registering this passport (manufacturer / data provider).
+    pub owner: Address,
+    /// Ledger timestamp of registration.
+    pub registered_at: u64,
+    /// Total mass recycled across all loop events, in milligrams (accumulator).
+    pub total_recycled_mg: u64,
+    /// Total mass reused across all loop events, in milligrams (accumulator).
+    pub total_reused_mg: u64,
+    /// Total mass repaired (kept in service) across all loop events, in milligrams (accumulator).
+    pub total_repaired_mg: u64,
+    /// Total mass remanufactured across all loop events, in milligrams (accumulator).
+    pub total_remanufactured_mg: u64,
+    /// Total mass disposed (waste) across all loop events, in milligrams (accumulator).
+    pub total_disposed_mg: u64,
+    /// Number of loop events recorded for this material.
+    pub loop_event_count: u32,
+}
+
+/// Circularity metrics snapshot — aggregates across all registered materials.
+///
+/// Computed on demand by `compute_circularity_score` and stored on-chain
+/// indexed by ledger sequence number, giving an auditable time-series.
+#[contracttype]
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct CircularitySnapshot {
+    /// Ledger sequence number when this snapshot was taken.
+    pub ledger_seq: u32,
+    /// Ledger timestamp when this snapshot was taken.
+    pub timestamp: u64,
+    /// Total number of material passports registered.
+    pub total_materials: u32,
+    /// Total virgin mass registered across all passports, in milligrams.
+    pub total_virgin_mass_mg: u64,
+    /// Total mass that completed a circular loop (recycle + reuse + repair + remanuf), mg.
+    pub total_circular_mass_mg: u64,
+    /// Total mass disposed (linear end-of-life), mg.
+    pub total_disposed_mass_mg: u64,
+    /// Material Circularity Indicator (MCI) in basis points (0–10000).
+    ///
+    /// Formula: `mci = 10000 * total_circular_mass_mg / (total_circular_mass_mg + total_disposed_mass_mg)`
+    /// Returns 0 when no flows have been recorded yet.
+    pub mci_bps: u32,
+    /// Weighted recycling rate in basis points (recycled / total_flow).
+    pub recycling_rate_bps: u32,
+    /// Weighted reuse rate in basis points (reused / total_flow).
+    pub reuse_rate_bps: u32,
+    /// Loop closure rate: fraction of passports that have at least one non-dispose loop event.
+    pub loop_closure_rate_bps: u32,
+    /// Total number of loop events recorded across all materials.
+    pub total_loop_events: u32,
+    /// Snapshot index (0-based ordinal, matches CircularitySnapshotCount - 1 after creation).
+    pub snapshot_index: u32,
+}
+
+/// Running aggregate totals (persisted to avoid O(N) scans on every snapshot).
+#[contracttype]
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct CircularityTotals {
+    pub total_materials: u32,
+    pub total_virgin_mass_mg: u64,
+    pub total_recycled_mg: u64,
+    pub total_reused_mg: u64,
+    pub total_repaired_mg: u64,
+    pub total_remanufactured_mg: u64,
+    pub total_disposed_mg: u64,
+    pub total_loop_events: u32,
+    /// Passports that have at least one non-dispose loop event.
+    pub materials_with_closed_loop: u32,
+}
+
+// ── Lifecycle Assessment (LCA) types ────────────────────────────────────────
+
+/// Lifecycle phase discriminants.
+///
+/// | Value | Symbol      | Phase name                      |
+/// |-------|-------------|----------------------------------|
+/// | 0     | `raw_mat`   | Raw material extraction          |
+/// | 1     | `mfg`       | Manufacturing & processing       |
+/// | 2     | `transport` | Transport & distribution         |
+/// | 3     | `use`       | Use phase (operation)            |
+/// | 4     | `maint`     | Maintenance & repair             |
+/// | 5     | `eol`       | End-of-life (disposal)           |
+/// | 6     | `recycling` | Recycling / recovery             |
+///
+/// The full cradle-to-grave scope covers phases 0–5; phases 0–6 give
+/// a cradle-to-cradle (closed-loop) scope.
+pub const LCA_PHASE_COUNT: u32 = 7;
+
+/// Impact category indices (ISO 14040/14044 mid-point categories).
+///
+/// All values are stored as fixed-point integers with an implicit scale
+/// of 1 × 10⁻⁶ (micro-units), so 1 kg CO₂-eq = 1_000_000 in storage.
+///
+/// | Index | Symbol | Unit            | Description                        |
+/// |-------|--------|-----------------|------------------------------------|
+/// | 0     | GWP    | kg CO₂-eq       | Global Warming Potential           |
+/// | 1     | AP     | kg SO₂-eq       | Acidification Potential            |
+/// | 2     | EP     | kg PO₄³⁻-eq     | Eutrophication Potential           |
+/// | 3     | ODP    | kg CFC-11-eq    | Ozone Depletion Potential          |
+/// | 4     | POCP   | kg C₂H₄-eq      | Photochem. Ozone Creation Potential|
+/// | 5     | ADP    | kg Sb-eq        | Abiotic Depletion Potential        |
+/// | 6     | WU     | m³              | Water Use                          |
+/// | 7     | LU     | m² · year       | Land Use                           |
+pub const LCA_CATEGORY_COUNT: u32 = 8;
+
+/// Per-phase impact vector — one value per impact category.
+///
+/// Values are fixed-point micro-units (`i64` to allow negative credits,
+/// e.g. avoided burdens from recycling).
+#[contracttype]
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct LcaPhaseImpact {
+    /// Lifecycle phase (0–6, see `LCA_PHASE_COUNT`).
+    pub phase: u32,
+    /// Impact values indexed by category (0–7, see `LCA_CATEGORY_COUNT`).
+    /// Fixed-point: divide by 1_000_000 to get SI units.
+    /// Index 0 = GWP, 1 = AP, 2 = EP, 3 = ODP, 4 = POCP, 5 = ADP, 6 = WU, 7 = LU.
+    pub values: Vec<i64>,
+    /// Actor that submitted this phase record.
+    pub submitter: Address,
+    /// Ledger timestamp of submission.
+    pub timestamp: u64,
+    /// Optional reference to an LCA database entry ID backing this data.
+    pub db_ref: Option<BytesN<32>>,
+    /// Opaque metadata (data source, methodology version, etc.).
+    pub metadata: Bytes,
+}
+
+/// LCA profile — the on-chain header for a product's lifecycle assessment.
+///
+/// Registered once per product / functional unit. Phase impacts are added
+/// via `record_phase_impact` and locked by calling `finalize_lca`.
+#[contracttype]
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct LcaProfile {
+    /// Content-addressed 32-byte product ID.
+    pub product_id: BytesN<32>,
+    /// Human-readable product name.
+    pub name: Bytes,
+    /// Functional unit description (e.g., "1 kg of product at factory gate").
+    pub functional_unit: Bytes,
+    /// Address that registered this profile.
+    pub owner: Address,
+    /// Ledger timestamp of registration.
+    pub registered_at: u64,
+    /// Whether all phases have been submitted and the result finalized.
+    pub finalized: bool,
+    /// Bitmask of phases that have been recorded (bit i = phase i submitted).
+    pub phase_mask: u32,
+    /// Optional link to the material passport of the underlying product.
+    pub material_passport_id: Option<BytesN<32>>,
+}
+
+/// Aggregated LCA result — computed by `finalize_lca` across all recorded phases.
+///
+/// Stores both the raw totals and (optionally) normalized/weighted results
+/// after calling `normalize_impacts` and `apply_weighting_scheme`.
+#[contracttype]
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct LcaResult {
+    /// Raw aggregated impact per category (fixed-point micro-units, summed across all phases).
+    pub totals: Vec<i64>,
+    /// Normalized impact per category (totals / normalization_ref × 1_000_000), or zeros.
+    pub normalized: Vec<i64>,
+    /// Weighted single score per category (normalized × weight_bps / 10000), or zeros.
+    pub weighted: Vec<i64>,
+    /// Sum of all weighted values = single-score LCA result (micro-units).
+    pub single_score: i64,
+    /// Name of the normalization reference set used (empty = not yet normalized).
+    pub norm_ref_name: Bytes,
+    /// Name of the weighting scheme used (empty = not yet weighted).
+    pub weighting_scheme_name: Bytes,
+    /// Ledger timestamp when `finalize_lca` was called.
+    pub finalized_at: u64,
+}
+
+/// Uncertainty bounds for an LCA result, computed via interval arithmetic.
+///
+/// Each impact category carries a `[lo, hi]` interval derived from the
+/// per-phase uncertainty coefficients (see `record_phase_impact` / `finalize_lca`).
+/// The model applies a symmetric percentage uncertainty (`uncertainty_pct_bps`)
+/// from each phase, then propagates addition intervals across all phases.
+///
+/// Fixed-point: divide all values by 1_000_000 to get SI units.
+#[contracttype]
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct LcaUncertainty {
+    /// Lower bound per impact category (fixed-point micro-units).
+    pub lo: Vec<i64>,
+    /// Upper bound per impact category (fixed-point micro-units).
+    pub hi: Vec<i64>,
+    /// Coefficient of variation in basis points used globally (0 = no uncertainty).
+    pub cv_bps: u32,
+    /// Ledger timestamp when this uncertainty record was computed.
+    pub computed_at: u64,
+}
+
+/// Normalization reference set (one value per impact category).
+///
+/// Reference values represent per-person-equivalent annual burdens
+/// (e.g., CML 2016, ReCiPe H, EF 3.1). Fixed-point micro-units.
+/// A reference value of 0 for a category means "skip normalization" for that
+/// category (result stays as raw total).
+#[contracttype]
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct LcaNormRef {
+    /// Short name used as the storage key (e.g., `cml2016`).
+    pub name: Bytes,
+    /// Reference values per category, fixed-point micro-units.
+    /// Length must equal `LCA_CATEGORY_COUNT` (8).
+    pub refs: Vec<i64>,
+    /// Owner who registered this reference set.
+    pub owner: Address,
+}
+
+/// Weighting scheme (one weight in basis points per impact category).
+///
+/// Weights sum to 10000 bps (100%). Commonly used schemes:
+/// CML 2016 equal-weight, ReCiPe H, EF 3.1.
+#[contracttype]
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct LcaWeightingScheme {
+    /// Short name (e.g., `ef31`, `recipe_h`).
+    pub name: Bytes,
+    /// Weight per category in basis points. Must sum to 10000, length = 8.
+    pub weights_bps: Vec<u32>,
+    /// Owner who registered this scheme.
+    pub owner: Address,
+}
+
+/// LCA database reference entry.
+///
+/// Provides a lightweight on-chain anchor for an externally maintained LCA
+/// dataset (ecoinvent, GaBi, OpenLCA, etc.). Phase impacts recorded with a
+/// `db_ref` can be validated against this entry by off-chain consumers.
+#[contracttype]
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct LcaDbEntry {
+    /// 32-byte content-addressed ID for this database record.
+    pub id: BytesN<32>,
+    /// Database name (e.g., `ecoinvent`, `gabi`).
+    pub db_name: Bytes,
+    /// Dataset version string (e.g., `3.10`).
+    pub version: Bytes,
+    /// Activity / process name within the database.
+    pub activity: Bytes,
+    /// Geography code (e.g., `GLO`, `RER`, `US`).
+    pub geography: Bytes,
+    /// Address of the data provider who registered this entry.
+    pub provider: Address,
+    /// Ledger timestamp of registration.
+    pub registered_at: u64,
+}
+
+// ── Biodiversity types ───────────────────────────────────────────────────────
+
+/// Land-use type discriminants (IUCN / GLOBIO convention).
+///
+/// | Value | Symbol      | Description                                   |
+/// |-------|-------------|-----------------------------------------------|
+/// | 0     | `crop`      | Annual/permanent cropland                     |
+/// | 1     | `pasture`   | Managed grassland / livestock grazing         |
+/// | 2     | `forest`    | Natural or semi-natural forest                |
+/// | 3     | `urban`     | Urban / built-up area                         |
+/// | 4     | `wetland`   | Wetlands (freshwater/coastal/inland)          |
+/// | 5     | `water`     | Open water body                               |
+/// | 6     | `barren`    | Barren / rock / desert (very low biodiversity)|
+/// | 7     | `protected` | Formally protected area (IUCN PA categories)  |
+pub const BIO_LAND_USE_COUNT: u32 = 8;
+
+/// Ecosystem service category discriminants (TEEB / CICES classification).
+///
+/// | Value | Symbol     | Description                                              |
+/// |-------|------------|----------------------------------------------------------|
+/// | 0     | `provision`| Provisioning services (food, water, raw materials)       |
+/// | 1     | `regul`    | Regulating services (climate, flood, water purification) |
+/// | 2     | `culture`  | Cultural services (recreation, tourism, spiritual)       |
+/// | 3     | `support`  | Supporting services (soil formation, nutrient cycling)   |
+pub const BIO_ECO_SERVICE_COUNT: u32 = 4;
+
+/// Biodiversity impact record — linked to a supply-chain event.
+///
+/// Captures the footprint of a single operational event (site clearing,
+/// agriculture, construction, logistics) across land-use change, species
+/// richness loss, and ecosystem service degradation.
+///
+/// All area values are in **square-metre micro-units** (m² × 10⁻⁶).
+/// Species richness loss is in **MSA-hectare micro-units** (MSA·ha × 10⁻⁶),
+/// where MSA = Mean Species Abundance relative to undisturbed habitat (0–1).
+/// Ecosystem service values are in **USD-cent micro-units** (US¢ × 10⁻⁶) for
+/// the total annual loss.
+#[contracttype]
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct BioImpact {
+    /// 32-byte content-addressed ID (sha256 of event_ref || actor || timestamp).
+    pub id: BytesN<32>,
+    /// Reference to the supply-chain event driving this impact (e.g., an audit event ID).
+    pub event_ref: BytesN<32>,
+    /// Actor recording this impact (supplier, auditor, third-party assessor).
+    pub actor: Address,
+    /// Ledger timestamp of recording.
+    pub timestamp: u64,
+    /// Land-use type at the impacted site (discriminant 0–7).
+    pub land_use_type: u32,
+    /// Total land area affected in m² micro-units (> 0).
+    pub area_m2_micro: u64,
+    /// Species richness loss in MSA·ha micro-units (0 = no loss).
+    /// MSA·ha = area_ha × (1 − MSA_after / MSA_before)
+    pub msa_loss_micro: u64,
+    /// Per-ecosystem-service annual value loss in USD-cent micro-units (4 values).
+    /// Index: 0=provisioning, 1=regulating, 2=cultural, 3=supporting.
+    pub eco_service_loss: Vec<i64>,
+    /// Optional geographic coordinates encoded as UTF-8 bytes (e.g., "lat,lon" decimal string).
+    pub location: Bytes,
+    /// Optional IUCN threat category for the primary affected species/habitat.
+    /// Encoded as bytes (e.g., b"CR", b"EN", b"VU", b"NT", b"LC").
+    pub iucn_threat: Bytes,
+    /// Opaque metadata (certification reference, assessment methodology, etc.).
+    pub metadata: Bytes,
+}
+
+/// Biodiversity offset record — tracks nature-based compensation credits.
+///
+/// Supports voluntary biodiversity credits (VBCs), biodiversity net gain (BNG)
+/// units, mitigation banking credits, and any other credit scheme.
+/// All quantities are in **MSA·ha micro-units** (same scale as `BioImpact.msa_loss_micro`).
+#[contracttype]
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct BioOffset {
+    /// 32-byte content-addressed offset ID.
+    pub id: BytesN<32>,
+    /// Short name of the offset scheme (e.g., `vbc`, `bng`, `mitbank`).
+    pub scheme: Bytes,
+    /// Address of the entity that issued or registered this offset.
+    pub issuer: Address,
+    /// Total credit quantity in MSA·ha micro-units.
+    pub total_micro: u64,
+    /// Quantity retired (applied to offset actual impacts) in MSA·ha micro-units.
+    pub retired_micro: u64,
+    /// Ledger timestamp of registration.
+    pub registered_at: u64,
+    /// Expiry timestamp (0 = no expiry).
+    pub expires_at: u64,
+    /// Optional reference to a site/project whose ecosystem services back this offset.
+    pub eco_service_ref: Option<BytesN<32>>,
+    /// Opaque metadata (project location, registry URL, certificate hash, etc.).
+    pub metadata: Bytes,
+}
+
+/// Ecosystem service valuation record for a project or geographic site.
+///
+/// Provides an annual monetary valuation of the site's four service categories,
+/// enabling offset verification and nature-positive accounting.
+#[contracttype]
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct EcoServiceRecord {
+    /// 32-byte content-addressed site/project ID.
+    pub id: BytesN<32>,
+    /// Human-readable project name.
+    pub name: Bytes,
+    /// Address of the party registering this valuation.
+    pub owner: Address,
+    /// Ledger timestamp of registration.
+    pub registered_at: u64,
+    /// Total site area in m² micro-units.
+    pub area_m2_micro: u64,
+    /// Annual value per ecosystem service in USD-cent micro-units (4 values, CICES order).
+    /// Index: 0=provisioning, 1=regulating, 2=cultural, 3=supporting.
+    pub annual_values: Vec<i64>,
+    /// Land-use type at this site (discriminant 0–7).
+    pub land_use_type: u32,
+    /// Opaque metadata (SEEA reference, assessor, methodology version).
+    pub metadata: Bytes,
+}
+
+/// Species observation record — links a supply-chain event to a direct
+/// species sighting or survey result.
+#[contracttype]
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct SpeciesObservation {
+    /// 32-byte content-addressed observation ID.
+    pub id: BytesN<32>,
+    /// Reference event ID (audit log event this observation relates to).
+    pub event_ref: BytesN<32>,
+    /// Species common name (UTF-8 bytes).
+    pub species_name: Bytes,
+    /// IUCN taxonomic code or identifier (UTF-8 bytes, e.g., b"Panthera tigris").
+    pub species_code: Bytes,
+    /// IUCN Red List category bytes (e.g., b"EN").
+    pub iucn_category: Bytes,
+    /// Individual count observed (0 = presence-only record).
+    pub count: u32,
+    /// Impact type: 0=positive (sighted), 1=negative (mortality/displacement), 2=neutral.
+    pub impact_direction: u32,
+    /// Actor recording the observation.
+    pub observer: Address,
+    /// Ledger timestamp.
+    pub timestamp: u64,
+    /// Opaque metadata (survey method, GPS, photo hash, etc.).
+    pub metadata: Bytes,
+}
+
+/// Running global biodiversity totals — updated atomically on every write.
+#[contracttype]
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct BioTotals {
+    /// Total number of biodiversity impact records registered.
+    pub total_impacts: u32,
+    /// Total land area affected across all impacts, m² micro-units.
+    pub total_area_m2_micro: u64,
+    /// Total MSA·ha lost across all impacts.
+    pub total_msa_loss_micro: u64,
+    /// Total ecosystem service value lost, USD-cent micro-units (sum across all categories).
+    pub total_eco_loss_micro: i64,
+    /// Total biodiversity offset credits registered, MSA·ha micro-units.
+    pub total_offset_micro: u64,
+    /// Total offset credits retired, MSA·ha micro-units.
+    pub total_retired_micro: u64,
+    /// Total species observations recorded.
+    pub total_observations: u32,
+    /// Total ecosystem service records registered.
+    pub total_eco_records: u32,
+}
+
+/// Nature-positive snapshot — point-in-time biodiversity accounting.
+///
+/// Records the net biodiversity position (impact − offset balance) and
+/// key performance indicators for nature-positive reporting frameworks
+/// (TNFD, GBF Target 15, EU CSRD).
+#[contracttype]
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct BioSnapshot {
+    /// 0-based snapshot ordinal.
+    pub index: u32,
+    /// Ledger sequence when this snapshot was taken.
+    pub ledger_seq: u32,
+    /// Ledger timestamp.
+    pub timestamp: u64,
+    /// Total impacts recorded at snapshot time.
+    pub total_impacts: u32,
+    /// Total MSA·ha lost across all recorded impacts (micro-units).
+    pub total_msa_loss_micro: u64,
+    /// Total MSA·ha offset credits registered (micro-units).
+    pub total_offset_micro: u64,
+    /// Total MSA·ha offset credits retired (micro-units).
+    pub total_retired_micro: u64,
+    /// Net MSA position: retired_micro − total_msa_loss_micro (signed).
+    /// Positive = nature-positive; negative = net biodiversity debt.
+    pub net_msa_micro: i64,
+    /// Nature-positive indicator in basis points.
+    /// `nature_positive_bps = (retired_micro × 10_000) / total_msa_loss_micro`
+    /// Returns 10_000 (100%) when losses = 0 (no impact recorded).
+    pub nature_positive_bps: u32,
+    /// Offset coverage ratio: retired / total_msa_loss (bps, capped at 10000).
+    pub offset_coverage_bps: u32,
+    /// Total ecosystem service loss at snapshot (USD-cent micro-units).
+    pub total_eco_loss_micro: i64,
+    /// Total species observations at snapshot.
+    pub total_observations: u32,
+}
+
+// ── Water Footprint types ────────────────────────────────────────────────────
+
+/// Water-use sector discriminants (aligned with AQUASTAT / WRI Aqueduct categories).
+///
+/// | Value | Symbol   | Description                                      |
+/// |-------|----------|--------------------------------------------------|
+/// | 0     | `agri`   | Agriculture (irrigation, livestock)              |
+/// | 1     | `indust` | Industrial processes (manufacturing, chemicals)  |
+/// | 2     | `munici` | Municipal / domestic supply                      |
+/// | 3     | `energy` | Thermoelectric cooling and hydropower            |
+/// | 4     | `mining` | Mining and quarrying                             |
+pub const WATER_SECTOR_COUNT: u32 = 5;
+
+/// Water footprint record linked to a supply-chain event.
+///
+/// Tracks four complementary water accounting measures per ISO 14046 /
+/// Water Footprint Network (WFN) standard:
+///
+/// * **Blue water** — surface/groundwater consumed (irrigation, cooling, process).
+/// * **Green water** — rainwater consumed by crops or vegetation (evapotranspiration).
+/// * **Grey water** — freshwater required to dilute pollution to acceptable quality.
+/// * **Scarcity-weighted blue water** — blue water × local scarcity factor (WSI).
+///
+/// All volumes are in **litre micro-units** (L × 10⁻⁶). Divide by 1 000 000 for litres,
+/// by 1 000 000 000 for cubic metres.
+///
+/// The scarcity factor (`scarcity_factor_ppb`) is the Water Stress Index (WSI) in
+/// parts-per-billion (0 = no stress, 100 000 = maximum, i.e. 0.000–0.100 dimensionless).
+/// Scarcity-weighted volume: `blue_L_micro × scarcity_factor_ppb / 1 000 000`.
+#[contracttype]
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct WaterFootprint {
+    /// Content-addressed 32-byte ID: sha256(event_ref || actor_strkey || timestamp_le64).
+    pub id: BytesN<32>,
+    /// Reference to the originating supply-chain audit event.
+    pub event_ref: BytesN<32>,
+    /// Actor recording this footprint.
+    pub actor: Address,
+    /// Ledger timestamp.
+    pub timestamp: u64,
+    /// Water-use sector discriminant (0–4).
+    pub sector: u32,
+    /// Blue water consumed, L × 10⁻⁶.
+    pub blue_L_micro: u64,
+    /// Green water consumed, L × 10⁻⁶.
+    pub green_L_micro: u64,
+    /// Grey water footprint, L × 10⁻⁶.
+    pub grey_L_micro: u64,
+    /// Water Stress Index at source basin (0–100 000 ppb; 0 = no stress).
+    pub scarcity_factor_ppb: u32,
+    /// Scarcity-weighted blue water: blue_L_micro × scarcity_factor_ppb / 1 000 000.
+    pub scarcity_weighted_L_micro: u64,
+    /// Optional reference to the water risk assessment for the source basin.
+    pub risk_assessment_ref: Option<BytesN<32>>,
+    /// Optional reference to an active stewardship programme at this site.
+    pub stewardship_ref: Option<BytesN<32>>,
+    /// ISO 3166-1 alpha-2 country code bytes (e.g., b"IN").
+    pub country: Bytes,
+    /// HydroSHEDS / HydroBASINS basin identifier (UTF-8, e.g., b"4050017220").
+    pub basin_id: Bytes,
+    /// Opaque metadata (measurement method, data quality, etc.).
+    pub metadata: Bytes,
+}
+
+/// Water risk assessment for a geographic basin or operational site.
+///
+/// Aligned with WRI Aqueduct (overall water risk, quantity, quality, regulatory/reputational)
+/// and WWF Water Risk Filter. All scores are in basis points (0–10 000).
+#[contracttype]
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct WaterRiskAssessment {
+    /// 32-byte content-addressed site/basin ID.
+    pub id: BytesN<32>,
+    /// Human-readable site or basin name.
+    pub name: Bytes,
+    /// Address of the entity registering this assessment.
+    pub assessor: Address,
+    /// Ledger timestamp of registration.
+    pub registered_at: u64,
+    /// Overall water risk score (WRI Aqueduct composite), 0–10 000 bps.
+    pub overall_risk_bps: u32,
+    /// Quantity risk sub-score (drought, depletion, variability), 0–10 000 bps.
+    pub quantity_risk_bps: u32,
+    /// Quality risk sub-score (pollution, untreated wastewater), 0–10 000 bps.
+    pub quality_risk_bps: u32,
+    /// Regulatory & reputational risk, 0–10 000 bps.
+    pub regulatory_risk_bps: u32,
+    /// Water Stress Index (WSI) at this location (0–100 000 ppb).
+    pub wsi_ppb: u32,
+    /// Country code bytes (ISO 3166-1 alpha-2).
+    pub country: Bytes,
+    /// HydroBASINS basin ID bytes.
+    pub basin_id: Bytes,
+    /// Assessment tool/methodology reference (e.g., b"aqueduct4", b"wwf_wrf").
+    pub methodology: Bytes,
+    /// Opaque metadata.
+    pub metadata: Bytes,
+}
+
+/// Water stewardship programme record.
+///
+/// Captures participation in site-level or basin-level stewardship
+/// schemes (Alliance for Water Stewardship AWS, CEO Water Mandate, etc.).
+#[contracttype]
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct WaterStewardship {
+    /// 32-byte content-addressed programme ID.
+    pub id: BytesN<32>,
+    /// Programme name (e.g., b"aws_core", b"ceo_mandate").
+    pub programme: Bytes,
+    /// Address of the participating entity.
+    pub participant: Address,
+    /// Ledger timestamp of registration.
+    pub registered_at: u64,
+    /// Programme start date as a Unix timestamp (0 = not specified).
+    pub start_ts: u64,
+    /// Programme end / target date (0 = ongoing).
+    pub end_ts: u64,
+    /// Water reduction target in L × 10⁻⁶ (absolute target; 0 = no explicit target).
+    pub target_reduction_L_micro: u64,
+    /// Water reduction achieved to date in L × 10⁻⁶.
+    pub achieved_reduction_L_micro: u64,
+    /// Optional reference to the basin risk assessment backing this programme.
+    pub risk_assessment_ref: Option<BytesN<32>>,
+    /// Opaque metadata (certifier, audit date, certificate hash).
+    pub metadata: Bytes,
+}
+
+/// CDP Water Disclosure record.
+///
+/// Covers the key quantitative fields from CDP Water Security questionnaire
+/// (W1–W8 sections). All volumes in L × 10⁻⁶.
+#[contracttype]
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct WaterDisclosure {
+    /// 32-byte content-addressed disclosure ID.
+    pub id: BytesN<32>,
+    /// Reporting organisation address.
+    pub organisation: Address,
+    /// Calendar year of this disclosure (e.g., 2025).
+    pub reporting_year: u32,
+    /// Ledger timestamp when the disclosure was recorded.
+    pub recorded_at: u64,
+    // ── W1: Water withdrawal ──
+    /// Total freshwater withdrawal, L × 10⁻⁶ (CDP W1.2a).
+    pub total_withdrawal_L_micro: u64,
+    // ── W2: Water consumption ──
+    /// Total water consumed (not returned), L × 10⁻⁶ (CDP W2.1).
+    pub total_consumption_L_micro: u64,
+    // ── W3: Water discharge ──
+    /// Total water discharged, L × 10⁻⁶ (CDP W3.1).
+    pub total_discharge_L_micro: u64,
+    // ── W4: Water data quality ──
+    /// Percentage of water data estimated vs. metered, 0–10 000 bps (CDP W4).
+    pub estimated_data_pct_bps: u32,
+    // ── W5: Water targets ──
+    /// Absolute reduction target relative to base year, L × 10⁻⁶ (CDP W5.1).
+    pub reduction_target_L_micro: u64,
+    // ── W6: Water risks ──
+    /// Number of sites in water-stressed areas (CDP W6.2).
+    pub sites_in_stressed_areas: u32,
+    // ── W7: Accounting ──
+    /// Scarcity-weighted total water use across all recorded footprints, L × 10⁻⁶.
+    pub scarcity_weighted_total_L_micro: u64,
+    // ── W8: Targets achieved ──
+    /// Reduction achieved since base year, L × 10⁻⁶ (CDP W8.1).
+    pub reduction_achieved_L_micro: u64,
+    /// Opaque metadata (CDP submission ID, base year, etc.).
+    pub metadata: Bytes,
+}
+
+/// Running global water totals — updated atomically on every write.
+#[contracttype]
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct WaterTotals {
+    /// Total water footprint records registered.
+    pub total_footprints: u32,
+    /// Cumulative blue water consumed, L × 10⁻⁶.
+    pub total_blue_L_micro: u64,
+    /// Cumulative green water consumed, L × 10⁻⁶.
+    pub total_green_L_micro: u64,
+    /// Cumulative grey water footprint, L × 10⁻⁶.
+    pub total_grey_L_micro: u64,
+    /// Cumulative scarcity-weighted blue water, L × 10⁻⁶.
+    pub total_scarcity_weighted_L_micro: u64,
+    /// Total water risk assessments registered.
+    pub total_risk_assessments: u32,
+    /// Total stewardship programmes registered.
+    pub total_stewardship_programmes: u32,
+    /// Total CDP disclosures recorded.
+    pub total_disclosures: u32,
+}
+
+/// Water snapshot — point-in-time aggregation of water accounting metrics.
+///
+/// Created by `compute_water_snapshot`; stored on-chain for an auditable time-series.
+/// Aligns with TNFD freshwater metrics, GRI 303 (Water and Effluents),
+/// and CDP Water Security W1–W8.
+#[contracttype]
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct WaterSnapshot {
+    /// 0-based ordinal.
+    pub index: u32,
+    /// Ledger sequence at snapshot time.
+    pub ledger_seq: u32,
+    /// Ledger timestamp.
+    pub timestamp: u64,
+    /// Total footprint records at snapshot time.
+    pub total_footprints: u32,
+    /// Total blue water (L × 10⁻⁶).
+    pub total_blue_L_micro: u64,
+    /// Total green water (L × 10⁻⁶).
+    pub total_green_L_micro: u64,
+    /// Total grey water (L × 10⁻⁶).
+    pub total_grey_L_micro: u64,
+    /// Total scarcity-weighted blue water (L × 10⁻⁶).
+    pub total_scarcity_weighted_L_micro: u64,
+    /// Total water footprint (blue + green + grey), L × 10⁻⁶.
+    pub total_water_footprint_L_micro: u64,
+    /// Scarcity ratio: scarcity_weighted / blue × 10 000 (bps). 0 when no blue water.
+    pub scarcity_ratio_bps: u32,
+    /// Blue-water fraction of total footprint, bps.
+    pub blue_fraction_bps: u32,
+    /// Total risk assessments at snapshot.
+    pub total_risk_assessments: u32,
+    /// Total stewardship programmes at snapshot.
+    pub total_stewardship_programmes: u32,
+}
 
 #[contract]
 pub struct AuditLedger;
@@ -3649,6 +4623,2282 @@ impl AuditLedger {
             .get(&DataKey::DefaultNonceMaxValue)
             .unwrap_or(u32::MAX)
     }
+
+    // ── Lifecycle Assessment (LCA) ───────────────────────────────────────────
+
+    /// Decode a lifecycle phase Symbol to its 0–6 discriminant.
+    fn decode_lca_phase(env: &Env, phase: &Symbol) -> u32 {
+        let raw_mat   = Symbol::new(env, "raw_mat");
+        let mfg       = Symbol::new(env, "mfg");
+        let transport = Symbol::new(env, "transport");
+        let use_ph    = Symbol::new(env, "use");
+        let maint     = Symbol::new(env, "maint");
+        let eol       = Symbol::new(env, "eol");
+        let recycling = Symbol::new(env, "recycling");
+
+        if phase == &raw_mat   { return 0; }
+        if phase == &mfg       { return 1; }
+        if phase == &transport { return 2; }
+        if phase == &use_ph    { return 3; }
+        if phase == &maint     { return 4; }
+        if phase == &eol       { return 5; }
+        if phase == &recycling { return 6; }
+        panic_with_error!(env, ContractError::InvalidLcaPhase);
+    }
+
+    /// Build an 8-element Vec<i64> of zeros.
+    fn zero_impact_vec(env: &Env) -> Vec<i64> {
+        let mut v: Vec<i64> = Vec::new(env);
+        for _ in 0..LCA_CATEGORY_COUNT {
+            v.push_back(0i64);
+        }
+        v
+    }
+
+    /// `sha256(owner_strkey || name || functional_unit || timestamp_le64)`
+    fn compute_lca_product_id(
+        env: &Env,
+        owner: &Address,
+        name: &Bytes,
+        functional_unit: &Bytes,
+        timestamp: u64,
+    ) -> BytesN<32> {
+        let mut buf = Bytes::new(env);
+        buf.append(&owner.to_string().to_bytes());
+        buf.append(name);
+        buf.append(functional_unit);
+        buf.append(&Self::u64_to_bytes(env, timestamp));
+        env.crypto().sha256(&buf)
+    }
+
+    /// `sha256(db_name || version || activity || geography || timestamp_le64)`
+    fn compute_lca_db_id(
+        env: &Env,
+        db_name: &Bytes,
+        version: &Bytes,
+        activity: &Bytes,
+        geography: &Bytes,
+        timestamp: u64,
+    ) -> BytesN<32> {
+        let mut buf = Bytes::new(env);
+        buf.append(db_name);
+        buf.append(version);
+        buf.append(activity);
+        buf.append(geography);
+        buf.append(&Self::u64_to_bytes(env, timestamp));
+        env.crypto().sha256(&buf)
+    }
+
+    /// Register an LCA profile for a product / functional unit.
+    ///
+    /// # Returns
+    /// 32-byte content-addressed product ID.
+    ///
+    /// # Errors
+    /// * `LcaProfileAlreadyExists (38)`, `MaterialPassportNotFound (35)`.
+    pub fn register_lca_entry(
+        env: Env,
+        caller: Address,
+        name: Bytes,
+        functional_unit: Bytes,
+        material_passport_id: Option<BytesN<32>>,
+    ) -> BytesN<32> {
+        Self::require_initialized(&env);
+        caller.require_auth();
+
+        if let Some(ref mpid) = material_passport_id {
+            if !env.storage().instance().has(&DataKey::MaterialPassport(mpid.clone())) {
+                panic_with_error!(&env, ContractError::MaterialPassportNotFound);
+            }
+        }
+
+        let timestamp = env.ledger().timestamp();
+        let product_id =
+            Self::compute_lca_product_id(&env, &caller, &name, &functional_unit, timestamp);
+
+        if env.storage().instance().has(&DataKey::LcaProfile(product_id.clone())) {
+            panic_with_error!(&env, ContractError::LcaProfileAlreadyExists);
+        }
+
+        let profile = LcaProfile {
+            product_id: product_id.clone(),
+            name,
+            functional_unit,
+            owner: caller,
+            registered_at: timestamp,
+            finalized: false,
+            phase_mask: 0,
+            material_passport_id,
+        };
+
+        env.storage()
+            .instance()
+            .set(&DataKey::LcaProfile(product_id.clone()), &profile);
+
+        let count: u32 = env
+            .storage()
+            .instance()
+            .get(&DataKey::LcaProfileCount)
+            .unwrap_or(0u32);
+        env.storage()
+            .instance()
+            .set(&DataKey::LcaProfileCount, &count.saturating_add(1));
+
+        env.events().publish(
+            (Symbol::new(&env, "lca"), Symbol::new(&env, "registered")),
+            product_id.clone(),
+        );
+
+        product_id
+    }
+
+    /// Record per-phase environmental impacts.
+    ///
+    /// `impacts` must be exactly 8 `i64` values (fixed-point micro-units, one per
+    /// impact category). Negative values encode avoided burdens.
+    /// `cv_bps` is the symmetric coefficient of variation for uncertainty (0–10000).
+    ///
+    /// # Errors
+    /// * `LcaProfileNotFound (39)`, `LcaAlreadyFinalized (42)`, `CallerNotOwner (1)`,
+    ///   `InvalidLcaPhase (40)`, `InvalidImpactCategory (41)`, `LcaDbEntryNotFound (46)`.
+    pub fn record_phase_impact(
+        env: Env,
+        caller: Address,
+        product_id: BytesN<32>,
+        phase: Symbol,
+        impacts: Vec<i64>,
+        cv_bps: u32,
+        db_ref: Option<BytesN<32>>,
+        metadata: Bytes,
+    ) {
+        Self::require_initialized(&env);
+        caller.require_auth();
+
+        let mut profile: LcaProfile = env
+            .storage()
+            .instance()
+            .get(&DataKey::LcaProfile(product_id.clone()))
+            .unwrap_or_else(|| panic_with_error!(&env, ContractError::LcaProfileNotFound));
+
+        if profile.finalized {
+            panic_with_error!(&env, ContractError::LcaAlreadyFinalized);
+        }
+        if profile.owner != caller {
+            panic_with_error!(&env, ContractError::CallerNotOwner);
+        }
+
+        let phase_disc = Self::decode_lca_phase(&env, &phase);
+
+        if impacts.len() != LCA_CATEGORY_COUNT {
+            panic_with_error!(&env, ContractError::InvalidImpactCategory);
+        }
+
+        if let Some(ref db_id) = db_ref {
+            if !env.storage().instance().has(&DataKey::LcaDbEntry(db_id.clone())) {
+                panic_with_error!(&env, ContractError::LcaDbEntryNotFound);
+            }
+        }
+
+        let phase_impact = LcaPhaseImpact {
+            phase: phase_disc,
+            values: impacts,
+            submitter: caller,
+            timestamp: env.ledger().timestamp(),
+            db_ref,
+            metadata,
+        };
+
+        env.storage()
+            .instance()
+            .set(&DataKey::LcaPhaseImpact(product_id.clone(), phase_disc), &phase_impact);
+
+        profile.phase_mask |= 1 << phase_disc;
+        env.storage()
+            .instance()
+            .set(&DataKey::LcaProfile(product_id.clone()), &profile);
+
+        // Persist per-phase cv_bps in a scratch Vec<i64> (LCA_PHASE_COUNT slots).
+        // finalize_lca reads this for interval arithmetic.
+        let unc_key = DataKey::LcaUncertainty(product_id.clone());
+        let mut phase_cvs: Vec<i64> = env
+            .storage()
+            .instance()
+            .get::<_, Vec<i64>>(&unc_key)
+            .unwrap_or_else(|| {
+                let mut v: Vec<i64> = Vec::new(&env);
+                for _ in 0..LCA_PHASE_COUNT {
+                    v.push_back(0i64);
+                }
+                v
+            });
+        phase_cvs.set(phase_disc, cv_bps as i64);
+        env.storage().instance().set(&unc_key, &phase_cvs);
+
+        env.events().publish(
+            (Symbol::new(&env, "lca"), Symbol::new(&env, "phase_impact")),
+            (product_id, phase, cv_bps),
+        );
+    }
+
+    /// Aggregate all phase impacts, propagate interval uncertainty, and lock the profile.
+    ///
+    /// Uncertainty propagation (per category, per phase p with value `v` and `cv_bps`):
+    /// ```text
+    /// delta   = |v| × cv_bps / 10_000
+    /// lo[cat] += v − delta        (accumulated as sum of phase-level lower bounds)
+    /// hi[cat] += v + delta        (accumulated as sum of phase-level upper bounds)
+    /// ```
+    ///
+    /// # Errors
+    /// * `LcaProfileNotFound (39)`, `LcaAlreadyFinalized (42)`, `CallerNotOwner (1)`.
+    pub fn finalize_lca(env: Env, caller: Address, product_id: BytesN<32>) -> LcaResult {
+        Self::require_initialized(&env);
+        caller.require_auth();
+
+        let mut profile: LcaProfile = env
+            .storage()
+            .instance()
+            .get(&DataKey::LcaProfile(product_id.clone()))
+            .unwrap_or_else(|| panic_with_error!(&env, ContractError::LcaProfileNotFound));
+
+        if profile.finalized {
+            panic_with_error!(&env, ContractError::LcaAlreadyFinalized);
+        }
+        if profile.owner != caller {
+            panic_with_error!(&env, ContractError::CallerNotOwner);
+        }
+
+        let mut totals  = Self::zero_impact_vec(&env);
+        let mut unc_lo  = Self::zero_impact_vec(&env);
+        let mut unc_hi  = Self::zero_impact_vec(&env);
+
+        let phase_cvs: Vec<i64> = env
+            .storage()
+            .instance()
+            .get::<_, Vec<i64>>(&DataKey::LcaUncertainty(product_id.clone()))
+            .unwrap_or_else(|| {
+                let mut v: Vec<i64> = Vec::new(&env);
+                for _ in 0..LCA_PHASE_COUNT {
+                    v.push_back(0i64);
+                }
+                v
+            });
+
+        let mut cv_sum: u32 = 0;
+        let mut phase_count: u32 = 0;
+
+        for p in 0..LCA_PHASE_COUNT {
+            let key = DataKey::LcaPhaseImpact(product_id.clone(), p);
+            if let Some(pi) = env.storage().instance().get::<_, LcaPhaseImpact>(&key) {
+                let cv = phase_cvs.get(p).unwrap_or(0) as u32;
+                cv_sum = cv_sum.saturating_add(cv);
+                phase_count += 1;
+
+                for cat in 0..LCA_CATEGORY_COUNT {
+                    let val: i64 = pi.values.get(cat).unwrap_or(0);
+                    let cur: i64 = totals.get(cat).unwrap_or(0);
+                    totals.set(cat, cur.saturating_add(val));
+
+                    let delta = (val.unsigned_abs() as u128)
+                        .saturating_mul(cv as u128)
+                        / 10_000;
+                    let d = delta.min(i64::MAX as u128) as i64;
+
+                    unc_lo.set(cat, unc_lo.get(cat).unwrap_or(0)
+                        .saturating_add(val.saturating_sub(d)));
+                    unc_hi.set(cat, unc_hi.get(cat).unwrap_or(0)
+                        .saturating_add(val.saturating_add(d)));
+                }
+            }
+        }
+
+        let avg_cv = if phase_count > 0 { cv_sum / phase_count } else { 0 };
+
+        let result = LcaResult {
+            totals,
+            normalized: Self::zero_impact_vec(&env),
+            weighted:   Self::zero_impact_vec(&env),
+            single_score: 0,
+            norm_ref_name: Bytes::new(&env),
+            weighting_scheme_name: Bytes::new(&env),
+            finalized_at: env.ledger().timestamp(),
+        };
+
+        env.storage()
+            .instance()
+            .set(&DataKey::LcaResult(product_id.clone()), &result);
+
+        let uncertainty = LcaUncertainty {
+            lo: unc_lo,
+            hi: unc_hi,
+            cv_bps: avg_cv,
+            computed_at: env.ledger().timestamp(),
+        };
+        env.storage()
+            .instance()
+            .set(&DataKey::LcaUncertainty(product_id.clone()), &uncertainty);
+
+        profile.finalized = true;
+        env.storage()
+            .instance()
+            .set(&DataKey::LcaProfile(product_id.clone()), &profile);
+
+        env.events().publish(
+            (Symbol::new(&env, "lca"), Symbol::new(&env, "finalized")),
+            product_id,
+        );
+
+        result
+    }
+
+    /// Retrieve a registered LCA profile header.
+    ///
+    /// # Errors
+    /// * `LcaProfileNotFound (39)`
+    pub fn get_lca_profile(env: Env, product_id: BytesN<32>) -> LcaProfile {
+        Self::require_initialized(&env);
+        env.storage()
+            .instance()
+            .get(&DataKey::LcaProfile(product_id.clone()))
+            .unwrap_or_else(|| panic_with_error!(&env, ContractError::LcaProfileNotFound))
+    }
+
+    /// Retrieve the aggregated LCA result for a finalized profile.
+    ///
+    /// # Errors
+    /// * `LcaProfileNotFound (39)`, `LcaNotFinalized (43)`.
+    pub fn get_lca_result(env: Env, product_id: BytesN<32>) -> LcaResult {
+        Self::require_initialized(&env);
+        let profile: LcaProfile = env
+            .storage()
+            .instance()
+            .get(&DataKey::LcaProfile(product_id.clone()))
+            .unwrap_or_else(|| panic_with_error!(&env, ContractError::LcaProfileNotFound));
+        if !profile.finalized {
+            panic_with_error!(&env, ContractError::LcaNotFinalized);
+        }
+        env.storage()
+            .instance()
+            .get(&DataKey::LcaResult(product_id))
+            .unwrap_or_else(|| panic_with_error!(&env, ContractError::LcaNotFinalized))
+    }
+
+    /// Normalize LCA totals against a registered reference set.
+    ///
+    /// `normalized[cat] = (totals[cat] × 1_000_000) / refs[cat]`  (or `totals[cat]` if ref = 0)
+    ///
+    /// # Errors
+    /// * `LcaProfileNotFound (39)`, `LcaNotFinalized (43)`, `LcaNormRefNotFound (44)`,
+    ///   `CallerNotOwner (1)`.
+    pub fn normalize_impacts(
+        env: Env,
+        caller: Address,
+        product_id: BytesN<32>,
+        norm_ref_name: Symbol,
+    ) -> LcaResult {
+        Self::require_initialized(&env);
+        caller.require_auth();
+
+        let profile: LcaProfile = env
+            .storage()
+            .instance()
+            .get(&DataKey::LcaProfile(product_id.clone()))
+            .unwrap_or_else(|| panic_with_error!(&env, ContractError::LcaProfileNotFound));
+        if !profile.finalized {
+            panic_with_error!(&env, ContractError::LcaNotFinalized);
+        }
+        if profile.owner != caller {
+            panic_with_error!(&env, ContractError::CallerNotOwner);
+        }
+
+        let norm: LcaNormRef = env
+            .storage()
+            .instance()
+            .get(&DataKey::LcaNormRef(norm_ref_name.clone()))
+            .unwrap_or_else(|| panic_with_error!(&env, ContractError::LcaNormRefNotFound));
+
+        let mut result: LcaResult = env
+            .storage()
+            .instance()
+            .get(&DataKey::LcaResult(product_id.clone()))
+            .unwrap_or_else(|| panic_with_error!(&env, ContractError::LcaNotFinalized));
+
+        let mut normalized: Vec<i64> = Vec::new(&env);
+        for cat in 0..LCA_CATEGORY_COUNT {
+            let total: i64 = result.totals.get(cat).unwrap_or(0);
+            let ref_val: i64 = norm.refs.get(cat).unwrap_or(0);
+            let norm_val: i64 = if ref_val != 0 {
+                ((total as i128).saturating_mul(1_000_000) / ref_val as i128)
+                    .min(i64::MAX as i128)
+                    .max(i64::MIN as i128) as i64
+            } else {
+                total
+            };
+            normalized.push_back(norm_val);
+        }
+
+        result.normalized = normalized;
+        result.norm_ref_name = norm.name;
+        env.storage()
+            .instance()
+            .set(&DataKey::LcaResult(product_id.clone()), &result);
+
+        env.events().publish(
+            (Symbol::new(&env, "lca"), Symbol::new(&env, "normalized")),
+            (product_id, norm_ref_name),
+        );
+
+        result
+    }
+
+    /// Apply a weighting scheme to produce a single score.
+    ///
+    /// `weighted[cat] = (normalized[cat] × weights_bps[cat]) / 10_000`
+    /// `single_score  = Σ weighted[cat]`
+    ///
+    /// # Errors
+    /// * `LcaProfileNotFound (39)`, `LcaNotFinalized (43)`,
+    ///   `LcaWeightingSchemeNotFound (45)`, `CallerNotOwner (1)`.
+    pub fn apply_weighting_scheme(
+        env: Env,
+        caller: Address,
+        product_id: BytesN<32>,
+        weighting_scheme_name: Symbol,
+    ) -> LcaResult {
+        Self::require_initialized(&env);
+        caller.require_auth();
+
+        let profile: LcaProfile = env
+            .storage()
+            .instance()
+            .get(&DataKey::LcaProfile(product_id.clone()))
+            .unwrap_or_else(|| panic_with_error!(&env, ContractError::LcaProfileNotFound));
+        if !profile.finalized {
+            panic_with_error!(&env, ContractError::LcaNotFinalized);
+        }
+        if profile.owner != caller {
+            panic_with_error!(&env, ContractError::CallerNotOwner);
+        }
+
+        let scheme: LcaWeightingScheme = env
+            .storage()
+            .instance()
+            .get(&DataKey::LcaWeightingScheme(weighting_scheme_name.clone()))
+            .unwrap_or_else(|| {
+                panic_with_error!(&env, ContractError::LcaWeightingSchemeNotFound)
+            });
+
+        let mut result: LcaResult = env
+            .storage()
+            .instance()
+            .get(&DataKey::LcaResult(product_id.clone()))
+            .unwrap_or_else(|| panic_with_error!(&env, ContractError::LcaNotFinalized));
+
+        let mut weighted: Vec<i64> = Vec::new(&env);
+        let mut single_score: i64 = 0;
+
+        for cat in 0..LCA_CATEGORY_COUNT {
+            let norm_val: i64 = result.normalized.get(cat).unwrap_or(0);
+            let w_bps: u32 = scheme.weights_bps.get(cat).unwrap_or(0);
+            let w_val: i64 = ((norm_val as i128).saturating_mul(w_bps as i128) / 10_000)
+                .min(i64::MAX as i128)
+                .max(i64::MIN as i128) as i64;
+            weighted.push_back(w_val);
+            single_score = single_score.saturating_add(w_val);
+        }
+
+        result.weighted = weighted;
+        result.single_score = single_score;
+        result.weighting_scheme_name = scheme.name;
+        env.storage()
+            .instance()
+            .set(&DataKey::LcaResult(product_id.clone()), &result);
+
+        env.events().publish(
+            (Symbol::new(&env, "lca"), Symbol::new(&env, "weighted")),
+            (product_id, weighting_scheme_name, single_score),
+        );
+
+        result
+    }
+
+    /// Retrieve uncertainty bounds for a finalized LCA profile.
+    ///
+    /// # Errors
+    /// * `LcaProfileNotFound (39)`, `LcaNotFinalized (43)`.
+    pub fn get_lca_uncertainty(env: Env, product_id: BytesN<32>) -> LcaUncertainty {
+        Self::require_initialized(&env);
+        let profile: LcaProfile = env
+            .storage()
+            .instance()
+            .get(&DataKey::LcaProfile(product_id.clone()))
+            .unwrap_or_else(|| panic_with_error!(&env, ContractError::LcaProfileNotFound));
+        if !profile.finalized {
+            panic_with_error!(&env, ContractError::LcaNotFinalized);
+        }
+        env.storage()
+            .instance()
+            .get(&DataKey::LcaUncertainty(product_id))
+            .unwrap_or_else(|| panic_with_error!(&env, ContractError::LcaNotFinalized))
+    }
+
+    /// Return the finalized `LcaResult` for a product (convenience alias for `get_lca_result`).
+    ///
+    /// # Errors
+    /// * `LcaProfileNotFound (39)`, `LcaNotFinalized (43)`.
+    pub fn compute_lca_summary(env: Env, product_id: BytesN<32>) -> LcaResult {
+        Self::require_initialized(&env);
+        let profile: LcaProfile = env
+            .storage()
+            .instance()
+            .get(&DataKey::LcaProfile(product_id.clone()))
+            .unwrap_or_else(|| panic_with_error!(&env, ContractError::LcaProfileNotFound));
+        if !profile.finalized {
+            panic_with_error!(&env, ContractError::LcaNotFinalized);
+        }
+        env.storage()
+            .instance()
+            .get(&DataKey::LcaResult(product_id))
+            .unwrap_or_else(|| panic_with_error!(&env, ContractError::LcaNotFinalized))
+    }
+
+    // ── LCA Database integration ─────────────────────────────────────────────
+
+    /// Register an LCA database reference entry (any authenticated caller).
+    ///
+    /// # Returns
+    /// Content-addressed 32-byte entry ID.
+    pub fn register_lca_db_entry(
+        env: Env,
+        caller: Address,
+        db_name: Bytes,
+        version: Bytes,
+        activity: Bytes,
+        geography: Bytes,
+    ) -> BytesN<32> {
+        Self::require_initialized(&env);
+        caller.require_auth();
+
+        let timestamp = env.ledger().timestamp();
+        let id = Self::compute_lca_db_id(
+            &env, &db_name, &version, &activity, &geography, timestamp,
+        );
+
+        let entry = LcaDbEntry {
+            id: id.clone(),
+            db_name,
+            version,
+            activity,
+            geography,
+            provider: caller,
+            registered_at: timestamp,
+        };
+
+        env.storage()
+            .instance()
+            .set(&DataKey::LcaDbEntry(id.clone()), &entry);
+
+        env.events().publish(
+            (Symbol::new(&env, "lca"), Symbol::new(&env, "db_entry")),
+            id.clone(),
+        );
+
+        id
+    }
+
+    /// Retrieve a registered LCA database entry.
+    ///
+    /// # Errors
+    /// * `LcaDbEntryNotFound (46)`
+    pub fn get_lca_db_entry(env: Env, entry_id: BytesN<32>) -> LcaDbEntry {
+        Self::require_initialized(&env);
+        env.storage()
+            .instance()
+            .get(&DataKey::LcaDbEntry(entry_id))
+            .unwrap_or_else(|| panic_with_error!(&env, ContractError::LcaDbEntryNotFound))
+    }
+
+    // ── Normalization references & weighting schemes ─────────────────────────
+
+    /// Register a normalization reference set (owner-only).
+    ///
+    /// `refs` must contain exactly 8 `i64` values (micro-units). A zero ref value
+    /// means "skip normalization" for that category.
+    ///
+    /// # Errors
+    /// * `CallerNotOwner (1)`, `InvalidImpactCategory (41)`.
+    pub fn register_norm_ref(
+        env: Env,
+        caller: Address,
+        name: Symbol,
+        refs: Vec<i64>,
+    ) {
+        Self::require_initialized(&env);
+        Self::require_owner(&env, &caller);
+
+        if refs.len() != LCA_CATEGORY_COUNT {
+            panic_with_error!(&env, ContractError::InvalidImpactCategory);
+        }
+
+        let name_bytes = name.to_string().to_bytes();
+        let norm = LcaNormRef {
+            name: name_bytes,
+            refs,
+            owner: caller,
+        };
+
+        env.storage()
+            .instance()
+            .set(&DataKey::LcaNormRef(name), &norm);
+    }
+
+    /// Register a weighting scheme (owner-only).
+    ///
+    /// `weights_bps` must contain exactly 8 `u32` values in basis points.
+    ///
+    /// # Errors
+    /// * `CallerNotOwner (1)`, `InvalidImpactCategory (41)`.
+    pub fn register_weighting_scheme(
+        env: Env,
+        caller: Address,
+        name: Symbol,
+        weights_bps: Vec<u32>,
+    ) {
+        Self::require_initialized(&env);
+        Self::require_owner(&env, &caller);
+
+        if weights_bps.len() != LCA_CATEGORY_COUNT {
+            panic_with_error!(&env, ContractError::InvalidImpactCategory);
+        }
+
+        let name_bytes = name.to_string().to_bytes();
+        let scheme = LcaWeightingScheme {
+            name: name_bytes,
+            weights_bps,
+            owner: caller,
+        };
+
+        env.storage()
+            .instance()
+            .set(&DataKey::LcaWeightingScheme(name), &scheme);
+    }
+
+    /// Return the total number of LCA profiles registered.
+    pub fn lca_profile_count(env: Env) -> u32 {
+        env.storage()
+            .instance()
+            .get(&DataKey::LcaProfileCount)
+            .unwrap_or(0)
+    }
+
+    // ── Circular Economy ────────────────────────────────────────────────────
+
+    /// Validate and decode a loop type symbol to its u32 discriminant.
+    ///
+    /// Accepted values: `recycle`(0), `reuse`(1), `repair`(2), `remanuf`(3), `return`(4), `dispose`(5).
+    fn decode_loop_type(env: &Env, loop_type: &Symbol) -> u32 {
+        let recycle   = Symbol::new(env, "recycle");
+        let reuse     = Symbol::new(env, "reuse");
+        let repair    = Symbol::new(env, "repair");
+        let remanuf   = Symbol::new(env, "remanuf");
+        let ret       = Symbol::new(env, "return");
+        let dispose   = Symbol::new(env, "dispose");
+
+        if loop_type == &recycle  { return 0; }
+        if loop_type == &reuse    { return 1; }
+        if loop_type == &repair   { return 2; }
+        if loop_type == &remanuf  { return 3; }
+        if loop_type == &ret      { return 4; }
+        if loop_type == &dispose  { return 5; }
+        panic_with_error!(env, ContractError::InvalidLoopEventType);
+    }
+
+    /// Compute a deterministic 32-byte material passport ID.
+    ///
+    /// `sha256(owner_strkey_bytes || name || timestamp_le_bytes)`
+    fn compute_passport_id(env: &Env, owner: &Address, name: &Bytes, timestamp: u64) -> BytesN<32> {
+        let mut buf = Bytes::new(env);
+        // owner as strkey string bytes — same encoding as compute_event_id
+        buf.append(&owner.to_string().to_bytes());
+        buf.append(name);
+        let ts_bytes = Bytes::from_array(env, &[
+            (timestamp        & 0xff) as u8,
+            ((timestamp >> 8)  & 0xff) as u8,
+            ((timestamp >> 16) & 0xff) as u8,
+            ((timestamp >> 24) & 0xff) as u8,
+            ((timestamp >> 32) & 0xff) as u8,
+            ((timestamp >> 40) & 0xff) as u8,
+            ((timestamp >> 48) & 0xff) as u8,
+            ((timestamp >> 56) & 0xff) as u8,
+        ]);
+        buf.append(&ts_bytes);
+        env.crypto().sha256(&buf)
+    }
+
+    /// Load or default-construct the global circularity totals.
+    fn load_circularity_totals(env: &Env) -> CircularityTotals {
+        env.storage()
+            .instance()
+            .get(&DataKey::CircularityTotals)
+            .unwrap_or(CircularityTotals {
+                total_materials: 0,
+                total_virgin_mass_mg: 0,
+                total_recycled_mg: 0,
+                total_reused_mg: 0,
+                total_repaired_mg: 0,
+                total_remanufactured_mg: 0,
+                total_disposed_mg: 0,
+                total_loop_events: 0,
+                materials_with_closed_loop: 0,
+            })
+    }
+
+    /// Register a new material passport on-chain.
+    ///
+    /// # Arguments
+    /// * `caller`           — Must authenticate; becomes the passport owner.
+    /// * `name`             — Human-readable asset name (≤ 128 bytes).
+    /// * `category`         — Material category Symbol (e.g. `plastic`, `metal`).
+    /// * `virgin_mass_mg`   — Mass of virgin material in milligrams at time of registration.
+    /// * `recyclability_bps`— Recyclability rating 0–10000 (basis points = percent × 100).
+    ///
+    /// # Returns
+    /// The 32-byte content-addressed passport ID.
+    ///
+    /// # Errors
+    /// * `ContractNotInitialized` — Contract not yet initialised.
+    /// * `MaterialPassportAlreadyExists` — A passport with the derived ID already exists
+    ///   (astronomically unlikely in practice due to sha256 pre-image resistance).
+    /// * `InvalidFlowQuantity` — `virgin_mass_mg` is zero.
+    pub fn register_material_passport(
+        env: Env,
+        caller: Address,
+        name: Bytes,
+        category: Symbol,
+        virgin_mass_mg: u64,
+        recyclability_bps: u32,
+    ) -> BytesN<32> {
+        Self::require_initialized(&env);
+        caller.require_auth();
+
+        if virgin_mass_mg == 0 {
+            panic_with_error!(&env, ContractError::InvalidFlowQuantity);
+        }
+        if recyclability_bps > 10_000 {
+            panic_with_error!(&env, ContractError::InvalidFlowQuantity);
+        }
+
+        let timestamp = env.ledger().timestamp();
+        let id = Self::compute_passport_id(&env, &caller, &name, timestamp);
+
+        if env.storage().instance().has(&DataKey::MaterialPassport(id.clone())) {
+            panic_with_error!(&env, ContractError::MaterialPassportAlreadyExists);
+        }
+
+        let passport = MaterialPassport {
+            id: id.clone(),
+            name,
+            category,
+            virgin_mass_mg,
+            recyclability_bps,
+            owner: caller,
+            registered_at: timestamp,
+            total_recycled_mg: 0,
+            total_reused_mg: 0,
+            total_repaired_mg: 0,
+            total_remanufactured_mg: 0,
+            total_disposed_mg: 0,
+            loop_event_count: 0,
+        };
+
+        env.storage()
+            .instance()
+            .set(&DataKey::MaterialPassport(id.clone()), &passport);
+
+        // Initialise empty loop event list
+        let empty: Vec<LoopEvent> = Vec::new(&env);
+        env.storage()
+            .instance()
+            .set(&DataKey::MaterialLoopEvents(id.clone()), &empty);
+
+        // Update global totals
+        let mut totals = Self::load_circularity_totals(&env);
+        totals.total_materials = totals.total_materials.saturating_add(1);
+        totals.total_virgin_mass_mg = totals.total_virgin_mass_mg.saturating_add(virgin_mass_mg);
+        env.storage()
+            .instance()
+            .set(&DataKey::CircularityTotals, &totals);
+
+        // Emit Soroban event for indexers
+        env.events().publish(
+            (Symbol::new(&env, "circular"), Symbol::new(&env, "passport_reg")),
+            id.clone(),
+        );
+
+        id
+    }
+
+    /// Retrieve a material passport by its ID.
+    ///
+    /// # Errors
+    /// * `MaterialPassportNotFound` — No passport registered with this ID.
+    pub fn get_material_passport(env: Env, material_id: BytesN<32>) -> MaterialPassport {
+        Self::require_initialized(&env);
+        env.storage()
+            .instance()
+            .get(&DataKey::MaterialPassport(material_id.clone()))
+            .unwrap_or_else(|| panic_with_error!(&env, ContractError::MaterialPassportNotFound))
+    }
+
+    /// Record a circular economy loop event for a registered material.
+    ///
+    /// # Arguments
+    /// * `caller`             — Must authenticate; the actor performing the loop action.
+    /// * `material_id`        — 32-byte ID of the target material passport.
+    /// * `loop_type`          — Symbol: `recycle`, `reuse`, `repair`, `remanuf`, `return`, or `dispose`.
+    /// * `quantity_mg`        — Mass involved in this event (milligrams > 0).
+    /// * `target_material_id` — Optional output material passport ID (e.g. recycled into a new product).
+    /// * `metadata`           — Opaque bytes (batch refs, certificates, sensor data, etc.).
+    ///
+    /// # Returns
+    /// Sequential index of this loop event within the material's history (0-based).
+    ///
+    /// # Errors
+    /// * `MaterialPassportNotFound` — `material_id` not registered.
+    /// * `InvalidLoopEventType`     — `loop_type` not one of the six recognised values.
+    /// * `InvalidFlowQuantity`      — `quantity_mg` is zero.
+    pub fn record_loop_event(
+        env: Env,
+        caller: Address,
+        material_id: BytesN<32>,
+        loop_type: Symbol,
+        quantity_mg: u64,
+        target_material_id: Option<BytesN<32>>,
+        metadata: Bytes,
+    ) -> u32 {
+        Self::require_initialized(&env);
+        caller.require_auth();
+
+        if quantity_mg == 0 {
+            panic_with_error!(&env, ContractError::InvalidFlowQuantity);
+        }
+
+        let loop_discriminant = Self::decode_loop_type(&env, &loop_type);
+
+        let mut passport: MaterialPassport = env
+            .storage()
+            .instance()
+            .get(&DataKey::MaterialPassport(material_id.clone()))
+            .unwrap_or_else(|| panic_with_error!(&env, ContractError::MaterialPassportNotFound));
+
+        let timestamp = env.ledger().timestamp();
+        let seq = passport.loop_event_count;
+
+        let loop_event = LoopEvent {
+            seq,
+            timestamp,
+            loop_type: loop_discriminant,
+            quantity_mg,
+            actor: caller,
+            target_material_id: target_material_id.clone(),
+            metadata,
+        };
+
+        // Append to material loop events
+        let mut events: Vec<LoopEvent> = env
+            .storage()
+            .instance()
+            .get(&DataKey::MaterialLoopEvents(material_id.clone()))
+            .unwrap_or_else(|| Vec::new(&env));
+        events.push_back(loop_event);
+        env.storage()
+            .instance()
+            .set(&DataKey::MaterialLoopEvents(material_id.clone()), &events);
+
+        // Update passport accumulators
+        let had_loop_before = passport.loop_event_count > 0 ||
+            passport.total_recycled_mg > 0 ||
+            passport.total_reused_mg > 0 ||
+            passport.total_repaired_mg > 0 ||
+            passport.total_remanufactured_mg > 0;
+
+        match loop_discriminant {
+            0 => passport.total_recycled_mg = passport.total_recycled_mg.saturating_add(quantity_mg),
+            1 => passport.total_reused_mg = passport.total_reused_mg.saturating_add(quantity_mg),
+            2 => passport.total_repaired_mg = passport.total_repaired_mg.saturating_add(quantity_mg),
+            3 => passport.total_remanufactured_mg = passport.total_remanufactured_mg.saturating_add(quantity_mg),
+            5 => passport.total_disposed_mg = passport.total_disposed_mg.saturating_add(quantity_mg),
+            _ => {} // 4 = return: no mass accumulator, tracked only as loop event
+        }
+        passport.loop_event_count = passport.loop_event_count.saturating_add(1);
+        env.storage()
+            .instance()
+            .set(&DataKey::MaterialPassport(material_id.clone()), &passport);
+
+        // Update global totals
+        let mut totals = Self::load_circularity_totals(&env);
+        totals.total_loop_events = totals.total_loop_events.saturating_add(1);
+        match loop_discriminant {
+            0 => totals.total_recycled_mg = totals.total_recycled_mg.saturating_add(quantity_mg),
+            1 => totals.total_reused_mg = totals.total_reused_mg.saturating_add(quantity_mg),
+            2 => totals.total_repaired_mg = totals.total_repaired_mg.saturating_add(quantity_mg),
+            3 => totals.total_remanufactured_mg = totals.total_remanufactured_mg.saturating_add(quantity_mg),
+            5 => totals.total_disposed_mg = totals.total_disposed_mg.saturating_add(quantity_mg),
+            _ => {}
+        }
+        // Track loop closure: a material "closes the loop" on its first non-dispose event
+        if loop_discriminant != 5 && !had_loop_before {
+            totals.materials_with_closed_loop =
+                totals.materials_with_closed_loop.saturating_add(1);
+        }
+        env.storage()
+            .instance()
+            .set(&DataKey::CircularityTotals, &totals);
+
+        // Emit Soroban event
+        env.events().publish(
+            (Symbol::new(&env, "circular"), Symbol::new(&env, "loop_event")),
+            (material_id, loop_type, quantity_mg),
+        );
+
+        seq
+    }
+
+    /// Return the full list of loop events for a material passport.
+    ///
+    /// # Errors
+    /// * `MaterialPassportNotFound` — `material_id` not registered.
+    pub fn get_material_loop(env: Env, material_id: BytesN<32>) -> Vec<LoopEvent> {
+        Self::require_initialized(&env);
+        if !env.storage().instance().has(&DataKey::MaterialPassport(material_id.clone())) {
+            panic_with_error!(&env, ContractError::MaterialPassportNotFound);
+        }
+        env.storage()
+            .instance()
+            .get(&DataKey::MaterialLoopEvents(material_id))
+            .unwrap_or_else(|| Vec::new(&env))
+    }
+
+    /// Compute and store a circularity snapshot from the current global totals.
+    ///
+    /// Anyone may call this; it is a pure aggregation of already-stored data.
+    ///
+    /// # Returns
+    /// The completed `CircularitySnapshot`.
+    pub fn compute_circularity_score(env: Env) -> CircularitySnapshot {
+        Self::require_initialized(&env);
+
+        let totals = Self::load_circularity_totals(&env);
+
+        // MCI = circular_mass / (circular_mass + disposed_mass)  [in bps]
+        let circular_mass: u64 = totals.total_recycled_mg
+            .saturating_add(totals.total_reused_mg)
+            .saturating_add(totals.total_repaired_mg)
+            .saturating_add(totals.total_remanufactured_mg);
+        let total_flow = circular_mass.saturating_add(totals.total_disposed_mg);
+
+        let mci_bps: u32 = if total_flow == 0 {
+            0
+        } else {
+            ((circular_mass as u128 * 10_000) / total_flow as u128) as u32
+        };
+
+        // Per-category rates (relative to total_flow)
+        let recycling_rate_bps: u32 = if total_flow == 0 {
+            0
+        } else {
+            ((totals.total_recycled_mg as u128 * 10_000) / total_flow as u128) as u32
+        };
+
+        let reuse_rate_bps: u32 = if total_flow == 0 {
+            0
+        } else {
+            ((totals.total_reused_mg as u128 * 10_000) / total_flow as u128) as u32
+        };
+
+        // Loop closure rate = materials_with_closed_loop / total_materials  [bps]
+        let loop_closure_rate_bps: u32 = if totals.total_materials == 0 {
+            0
+        } else {
+            ((totals.materials_with_closed_loop as u128 * 10_000)
+                / totals.total_materials as u128) as u32
+        };
+
+        let snapshot_index: u32 = env
+            .storage()
+            .instance()
+            .get(&DataKey::CircularitySnapshotCount)
+            .unwrap_or(0u32);
+
+        let snapshot = CircularitySnapshot {
+            ledger_seq: env.ledger().sequence(),
+            timestamp: env.ledger().timestamp(),
+            total_materials: totals.total_materials,
+            total_virgin_mass_mg: totals.total_virgin_mass_mg,
+            total_circular_mass_mg: circular_mass,
+            total_disposed_mass_mg: totals.total_disposed_mg,
+            mci_bps,
+            recycling_rate_bps,
+            reuse_rate_bps,
+            loop_closure_rate_bps,
+            total_loop_events: totals.total_loop_events,
+            snapshot_index,
+        };
+
+        env.storage()
+            .instance()
+            .set(&DataKey::CircularitySnapshot(snapshot_index), &snapshot);
+        env.storage()
+            .instance()
+            .set(&DataKey::CircularitySnapshotCount, &snapshot_index.saturating_add(1));
+
+        // Emit Soroban event
+        env.events().publish(
+            (Symbol::new(&env, "circular"), Symbol::new(&env, "snapshot")),
+            (snapshot_index, mci_bps),
+        );
+
+        snapshot
+    }
+
+    /// Retrieve a previously stored circularity snapshot by its 0-based index.
+    ///
+    /// # Errors
+    /// * `SnapshotNotFound` — No snapshot at the given index.
+    pub fn get_circularity_snapshot(env: Env, index: u32) -> CircularitySnapshot {
+        Self::require_initialized(&env);
+        env.storage()
+            .instance()
+            .get(&DataKey::CircularitySnapshot(index))
+            .unwrap_or_else(|| panic_with_error!(&env, ContractError::SnapshotNotFound))
+    }
+
+    /// Return the total number of circularity snapshots stored.
+    pub fn circularity_snapshot_count(env: Env) -> u32 {
+        env.storage()
+            .instance()
+            .get(&DataKey::CircularitySnapshotCount)
+            .unwrap_or(0)
+    }
+
+    /// Return the current global circularity totals without creating a snapshot.
+    pub fn get_circularity_totals(env: Env) -> CircularityTotals {
+        Self::require_initialized(&env);
+        Self::load_circularity_totals(&env)
+    }
+
+    // ── Biodiversity ─────────────────────────────────────────────────────────
+
+    /// Decode a land-use type Symbol to its 0–7 discriminant.
+    ///
+    /// Accepted: `crop`(0), `pasture`(1), `forest`(2), `urban`(3),
+    /// `wetland`(4), `water`(5), `barren`(6), `protected`(7).
+    fn decode_land_use_type(env: &Env, lut: &Symbol) -> u32 {
+        let crop      = Symbol::new(env, "crop");
+        let pasture   = Symbol::new(env, "pasture");
+        let forest    = Symbol::new(env, "forest");
+        let urban     = Symbol::new(env, "urban");
+        let wetland   = Symbol::new(env, "wetland");
+        let water     = Symbol::new(env, "water");
+        let barren    = Symbol::new(env, "barren");
+        let protected = Symbol::new(env, "protected");
+
+        if lut == &crop      { return 0; }
+        if lut == &pasture   { return 1; }
+        if lut == &forest    { return 2; }
+        if lut == &urban     { return 3; }
+        if lut == &wetland   { return 4; }
+        if lut == &water     { return 5; }
+        if lut == &barren    { return 6; }
+        if lut == &protected { return 7; }
+        panic_with_error!(env, ContractError::InvalidLandUseType);
+    }
+
+    /// Decode an ecosystem-service category Symbol to its 0–3 discriminant.
+    ///
+    /// Accepted: `provision`(0), `regul`(1), `culture`(2), `support`(3).
+    fn decode_eco_service_cat(env: &Env, cat: &Symbol) -> u32 {
+        let provision = Symbol::new(env, "provision");
+        let regul     = Symbol::new(env, "regul");
+        let culture   = Symbol::new(env, "culture");
+        let support   = Symbol::new(env, "support");
+
+        if cat == &provision { return 0; }
+        if cat == &regul     { return 1; }
+        if cat == &culture   { return 2; }
+        if cat == &support   { return 3; }
+        panic_with_error!(env, ContractError::InvalidEcoServiceCat);
+    }
+
+    /// Load or default-construct the global biodiversity totals.
+    fn load_bio_totals(env: &Env) -> BioTotals {
+        env.storage()
+            .instance()
+            .get(&DataKey::BioTotals)
+            .unwrap_or(BioTotals {
+                total_impacts: 0,
+                total_area_m2_micro: 0,
+                total_msa_loss_micro: 0,
+                total_eco_loss_micro: 0,
+                total_offset_micro: 0,
+                total_retired_micro: 0,
+                total_observations: 0,
+                total_eco_records: 0,
+            })
+    }
+
+    /// Compute a 32-byte content-addressed ID for a biodiversity record.
+    ///
+    /// `sha256(event_ref || actor_strkey || timestamp_le64)`
+    fn compute_bio_id(
+        env: &Env,
+        event_ref: &BytesN<32>,
+        actor: &Address,
+        timestamp: u64,
+    ) -> BytesN<32> {
+        let mut buf = Bytes::new(env);
+        let er: Bytes = event_ref.clone().into();
+        buf.append(&er);
+        buf.append(&actor.to_string().to_bytes());
+        buf.append(&Self::u64_to_bytes(env, timestamp));
+        env.crypto().sha256(&buf)
+    }
+
+    /// Compute a 32-byte ID for a biodiversity offset record.
+    ///
+    /// `sha256(scheme || issuer_strkey || total_micro_le64 || timestamp_le64)`
+    fn compute_offset_id(
+        env: &Env,
+        scheme: &Bytes,
+        issuer: &Address,
+        total_micro: u64,
+        timestamp: u64,
+    ) -> BytesN<32> {
+        let mut buf = Bytes::new(env);
+        buf.append(scheme);
+        buf.append(&issuer.to_string().to_bytes());
+        buf.append(&Self::u64_to_bytes(env, total_micro));
+        buf.append(&Self::u64_to_bytes(env, timestamp));
+        env.crypto().sha256(&buf)
+    }
+
+    // ── Biodiversity impact recording ────────────────────────────────────────
+
+    /// Record a biodiversity impact event linked to a supply-chain event reference.
+    ///
+    /// # Arguments
+    /// * `caller`           — Must authenticate; the actor recording this impact.
+    /// * `event_ref`        — 32-byte reference to the supply-chain event (e.g. an audit event ID).
+    /// * `land_use_type`    — Land-use category Symbol: `crop`, `pasture`, `forest`, `urban`,
+    ///                        `wetland`, `water`, `barren`, or `protected`.
+    /// * `area_m2_micro`    — Affected land area in m² micro-units (> 0).
+    /// * `msa_loss_micro`   — Mean Species Abundance loss in MSA·ha micro-units.
+    /// * `eco_service_loss` — Vec of exactly 4 `i64` values: annual ecosystem service value loss
+    ///                        in USD-cent micro-units per category (CICES order). Negatives encode gains.
+    /// * `location`         — Optional geographic descriptor bytes.
+    /// * `iucn_threat`      — Optional IUCN threat category bytes (e.g., b"EN").
+    /// * `metadata`         — Opaque provenance bytes.
+    ///
+    /// # Returns
+    /// 32-byte content-addressed biodiversity impact ID.
+    ///
+    /// # Errors
+    /// * `InvalidLandUseType (49)`, `InvalidLandArea (51)`, `InvalidImpactCategory (41)`.
+    pub fn record_bio_impact(
+        env: Env,
+        caller: Address,
+        event_ref: BytesN<32>,
+        land_use_type: Symbol,
+        area_m2_micro: u64,
+        msa_loss_micro: u64,
+        eco_service_loss: Vec<i64>,
+        location: Bytes,
+        iucn_threat: Bytes,
+        metadata: Bytes,
+    ) -> BytesN<32> {
+        Self::require_initialized(&env);
+        caller.require_auth();
+
+        if area_m2_micro == 0 {
+            panic_with_error!(&env, ContractError::InvalidLandArea);
+        }
+        let lut_disc = Self::decode_land_use_type(&env, &land_use_type);
+
+        if eco_service_loss.len() != BIO_ECO_SERVICE_COUNT {
+            panic_with_error!(&env, ContractError::InvalidImpactCategory);
+        }
+
+        let timestamp = env.ledger().timestamp();
+        let id = Self::compute_bio_id(&env, &event_ref, &caller, timestamp);
+
+        // Sum ecosystem service losses for totals
+        let mut eco_total: i64 = 0;
+        for cat in 0..BIO_ECO_SERVICE_COUNT {
+            eco_total = eco_total.saturating_add(eco_service_loss.get(cat).unwrap_or(0));
+        }
+
+        let record = BioImpact {
+            id: id.clone(),
+            event_ref,
+            actor: caller,
+            timestamp,
+            land_use_type: lut_disc,
+            area_m2_micro,
+            msa_loss_micro,
+            eco_service_loss,
+            location,
+            iucn_threat,
+            metadata,
+        };
+
+        env.storage()
+            .instance()
+            .set(&DataKey::BioImpact(id.clone()), &record);
+
+        // Update global totals
+        let mut totals = Self::load_bio_totals(&env);
+        totals.total_impacts = totals.total_impacts.saturating_add(1);
+        totals.total_area_m2_micro = totals.total_area_m2_micro.saturating_add(area_m2_micro);
+        totals.total_msa_loss_micro = totals.total_msa_loss_micro.saturating_add(msa_loss_micro);
+        totals.total_eco_loss_micro = totals.total_eco_loss_micro.saturating_add(eco_total);
+        env.storage().instance().set(&DataKey::BioTotals, &totals);
+
+        env.events().publish(
+            (Symbol::new(&env, "bio"), Symbol::new(&env, "impact")),
+            (id.clone(), land_use_type, area_m2_micro),
+        );
+
+        id
+    }
+
+    /// Retrieve a biodiversity impact record by its ID.
+    ///
+    /// # Errors
+    /// * `BioImpactNotFound (47)`
+    pub fn get_bio_impact(env: Env, impact_id: BytesN<32>) -> BioImpact {
+        Self::require_initialized(&env);
+        env.storage()
+            .instance()
+            .get(&DataKey::BioImpact(impact_id))
+            .unwrap_or_else(|| panic_with_error!(&env, ContractError::BioImpactNotFound))
+    }
+
+    // ── Biodiversity offset management ───────────────────────────────────────
+
+    /// Register a biodiversity offset credit (nature-based compensation unit).
+    ///
+    /// # Arguments
+    /// * `caller`           — Must authenticate; becomes the issuer.
+    /// * `scheme`           — Offset scheme name bytes (e.g., b"vbc", b"bng").
+    /// * `total_micro`      — Total credit quantity in MSA·ha micro-units (> 0).
+    /// * `expires_at`       — Expiry timestamp (0 = no expiry).
+    /// * `eco_service_ref`  — Optional ecosystem service site ID backing this offset.
+    /// * `metadata`         — Certificate reference, registry URL, project details.
+    ///
+    /// # Returns
+    /// 32-byte content-addressed offset ID.
+    ///
+    /// # Errors
+    /// * `InvalidOffsetQuantity (52)`.
+    /// * `EcoServiceRecord` linked must exist if `eco_service_ref` is provided.
+    pub fn register_bio_offset(
+        env: Env,
+        caller: Address,
+        scheme: Bytes,
+        total_micro: u64,
+        expires_at: u64,
+        eco_service_ref: Option<BytesN<32>>,
+        metadata: Bytes,
+    ) -> BytesN<32> {
+        Self::require_initialized(&env);
+        caller.require_auth();
+
+        if total_micro == 0 {
+            panic_with_error!(&env, ContractError::InvalidOffsetQuantity);
+        }
+
+        // Validate eco_service_ref if provided
+        if let Some(ref eco_id) = eco_service_ref {
+            if !env.storage().instance().has(&DataKey::EcoServiceRecord(eco_id.clone())) {
+                panic_with_error!(&env, ContractError::BioImpactNotFound);
+            }
+        }
+
+        let timestamp = env.ledger().timestamp();
+        let id = Self::compute_offset_id(&env, &scheme, &caller, total_micro, timestamp);
+
+        let offset = BioOffset {
+            id: id.clone(),
+            scheme,
+            issuer: caller,
+            total_micro,
+            retired_micro: 0,
+            registered_at: timestamp,
+            expires_at,
+            eco_service_ref,
+            metadata,
+        };
+
+        env.storage()
+            .instance()
+            .set(&DataKey::BioOffset(id.clone()), &offset);
+
+        let mut totals = Self::load_bio_totals(&env);
+        totals.total_offset_micro = totals.total_offset_micro.saturating_add(total_micro);
+        env.storage().instance().set(&DataKey::BioTotals, &totals);
+
+        env.events().publish(
+            (Symbol::new(&env, "bio"), Symbol::new(&env, "offset_reg")),
+            (id.clone(), total_micro),
+        );
+
+        id
+    }
+
+    /// Retire biodiversity offset credits — apply them to compensate for impacts.
+    ///
+    /// Retirement is irreversible and cumulative. Multiple partial retirements
+    /// are permitted until `total_micro` is fully consumed.
+    ///
+    /// # Arguments
+    /// * `caller`        — Must authenticate (any party may retire; caller owns the action).
+    /// * `offset_id`     — Offset to retire against.
+    /// * `quantity_micro`— MSA·ha micro-units to retire (> 0; ≤ remaining balance).
+    ///
+    /// # Returns
+    /// Remaining available balance after retirement.
+    ///
+    /// # Errors
+    /// * `BioOffsetNotFound (48)`, `InvalidOffsetQuantity (52)`,
+    ///   `OffsetAlreadyRetired (53)`, `OffsetRetirementExceedsBalance (54)`.
+    pub fn retire_bio_offset(
+        env: Env,
+        caller: Address,
+        offset_id: BytesN<32>,
+        quantity_micro: u64,
+    ) -> u64 {
+        Self::require_initialized(&env);
+        caller.require_auth();
+
+        if quantity_micro == 0 {
+            panic_with_error!(&env, ContractError::InvalidOffsetQuantity);
+        }
+
+        let mut offset: BioOffset = env
+            .storage()
+            .instance()
+            .get(&DataKey::BioOffset(offset_id.clone()))
+            .unwrap_or_else(|| panic_with_error!(&env, ContractError::BioOffsetNotFound));
+
+        if offset.retired_micro >= offset.total_micro {
+            panic_with_error!(&env, ContractError::OffsetAlreadyRetired);
+        }
+
+        let remaining = offset.total_micro - offset.retired_micro;
+        if quantity_micro > remaining {
+            panic_with_error!(&env, ContractError::OffsetRetirementExceedsBalance);
+        }
+
+        offset.retired_micro = offset.retired_micro.saturating_add(quantity_micro);
+        env.storage()
+            .instance()
+            .set(&DataKey::BioOffset(offset_id.clone()), &offset);
+
+        let mut totals = Self::load_bio_totals(&env);
+        totals.total_retired_micro = totals.total_retired_micro.saturating_add(quantity_micro);
+        env.storage().instance().set(&DataKey::BioTotals, &totals);
+
+        let new_remaining = offset.total_micro - offset.retired_micro;
+
+        env.events().publish(
+            (Symbol::new(&env, "bio"), Symbol::new(&env, "offset_ret")),
+            (offset_id, quantity_micro, new_remaining),
+        );
+
+        new_remaining
+    }
+
+    /// Retrieve a biodiversity offset record by its ID.
+    ///
+    /// # Errors
+    /// * `BioOffsetNotFound (48)`
+    pub fn get_bio_offset(env: Env, offset_id: BytesN<32>) -> BioOffset {
+        Self::require_initialized(&env);
+        env.storage()
+            .instance()
+            .get(&DataKey::BioOffset(offset_id))
+            .unwrap_or_else(|| panic_with_error!(&env, ContractError::BioOffsetNotFound))
+    }
+
+    // ── Ecosystem service records ─────────────────────────────────────────────
+
+    /// Register an ecosystem service valuation record for a site or project.
+    ///
+    /// # Arguments
+    /// * `caller`        — Must authenticate; becomes the owner.
+    /// * `name`          — Human-readable project/site name.
+    /// * `area_m2_micro` — Site area in m² micro-units (> 0).
+    /// * `land_use_type` — Land-use category Symbol.
+    /// * `annual_values` — Vec of exactly 4 `i64` annual values in USD-cent micro-units.
+    /// * `metadata`      — SEEA reference, methodology, assessor.
+    ///
+    /// # Returns
+    /// 32-byte content-addressed site ID.
+    ///
+    /// # Errors
+    /// * `InvalidLandUseType (49)`, `InvalidLandArea (51)`, `InvalidImpactCategory (41)`.
+    pub fn register_eco_service_record(
+        env: Env,
+        caller: Address,
+        name: Bytes,
+        area_m2_micro: u64,
+        land_use_type: Symbol,
+        annual_values: Vec<i64>,
+        metadata: Bytes,
+    ) -> BytesN<32> {
+        Self::require_initialized(&env);
+        caller.require_auth();
+
+        if area_m2_micro == 0 {
+            panic_with_error!(&env, ContractError::InvalidLandArea);
+        }
+        let lut_disc = Self::decode_land_use_type(&env, &land_use_type);
+
+        if annual_values.len() != BIO_ECO_SERVICE_COUNT {
+            panic_with_error!(&env, ContractError::InvalidImpactCategory);
+        }
+
+        let timestamp = env.ledger().timestamp();
+        // ID = sha256(name || owner_strkey || area_le64 || timestamp_le64)
+        let mut buf = Bytes::new(&env);
+        buf.append(&name);
+        buf.append(&caller.to_string().to_bytes());
+        buf.append(&Self::u64_to_bytes(&env, area_m2_micro));
+        buf.append(&Self::u64_to_bytes(&env, timestamp));
+        let id: BytesN<32> = env.crypto().sha256(&buf);
+
+        let record = EcoServiceRecord {
+            id: id.clone(),
+            name,
+            owner: caller,
+            registered_at: timestamp,
+            area_m2_micro,
+            annual_values,
+            land_use_type: lut_disc,
+            metadata,
+        };
+
+        env.storage()
+            .instance()
+            .set(&DataKey::EcoServiceRecord(id.clone()), &record);
+
+        let mut totals = Self::load_bio_totals(&env);
+        totals.total_eco_records = totals.total_eco_records.saturating_add(1);
+        env.storage().instance().set(&DataKey::BioTotals, &totals);
+
+        env.events().publish(
+            (Symbol::new(&env, "bio"), Symbol::new(&env, "eco_reg")),
+            id.clone(),
+        );
+
+        id
+    }
+
+    /// Retrieve an ecosystem service record by its ID.
+    ///
+    /// # Errors
+    /// * `BioImpactNotFound (47)` (reused as "record not found" for ecosystem records).
+    pub fn get_eco_service_record(env: Env, record_id: BytesN<32>) -> EcoServiceRecord {
+        Self::require_initialized(&env);
+        env.storage()
+            .instance()
+            .get(&DataKey::EcoServiceRecord(record_id))
+            .unwrap_or_else(|| panic_with_error!(&env, ContractError::BioImpactNotFound))
+    }
+
+    // ── Species observations ─────────────────────────────────────────────────
+
+    /// Record a species observation linked to a supply-chain event.
+    ///
+    /// # Arguments
+    /// * `caller`            — Must authenticate; the observer.
+    /// * `event_ref`         — 32-byte audit event reference.
+    /// * `species_name`      — Common name bytes.
+    /// * `species_code`      — IUCN taxonomic ID or binomial name bytes.
+    /// * `iucn_category`     — Red List category bytes (e.g., b"EN").
+    /// * `count`             — Observed individual count (0 = presence-only).
+    /// * `impact_direction`  — 0=positive, 1=negative, 2=neutral.
+    /// * `metadata`          — Survey method, GPS hash, photo hash, etc.
+    ///
+    /// # Returns
+    /// 32-byte content-addressed observation ID.
+    pub fn record_species_observation(
+        env: Env,
+        caller: Address,
+        event_ref: BytesN<32>,
+        species_name: Bytes,
+        species_code: Bytes,
+        iucn_category: Bytes,
+        count: u32,
+        impact_direction: u32,
+        metadata: Bytes,
+    ) -> BytesN<32> {
+        Self::require_initialized(&env);
+        caller.require_auth();
+
+        let timestamp = env.ledger().timestamp();
+        let id = Self::compute_bio_id(&env, &event_ref, &caller, timestamp);
+
+        let obs = SpeciesObservation {
+            id: id.clone(),
+            event_ref,
+            species_name,
+            species_code,
+            iucn_category,
+            count,
+            impact_direction,
+            observer: caller,
+            timestamp,
+            metadata,
+        };
+
+        env.storage()
+            .instance()
+            .set(&DataKey::SpeciesObservation(id.clone()), &obs);
+
+        let mut totals = Self::load_bio_totals(&env);
+        totals.total_observations = totals.total_observations.saturating_add(1);
+        env.storage().instance().set(&DataKey::BioTotals, &totals);
+
+        env.events().publish(
+            (Symbol::new(&env, "bio"), Symbol::new(&env, "species_obs")),
+            (id.clone(), impact_direction),
+        );
+
+        id
+    }
+
+    /// Retrieve a species observation by its ID.
+    ///
+    /// # Errors
+    /// * `SpeciesObservationNotFound (55)`
+    pub fn get_species_observation(env: Env, obs_id: BytesN<32>) -> SpeciesObservation {
+        Self::require_initialized(&env);
+        env.storage()
+            .instance()
+            .get(&DataKey::SpeciesObservation(obs_id))
+            .unwrap_or_else(|| panic_with_error!(&env, ContractError::SpeciesObservationNotFound))
+    }
+
+    // ── Nature-positive reporting ─────────────────────────────────────────────
+
+    /// Compute and store a nature-positive snapshot from current global biodiversity totals.
+    ///
+    /// Calculates:
+    /// - **Net MSA position**: `retired_micro − total_msa_loss_micro`
+    /// - **Nature-positive indicator**: `(retired_micro × 10_000) / total_msa_loss_micro`
+    ///   (returns 10_000 bps when no losses recorded)
+    /// - **Offset coverage**: `(retired_micro × 10_000) / total_msa_loss_micro` capped at 10_000
+    ///
+    /// Any caller may trigger a snapshot — it is a pure aggregation of stored data.
+    ///
+    /// # Returns
+    /// The completed `BioSnapshot`.
+    pub fn compute_nature_positive_score(env: Env) -> BioSnapshot {
+        Self::require_initialized(&env);
+
+        let totals = Self::load_bio_totals(&env);
+
+        let net_msa_micro: i64 = (totals.total_retired_micro as i64)
+            .saturating_sub(totals.total_msa_loss_micro as i64);
+
+        // Nature-positive indicator: retired / loss × 10_000
+        let nature_positive_bps: u32 = if totals.total_msa_loss_micro == 0 {
+            // No losses recorded → by definition nature-positive
+            10_000
+        } else {
+            ((totals.total_retired_micro as u128 * 10_000)
+                / totals.total_msa_loss_micro as u128)
+                .min(10_000) as u32
+        };
+
+        // Offset coverage: same formula, same cap
+        let offset_coverage_bps: u32 = nature_positive_bps;
+
+        let index: u32 = env
+            .storage()
+            .instance()
+            .get(&DataKey::BioSnapshotCount)
+            .unwrap_or(0u32);
+
+        let snapshot = BioSnapshot {
+            index,
+            ledger_seq: env.ledger().sequence(),
+            timestamp: env.ledger().timestamp(),
+            total_impacts: totals.total_impacts,
+            total_msa_loss_micro: totals.total_msa_loss_micro,
+            total_offset_micro: totals.total_offset_micro,
+            total_retired_micro: totals.total_retired_micro,
+            net_msa_micro,
+            nature_positive_bps,
+            offset_coverage_bps,
+            total_eco_loss_micro: totals.total_eco_loss_micro,
+            total_observations: totals.total_observations,
+        };
+
+        env.storage()
+            .instance()
+            .set(&DataKey::BioSnapshot(index), &snapshot);
+        env.storage()
+            .instance()
+            .set(&DataKey::BioSnapshotCount, &index.saturating_add(1));
+
+        env.events().publish(
+            (Symbol::new(&env, "bio"), Symbol::new(&env, "snapshot")),
+            (index, nature_positive_bps, net_msa_micro),
+        );
+
+        snapshot
+    }
+
+    /// Retrieve a stored nature-positive snapshot by its 0-based index.
+    ///
+    /// # Errors
+    /// * `SnapshotNotFound (30)` — No snapshot at the given index.
+    pub fn get_bio_snapshot(env: Env, index: u32) -> BioSnapshot {
+        Self::require_initialized(&env);
+        env.storage()
+            .instance()
+            .get(&DataKey::BioSnapshot(index))
+            .unwrap_or_else(|| panic_with_error!(&env, ContractError::SnapshotNotFound))
+    }
+
+    /// Return the total number of nature-positive snapshots stored.
+    pub fn bio_snapshot_count(env: Env) -> u32 {
+        env.storage()
+            .instance()
+            .get(&DataKey::BioSnapshotCount)
+            .unwrap_or(0)
+    }
+
+    /// Return the current global biodiversity totals without creating a snapshot.
+    pub fn get_bio_totals(env: Env) -> BioTotals {
+        Self::require_initialized(&env);
+        Self::load_bio_totals(&env)
+    }
+
+    // ── Water Footprint ───────────────────────────────────────────────────────
+
+    /// Decode a water-use sector Symbol to its 0–4 discriminant.
+    ///
+    /// Accepted: `agri`(0), `indust`(1), `munici`(2), `energy`(3), `mining`(4).
+    fn decode_water_sector(env: &Env, sector: &Symbol) -> u32 {
+        let agri   = Symbol::new(env, "agri");
+        let indust = Symbol::new(env, "indust");
+        let munici = Symbol::new(env, "munici");
+        let energy = Symbol::new(env, "energy");
+        let mining = Symbol::new(env, "mining");
+
+        if sector == &agri   { return 0; }
+        if sector == &indust { return 1; }
+        if sector == &munici { return 2; }
+        if sector == &energy { return 3; }
+        if sector == &mining { return 4; }
+        panic_with_error!(env, ContractError::InvalidWaterSector);
+    }
+
+    /// Load or default-construct the global water totals.
+    fn load_water_totals(env: &Env) -> WaterTotals {
+        env.storage()
+            .instance()
+            .get(&DataKey::WaterTotals)
+            .unwrap_or(WaterTotals {
+                total_footprints: 0,
+                total_blue_L_micro: 0,
+                total_green_L_micro: 0,
+                total_grey_L_micro: 0,
+                total_scarcity_weighted_L_micro: 0,
+                total_risk_assessments: 0,
+                total_stewardship_programmes: 0,
+                total_disclosures: 0,
+            })
+    }
+
+    /// Compute `scarcity_weighted = blue_L_micro × scarcity_factor_ppb / 1_000_000`.
+    ///
+    /// Uses i128 intermediate to prevent overflow, then clamps to u64::MAX.
+    fn compute_scarcity_weighted(blue_L_micro: u64, scarcity_factor_ppb: u32) -> u64 {
+        ((blue_L_micro as u128)
+            .saturating_mul(scarcity_factor_ppb as u128)
+            / 1_000_000u128)
+            .min(u64::MAX as u128) as u64
+    }
+
+    /// Compute content-addressed 32-byte water record ID.
+    ///
+    /// `sha256(event_ref || actor_strkey || timestamp_le64)`
+    fn compute_water_id(
+        env: &Env,
+        event_ref: &BytesN<32>,
+        actor: &Address,
+        timestamp: u64,
+    ) -> BytesN<32> {
+        let mut buf = Bytes::new(env);
+        let er: Bytes = event_ref.clone().into();
+        buf.append(&er);
+        buf.append(&actor.to_string().to_bytes());
+        buf.append(&Self::u64_to_bytes(env, timestamp));
+        env.crypto().sha256(&buf)
+    }
+
+    // ── Water footprint recording ────────────────────────────────────────────
+
+    /// Record a water footprint entry linked to a supply-chain event.
+    ///
+    /// Tracks blue, green, and grey water volumes plus scarcity-weighted blue
+    /// water per ISO 14046 / Water Footprint Network methodology.
+    ///
+    /// # Arguments
+    /// * `caller`              — Must authenticate; the reporting entity.
+    /// * `event_ref`           — 32-byte reference to the triggering audit event.
+    /// * `sector`              — Water-use sector Symbol: `agri`, `indust`, `munici`, `energy`, `mining`.
+    /// * `blue_L_micro`        — Blue water consumed, L × 10⁻⁶ (surface + groundwater; > 0).
+    /// * `green_L_micro`       — Green water (rainwater evapotranspiration), L × 10⁻⁶.
+    /// * `grey_L_micro`        — Grey water (dilution volume for pollutants), L × 10⁻⁶.
+    /// * `scarcity_factor_ppb` — Water Stress Index 0–100 000 (0 = no stress, 100 000 = extreme).
+    /// * `risk_assessment_ref` — Optional 32-byte ID of a registered `WaterRiskAssessment`.
+    /// * `stewardship_ref`     — Optional 32-byte ID of a registered `WaterStewardship`.
+    /// * `country`             — ISO 3166-1 alpha-2 country code bytes.
+    /// * `basin_id`            — HydroBASINS basin identifier bytes.
+    /// * `metadata`            — Opaque provenance bytes.
+    ///
+    /// # Returns
+    /// Content-addressed 32-byte footprint ID.
+    ///
+    /// # Errors
+    /// `InvalidWaterSector(60)`, `InvalidWaterVolume(61)`, `InvalidScarcityFactor(62)`,
+    /// `WaterRiskNotFound(57)`, `WaterStewardshipNotFound(58)`.
+    pub fn record_water_footprint(
+        env: Env,
+        caller: Address,
+        event_ref: BytesN<32>,
+        sector: Symbol,
+        blue_L_micro: u64,
+        green_L_micro: u64,
+        grey_L_micro: u64,
+        scarcity_factor_ppb: u32,
+        risk_assessment_ref: Option<BytesN<32>>,
+        stewardship_ref: Option<BytesN<32>>,
+        country: Bytes,
+        basin_id: Bytes,
+        metadata: Bytes,
+    ) -> BytesN<32> {
+        Self::require_initialized(&env);
+        caller.require_auth();
+
+        // At least one water volume must be non-zero
+        if blue_L_micro == 0 && green_L_micro == 0 && grey_L_micro == 0 {
+            panic_with_error!(&env, ContractError::InvalidWaterVolume);
+        }
+        if scarcity_factor_ppb > 100_000 {
+            panic_with_error!(&env, ContractError::InvalidScarcityFactor);
+        }
+
+        let sector_disc = Self::decode_water_sector(&env, &sector);
+
+        // Validate optional references
+        if let Some(ref rid) = risk_assessment_ref {
+            if !env.storage().instance().has(&DataKey::WaterRiskAssessment(rid.clone())) {
+                panic_with_error!(&env, ContractError::WaterRiskNotFound);
+            }
+        }
+        if let Some(ref sid) = stewardship_ref {
+            if !env.storage().instance().has(&DataKey::WaterStewardship(sid.clone())) {
+                panic_with_error!(&env, ContractError::WaterStewardshipNotFound);
+            }
+        }
+
+        let timestamp = env.ledger().timestamp();
+        let id = Self::compute_water_id(&env, &event_ref, &caller, timestamp);
+        let scarcity_weighted_L_micro =
+            Self::compute_scarcity_weighted(blue_L_micro, scarcity_factor_ppb);
+
+        let record = WaterFootprint {
+            id: id.clone(),
+            event_ref,
+            actor: caller,
+            timestamp,
+            sector: sector_disc,
+            blue_L_micro,
+            green_L_micro,
+            grey_L_micro,
+            scarcity_factor_ppb,
+            scarcity_weighted_L_micro,
+            risk_assessment_ref,
+            stewardship_ref,
+            country,
+            basin_id,
+            metadata,
+        };
+
+        env.storage()
+            .instance()
+            .set(&DataKey::WaterFootprint(id.clone()), &record);
+
+        let mut totals = Self::load_water_totals(&env);
+        totals.total_footprints = totals.total_footprints.saturating_add(1);
+        totals.total_blue_L_micro = totals.total_blue_L_micro.saturating_add(blue_L_micro);
+        totals.total_green_L_micro = totals.total_green_L_micro.saturating_add(green_L_micro);
+        totals.total_grey_L_micro = totals.total_grey_L_micro.saturating_add(grey_L_micro);
+        totals.total_scarcity_weighted_L_micro = totals
+            .total_scarcity_weighted_L_micro
+            .saturating_add(scarcity_weighted_L_micro);
+        env.storage().instance().set(&DataKey::WaterTotals, &totals);
+
+        env.events().publish(
+            (Symbol::new(&env, "water"), Symbol::new(&env, "footprint")),
+            (id.clone(), sector, blue_L_micro),
+        );
+
+        id
+    }
+
+    /// Retrieve a water footprint record by ID.
+    ///
+    /// # Errors
+    /// `WaterFootprintNotFound(56)`
+    pub fn get_water_footprint(env: Env, footprint_id: BytesN<32>) -> WaterFootprint {
+        Self::require_initialized(&env);
+        env.storage()
+            .instance()
+            .get(&DataKey::WaterFootprint(footprint_id))
+            .unwrap_or_else(|| panic_with_error!(&env, ContractError::WaterFootprintNotFound))
+    }
+
+    // ── Water risk assessment ────────────────────────────────────────────────
+
+    /// Register a water risk assessment for a site or basin.
+    ///
+    /// Risk scores follow WRI Aqueduct (0–10 000 bps = 0–100 %).
+    ///
+    /// # Arguments
+    /// * `caller`             — Must authenticate; the assessing entity.
+    /// * `name`               — Human-readable site/basin name.
+    /// * `overall_risk_bps`   — Composite risk score, 0–10 000.
+    /// * `quantity_risk_bps`  — Quantity risk sub-score.
+    /// * `quality_risk_bps`   — Quality risk sub-score.
+    /// * `regulatory_risk_bps`— Regulatory & reputational risk.
+    /// * `wsi_ppb`            — Water Stress Index, 0–100 000 ppb.
+    /// * `country`            — ISO 3166-1 alpha-2 bytes.
+    /// * `basin_id`           — HydroBASINS bytes.
+    /// * `methodology`        — Assessment tool/version bytes.
+    /// * `metadata`           — Opaque.
+    ///
+    /// # Returns
+    /// Content-addressed 32-byte assessment ID.
+    ///
+    /// # Errors
+    /// `InvalidScarcityFactor(62)` when `wsi_ppb > 100_000`.
+    pub fn register_water_risk_assessment(
+        env: Env,
+        caller: Address,
+        name: Bytes,
+        overall_risk_bps: u32,
+        quantity_risk_bps: u32,
+        quality_risk_bps: u32,
+        regulatory_risk_bps: u32,
+        wsi_ppb: u32,
+        country: Bytes,
+        basin_id: Bytes,
+        methodology: Bytes,
+        metadata: Bytes,
+    ) -> BytesN<32> {
+        Self::require_initialized(&env);
+        caller.require_auth();
+
+        if wsi_ppb > 100_000 {
+            panic_with_error!(&env, ContractError::InvalidScarcityFactor);
+        }
+
+        let timestamp = env.ledger().timestamp();
+        // ID = sha256(name || assessor_strkey || basin_id || timestamp_le64)
+        let mut buf = Bytes::new(&env);
+        buf.append(&name);
+        buf.append(&caller.to_string().to_bytes());
+        buf.append(&basin_id);
+        buf.append(&Self::u64_to_bytes(&env, timestamp));
+        let id: BytesN<32> = env.crypto().sha256(&buf);
+
+        let record = WaterRiskAssessment {
+            id: id.clone(),
+            name,
+            assessor: caller,
+            registered_at: timestamp,
+            overall_risk_bps,
+            quantity_risk_bps,
+            quality_risk_bps,
+            regulatory_risk_bps,
+            wsi_ppb,
+            country,
+            basin_id,
+            methodology,
+            metadata,
+        };
+
+        env.storage()
+            .instance()
+            .set(&DataKey::WaterRiskAssessment(id.clone()), &record);
+
+        let mut totals = Self::load_water_totals(&env);
+        totals.total_risk_assessments = totals.total_risk_assessments.saturating_add(1);
+        env.storage().instance().set(&DataKey::WaterTotals, &totals);
+
+        env.events().publish(
+            (Symbol::new(&env, "water"), Symbol::new(&env, "risk_reg")),
+            (id.clone(), overall_risk_bps),
+        );
+
+        id
+    }
+
+    /// Retrieve a water risk assessment by ID.
+    ///
+    /// # Errors
+    /// `WaterRiskNotFound(57)`
+    pub fn get_water_risk_assessment(env: Env, assessment_id: BytesN<32>) -> WaterRiskAssessment {
+        Self::require_initialized(&env);
+        env.storage()
+            .instance()
+            .get(&DataKey::WaterRiskAssessment(assessment_id))
+            .unwrap_or_else(|| panic_with_error!(&env, ContractError::WaterRiskNotFound))
+    }
+
+    // ── Water stewardship ────────────────────────────────────────────────────
+
+    /// Register a water stewardship programme.
+    ///
+    /// # Arguments
+    /// * `caller`                    — Must authenticate; the participating entity.
+    /// * `programme`                 — Programme name bytes (e.g., b"aws_core", b"ceo_mandate").
+    /// * `start_ts`                  — Unix start timestamp (0 = not specified).
+    /// * `end_ts`                    — Unix end/target timestamp (0 = ongoing).
+    /// * `target_reduction_L_micro`  — Absolute reduction target, L × 10⁻⁶ (0 = no target).
+    /// * `risk_assessment_ref`       — Optional 32-byte ID of a registered risk assessment.
+    /// * `metadata`                  — Certificate hash, scheme URL, etc.
+    ///
+    /// # Returns
+    /// Content-addressed 32-byte programme ID.
+    ///
+    /// # Errors
+    /// `WaterRiskNotFound(57)` when `risk_assessment_ref` points to an unregistered record.
+    pub fn register_water_stewardship(
+        env: Env,
+        caller: Address,
+        programme: Bytes,
+        start_ts: u64,
+        end_ts: u64,
+        target_reduction_L_micro: u64,
+        risk_assessment_ref: Option<BytesN<32>>,
+        metadata: Bytes,
+    ) -> BytesN<32> {
+        Self::require_initialized(&env);
+        caller.require_auth();
+
+        if let Some(ref rid) = risk_assessment_ref {
+            if !env.storage().instance().has(&DataKey::WaterRiskAssessment(rid.clone())) {
+                panic_with_error!(&env, ContractError::WaterRiskNotFound);
+            }
+        }
+
+        let timestamp = env.ledger().timestamp();
+        let mut buf = Bytes::new(&env);
+        buf.append(&programme);
+        buf.append(&caller.to_string().to_bytes());
+        buf.append(&Self::u64_to_bytes(&env, timestamp));
+        let id: BytesN<32> = env.crypto().sha256(&buf);
+
+        let record = WaterStewardship {
+            id: id.clone(),
+            programme,
+            participant: caller,
+            registered_at: timestamp,
+            start_ts,
+            end_ts,
+            target_reduction_L_micro,
+            achieved_reduction_L_micro: 0,
+            risk_assessment_ref,
+            metadata,
+        };
+
+        env.storage()
+            .instance()
+            .set(&DataKey::WaterStewardship(id.clone()), &record);
+
+        let mut totals = Self::load_water_totals(&env);
+        totals.total_stewardship_programmes = totals.total_stewardship_programmes.saturating_add(1);
+        env.storage().instance().set(&DataKey::WaterTotals, &totals);
+
+        env.events().publish(
+            (Symbol::new(&env, "water"), Symbol::new(&env, "steward_reg")),
+            id.clone(),
+        );
+
+        id
+    }
+
+    /// Update the achieved reduction on a stewardship programme.
+    ///
+    /// # Arguments
+    /// * `caller`              — Must be the programme `participant`.
+    /// * `programme_id`        — Stewardship record to update.
+    /// * `achieved_L_micro`    — Total achieved reduction to date, L × 10⁻⁶ (cumulative, not delta).
+    ///
+    /// # Errors
+    /// `WaterStewardshipNotFound(58)`, `CallerNotOwner(1)`.
+    pub fn update_stewardship_progress(
+        env: Env,
+        caller: Address,
+        programme_id: BytesN<32>,
+        achieved_L_micro: u64,
+    ) -> WaterStewardship {
+        Self::require_initialized(&env);
+        caller.require_auth();
+
+        let mut record: WaterStewardship = env
+            .storage()
+            .instance()
+            .get(&DataKey::WaterStewardship(programme_id.clone()))
+            .unwrap_or_else(|| panic_with_error!(&env, ContractError::WaterStewardshipNotFound));
+
+        if record.participant != caller {
+            panic_with_error!(&env, ContractError::CallerNotOwner);
+        }
+
+        record.achieved_reduction_L_micro = achieved_L_micro;
+        env.storage()
+            .instance()
+            .set(&DataKey::WaterStewardship(programme_id.clone()), &record);
+
+        env.events().publish(
+            (Symbol::new(&env, "water"), Symbol::new(&env, "steward_upd")),
+            (programme_id, achieved_L_micro),
+        );
+
+        record
+    }
+
+    /// Retrieve a water stewardship record by ID.
+    ///
+    /// # Errors
+    /// `WaterStewardshipNotFound(58)`
+    pub fn get_water_stewardship(env: Env, programme_id: BytesN<32>) -> WaterStewardship {
+        Self::require_initialized(&env);
+        env.storage()
+            .instance()
+            .get(&DataKey::WaterStewardship(programme_id))
+            .unwrap_or_else(|| panic_with_error!(&env, ContractError::WaterStewardshipNotFound))
+    }
+
+    // ── CDP Water Disclosure ─────────────────────────────────────────────────
+
+    /// Record a CDP Water Security disclosure.
+    ///
+    /// Covers the key quantitative fields across CDP W1–W8 sections.
+    /// One disclosure per organisation per reporting year is the intended pattern,
+    /// though the contract does not enforce uniqueness — multiple submissions for
+    /// the same year are permitted to allow amendments.
+    ///
+    /// # Arguments
+    /// * `caller`                        — Must authenticate; the reporting organisation.
+    /// * `reporting_year`                — Calendar year > 2000.
+    /// * `total_withdrawal_L_micro`      — Total freshwater withdrawal, L × 10⁻⁶ (CDP W1.2a).
+    /// * `total_consumption_L_micro`     — Water consumed (not returned), L × 10⁻⁶ (CDP W2.1).
+    /// * `total_discharge_L_micro`       — Water discharged, L × 10⁻⁶ (CDP W3.1).
+    /// * `estimated_data_pct_bps`        — % of data estimated vs. metered (0–10 000 bps).
+    /// * `reduction_target_L_micro`      — Absolute reduction target vs. base year (CDP W5.1).
+    /// * `sites_in_stressed_areas`       — Number of sites in stressed areas (CDP W6.2).
+    /// * `scarcity_weighted_total_L_micro` — Aggregated scarcity-weighted use across footprints.
+    /// * `reduction_achieved_L_micro`    — Reduction achieved since base year (CDP W8.1).
+    /// * `metadata`                      — CDP submission ID, base year, etc.
+    ///
+    /// # Returns
+    /// Content-addressed 32-byte disclosure ID.
+    ///
+    /// # Errors
+    /// `InvalidDisclosureYear(63)`.
+    pub fn record_water_disclosure(
+        env: Env,
+        caller: Address,
+        reporting_year: u32,
+        total_withdrawal_L_micro: u64,
+        total_consumption_L_micro: u64,
+        total_discharge_L_micro: u64,
+        estimated_data_pct_bps: u32,
+        reduction_target_L_micro: u64,
+        sites_in_stressed_areas: u32,
+        scarcity_weighted_total_L_micro: u64,
+        reduction_achieved_L_micro: u64,
+        metadata: Bytes,
+    ) -> BytesN<32> {
+        Self::require_initialized(&env);
+        caller.require_auth();
+
+        if reporting_year <= 2000 {
+            panic_with_error!(&env, ContractError::InvalidDisclosureYear);
+        }
+
+        let timestamp = env.ledger().timestamp();
+        // ID = sha256(org_strkey || year_le32 || timestamp_le64)
+        let mut buf = Bytes::new(&env);
+        buf.append(&caller.to_string().to_bytes());
+        buf.append(&Self::u32_to_bytes(&env, reporting_year));
+        buf.append(&Self::u64_to_bytes(&env, timestamp));
+        let id: BytesN<32> = env.crypto().sha256(&buf);
+
+        let record = WaterDisclosure {
+            id: id.clone(),
+            organisation: caller,
+            reporting_year,
+            recorded_at: timestamp,
+            total_withdrawal_L_micro,
+            total_consumption_L_micro,
+            total_discharge_L_micro,
+            estimated_data_pct_bps,
+            reduction_target_L_micro,
+            sites_in_stressed_areas,
+            scarcity_weighted_total_L_micro,
+            reduction_achieved_L_micro,
+            metadata,
+        };
+
+        env.storage()
+            .instance()
+            .set(&DataKey::WaterDisclosure(id.clone()), &record);
+
+        let mut totals = Self::load_water_totals(&env);
+        totals.total_disclosures = totals.total_disclosures.saturating_add(1);
+        env.storage().instance().set(&DataKey::WaterTotals, &totals);
+
+        env.events().publish(
+            (Symbol::new(&env, "water"), Symbol::new(&env, "disclosure")),
+            (id.clone(), reporting_year),
+        );
+
+        id
+    }
+
+    /// Retrieve a CDP water disclosure record by ID.
+    ///
+    /// # Errors
+    /// `WaterDisclosureNotFound(59)`
+    pub fn get_water_disclosure(env: Env, disclosure_id: BytesN<32>) -> WaterDisclosure {
+        Self::require_initialized(&env);
+        env.storage()
+            .instance()
+            .get(&DataKey::WaterDisclosure(disclosure_id))
+            .unwrap_or_else(|| panic_with_error!(&env, ContractError::WaterDisclosureNotFound))
+    }
+
+    // ── Water snapshot ───────────────────────────────────────────────────────
+
+    /// Compute and store a water accounting snapshot from current global totals.
+    ///
+    /// Calculates derived indicators:
+    /// - **total_water_footprint**: blue + green + grey
+    /// - **scarcity_ratio_bps**: `scarcity_weighted / blue × 10 000` (0 when no blue water)
+    /// - **blue_fraction_bps**: `blue / (blue + green + grey) × 10 000` (0 when total = 0)
+    ///
+    /// Any caller may trigger a snapshot.
+    ///
+    /// # Returns
+    /// The completed `WaterSnapshot`.
+    pub fn compute_water_snapshot(env: Env) -> WaterSnapshot {
+        Self::require_initialized(&env);
+
+        let totals = Self::load_water_totals(&env);
+
+        let total_footprint = totals.total_blue_L_micro
+            .saturating_add(totals.total_green_L_micro)
+            .saturating_add(totals.total_grey_L_micro);
+
+        let scarcity_ratio_bps: u32 = if totals.total_blue_L_micro == 0 {
+            0
+        } else {
+            ((totals.total_scarcity_weighted_L_micro as u128 * 10_000)
+                / totals.total_blue_L_micro as u128)
+                .min(u32::MAX as u128) as u32
+        };
+
+        let blue_fraction_bps: u32 = if total_footprint == 0 {
+            0
+        } else {
+            ((totals.total_blue_L_micro as u128 * 10_000)
+                / total_footprint as u128)
+                .min(u32::MAX as u128) as u32
+        };
+
+        let index: u32 = env
+            .storage()
+            .instance()
+            .get(&DataKey::WaterSnapshotCount)
+            .unwrap_or(0u32);
+
+        let snapshot = WaterSnapshot {
+            index,
+            ledger_seq: env.ledger().sequence(),
+            timestamp: env.ledger().timestamp(),
+            total_footprints: totals.total_footprints,
+            total_blue_L_micro: totals.total_blue_L_micro,
+            total_green_L_micro: totals.total_green_L_micro,
+            total_grey_L_micro: totals.total_grey_L_micro,
+            total_scarcity_weighted_L_micro: totals.total_scarcity_weighted_L_micro,
+            total_water_footprint_L_micro: total_footprint,
+            scarcity_ratio_bps,
+            blue_fraction_bps,
+            total_risk_assessments: totals.total_risk_assessments,
+            total_stewardship_programmes: totals.total_stewardship_programmes,
+        };
+
+        env.storage()
+            .instance()
+            .set(&DataKey::WaterSnapshot(index), &snapshot);
+        env.storage()
+            .instance()
+            .set(&DataKey::WaterSnapshotCount, &index.saturating_add(1));
+
+        env.events().publish(
+            (Symbol::new(&env, "water"), Symbol::new(&env, "snapshot")),
+            (index, total_footprint, scarcity_ratio_bps),
+        );
+
+        snapshot
+    }
+
+    /// Retrieve a stored water snapshot by its 0-based index.
+    ///
+    /// # Errors
+    /// `SnapshotNotFound(30)`
+    pub fn get_water_snapshot(env: Env, index: u32) -> WaterSnapshot {
+        Self::require_initialized(&env);
+        env.storage()
+            .instance()
+            .get(&DataKey::WaterSnapshot(index))
+            .unwrap_or_else(|| panic_with_error!(&env, ContractError::SnapshotNotFound))
+    }
+
+    /// Return the total number of water snapshots stored.
+    pub fn water_snapshot_count(env: Env) -> u32 {
+        env.storage()
+            .instance()
+            .get(&DataKey::WaterSnapshotCount)
+            .unwrap_or(0)
+    }
+
+    /// Return the current global water totals without creating a snapshot.
+    pub fn get_water_totals(env: Env) -> WaterTotals {
+        Self::require_initialized(&env);
+        Self::load_water_totals(&env)
+    }
 }
 
 #[cfg(test)]
@@ -3676,35 +6926,19 @@ mod upgrade_tests;
 mod security_tests;
 
 #[cfg(test)]
+mod chaos_tests;
+
+#[cfg(test)]
 mod comprehensive_fuzz;
 
-/// Responsible Sourcing Verification Module
-/// 
-/// Provides comprehensive certification, audit, and traceability systems
-/// for precious metals, minerals, and conflict-free materials with blockchain
-/// integration for consumer claim verification.
-pub mod responsible_sourcing;
+#[cfg(test)]
+mod digital_passport_tests;
 
-/// Anti-Corruption & Anti-Bribery Compliance Module
-///
-/// Implements FCPA, UK Bribery Act, SOX, and COSO compliance framework with
-/// risk assessment, policy management, training tracking, third-party due
-/// diligence, transaction monitoring, whistleblower mechanisms, and incident
-/// reporting for comprehensive anti-corruption governance.
-pub mod anti_corruption;
+#[cfg(test)]
+mod carbon_credits_tests;
 
-/// Export Controls & Sanctions Compliance Module
-///
-/// Comprehensive export controls and sanctions compliance implementing OFAC,
-/// EU sanctions, UN Security Council restrictions, and BIS regulations with
-/// denied party screening, end-use checks, license determination, re-export
-/// controls, controlled commodities tracking, and automated screening.
-pub mod export_controls;
+#[cfg(test)]
+mod esg_reporting_tests;
 
-/// Trade Compliance Automation Module
-///
-/// Comprehensive trade compliance automation framework implementing HS
-/// classification, origin determination, FTA qualification, customs valuation,
-/// license management, customs broker integration, and AEO certification for
-/// streamlined cross-border trade compliance.
-pub mod trade_compliance;
+#[cfg(test)]
+mod supply_chain_tests;
