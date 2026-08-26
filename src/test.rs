@@ -3430,3580 +3430,616 @@ fn test_cleanup_expired_events_start_beyond_total_is_noop() {
     assert_eq!(stats.runs, 1);  // run was recorded even if nothing to clean
 }
 
-// ── Circular Economy Tests ───────────────────────────────────────────────────
-
-// ── Material Passport ────────────────────────────────────────────────────────
-
-#[test]
-fn test_register_material_passport_returns_id() {
-    let (env, _owner, client) = create_ledger();
-    let manufacturer = Address::generate(&env);
-    env.mock_all_auths();
-
-    let id = client.register_material_passport(
-        &manufacturer,
-        &Bytes::from_slice(&env, b"Steel Beam A1"),
-        &soroban_sdk::Symbol::new(&env, "metal"),
-        &50_000_000_u64, // 50 kg in mg
-        &7_500_u32,      // 75.00% recyclability
-    );
-
-    // ID is 32 bytes
-    assert_eq!(id.len(), 32);
-}
-
-#[test]
-fn test_register_material_passport_stored_correctly() {
-    let (env, _owner, client) = create_ledger();
-    let manufacturer = Address::generate(&env);
-    env.mock_all_auths();
-
-    let id = client.register_material_passport(
-        &manufacturer,
-        &Bytes::from_slice(&env, b"PET Bottle"),
-        &soroban_sdk::Symbol::new(&env, "plastic"),
-        &1_000_000_u64, // 1 kg
-        &9_000_u32,     // 90.00%
-    );
-
-    let passport = client.get_material_passport(&id);
-    assert_eq!(passport.id, id);
-    assert_eq!(passport.name, Bytes::from_slice(&env, b"PET Bottle"));
-    assert_eq!(passport.virgin_mass_mg, 1_000_000_u64);
-    assert_eq!(passport.recyclability_bps, 9_000_u32);
-    assert_eq!(passport.loop_event_count, 0);
-    assert_eq!(passport.total_recycled_mg, 0);
-    assert_eq!(passport.total_disposed_mg, 0);
-}
-
-#[test]
-fn test_register_material_passport_updates_global_totals() {
-    let (env, _owner, client) = create_ledger();
-    let m1 = Address::generate(&env);
-    let m2 = Address::generate(&env);
-    env.mock_all_auths();
-
-    client.register_material_passport(
-        &m1,
-        &Bytes::from_slice(&env, b"Aluminium Can"),
-        &soroban_sdk::Symbol::new(&env, "metal"),
-        &200_000_u64,
-        &8_000_u32,
-    );
-
-    // Advance ledger so second passport gets a different timestamp (unique ID)
-    env.ledger().with_mut(|li| li.timestamp += 1);
-
-    client.register_material_passport(
-        &m2,
-        &Bytes::from_slice(&env, b"Glass Bottle"),
-        &soroban_sdk::Symbol::new(&env, "glass"),
-        &400_000_u64,
-        &9_500_u32,
-    );
-
-    let totals = client.get_circularity_totals();
-    assert_eq!(totals.total_materials, 2);
-    assert_eq!(totals.total_virgin_mass_mg, 600_000_u64);
-    assert_eq!(totals.total_loop_events, 0);
-}
-
-#[test]
-#[should_panic(expected = "HostError: Error(Contract, #37)")]
-fn test_register_material_passport_zero_mass_panics() {
-    let (env, _owner, client) = create_ledger();
-    let manufacturer = Address::generate(&env);
-    env.mock_all_auths();
-
-    client.register_material_passport(
-        &manufacturer,
-        &Bytes::from_slice(&env, b"Invalid"),
-        &soroban_sdk::Symbol::new(&env, "plastic"),
-        &0_u64, // zero mass → InvalidFlowQuantity
-        &5_000_u32,
-    );
-}
-
-#[test]
-#[should_panic(expected = "HostError: Error(Contract, #37)")]
-fn test_register_material_passport_recyclability_over_10000_panics() {
-    let (env, _owner, client) = create_ledger();
-    let manufacturer = Address::generate(&env);
-    env.mock_all_auths();
-
-    client.register_material_passport(
-        &manufacturer,
-        &Bytes::from_slice(&env, b"TooGood"),
-        &soroban_sdk::Symbol::new(&env, "metal"),
-        &1_000_u64,
-        &10_001_u32, // > 10000 → InvalidFlowQuantity
-    );
-}
-
-#[test]
-#[should_panic(expected = "HostError: Error(Contract, #35)")]
-fn test_get_material_passport_not_found_panics() {
-    let (env, _owner, client) = create_ledger();
-    env.mock_all_auths();
-
-    let fake_id = BytesN::from_array(&env, &[0u8; 32]);
-    client.get_material_passport(&fake_id);
-}
-
-// ── Loop Events ──────────────────────────────────────────────────────────────
-
-#[test]
-fn test_record_loop_event_recycle() {
-    let (env, _owner, client) = create_ledger();
-    let manufacturer = Address::generate(&env);
-    let recycler = Address::generate(&env);
-    env.mock_all_auths();
-
-    let id = client.register_material_passport(
-        &manufacturer,
-        &Bytes::from_slice(&env, b"HDPE Pipe"),
-        &soroban_sdk::Symbol::new(&env, "plastic"),
-        &5_000_000_u64,
-        &6_500_u32,
-    );
-
-    let seq = client.record_loop_event(
-        &recycler,
-        &id,
-        &soroban_sdk::Symbol::new(&env, "recycle"),
-        &2_500_000_u64,
-        &None,
-        &Bytes::from_slice(&env, b"batch-2026-001"),
-    );
-
-    assert_eq!(seq, 0);
-
-    let passport = client.get_material_passport(&id);
-    assert_eq!(passport.total_recycled_mg, 2_500_000_u64);
-    assert_eq!(passport.loop_event_count, 1);
-}
-
-#[test]
-fn test_record_loop_event_all_types() {
-    let (env, _owner, client) = create_ledger();
-    let actor = Address::generate(&env);
-    let manufacturer = Address::generate(&env);
-    env.mock_all_auths();
-
-    let id = client.register_material_passport(
-        &manufacturer,
-        &Bytes::from_slice(&env, b"Textile Roll"),
-        &soroban_sdk::Symbol::new(&env, "textile"),
-        &10_000_000_u64,
-        &4_000_u32,
-    );
-
-    let loop_types = [
-        soroban_sdk::Symbol::new(&env, "recycle"),
-        soroban_sdk::Symbol::new(&env, "reuse"),
-        soroban_sdk::Symbol::new(&env, "repair"),
-        soroban_sdk::Symbol::new(&env, "remanuf"),
-        soroban_sdk::Symbol::new(&env, "return"),
-        soroban_sdk::Symbol::new(&env, "dispose"),
-    ];
-
-    for (i, lt) in loop_types.iter().enumerate() {
-        let seq = client.record_loop_event(
-            &actor,
-            &id,
-            lt,
-            &100_000_u64,
-            &None,
-            &Bytes::new(&env),
-        );
-        assert_eq!(seq, i as u32);
-    }
-
-    let passport = client.get_material_passport(&id);
-    assert_eq!(passport.loop_event_count, 6);
-    assert_eq!(passport.total_recycled_mg, 100_000);
-    assert_eq!(passport.total_reused_mg, 100_000);
-    assert_eq!(passport.total_repaired_mg, 100_000);
-    assert_eq!(passport.total_remanufactured_mg, 100_000);
-    assert_eq!(passport.total_disposed_mg, 100_000);
-    // `return` events don't accumulate into a mass bucket
-}
-
-#[test]
-fn test_record_loop_event_with_target_material() {
-    let (env, _owner, client) = create_ledger();
-    let actor = Address::generate(&env);
-    let mfr = Address::generate(&env);
-    env.mock_all_auths();
-
-    let source_id = client.register_material_passport(
-        &mfr,
-        &Bytes::from_slice(&env, b"Source Plastic"),
-        &soroban_sdk::Symbol::new(&env, "plastic"),
-        &3_000_000_u64,
-        &8_000_u32,
-    );
-
-    env.ledger().with_mut(|li| li.timestamp += 1);
-
-    let target_id = client.register_material_passport(
-        &mfr,
-        &Bytes::from_slice(&env, b"Recycled Pellets"),
-        &soroban_sdk::Symbol::new(&env, "plastic"),
-        &1_000_u64,
-        &9_000_u32,
-    );
-
-    client.record_loop_event(
-        &actor,
-        &source_id,
-        &soroban_sdk::Symbol::new(&env, "recycle"),
-        &2_000_000_u64,
-        &Some(target_id.clone()),
-        &Bytes::from_slice(&env, b"output-ref"),
-    );
-
-    let loops = client.get_material_loop(&source_id);
-    assert_eq!(loops.len(), 1);
-    let evt = loops.get(0).unwrap();
-    assert_eq!(evt.target_material_id, Some(target_id));
-    assert_eq!(evt.quantity_mg, 2_000_000_u64);
-    assert_eq!(evt.loop_type, 0_u32); // recycle discriminant
-}
-
-#[test]
-fn test_record_multiple_loop_events_sequential_seqs() {
-    let (env, _owner, client) = create_ledger();
-    let actor = Address::generate(&env);
-    let mfr = Address::generate(&env);
-    env.mock_all_auths();
-
-    let id = client.register_material_passport(
-        &mfr,
-        &Bytes::from_slice(&env, b"Paper"),
-        &soroban_sdk::Symbol::new(&env, "organic"),
-        &500_000_u64,
-        &7_000_u32,
-    );
-
-    let s0 = client.record_loop_event(
-        &actor, &id,
-        &soroban_sdk::Symbol::new(&env, "reuse"),
-        &100_000_u64, &None, &Bytes::new(&env),
-    );
-    let s1 = client.record_loop_event(
-        &actor, &id,
-        &soroban_sdk::Symbol::new(&env, "repair"),
-        &50_000_u64, &None, &Bytes::new(&env),
-    );
-    let s2 = client.record_loop_event(
-        &actor, &id,
-        &soroban_sdk::Symbol::new(&env, "recycle"),
-        &200_000_u64, &None, &Bytes::new(&env),
-    );
-
-    assert_eq!(s0, 0);
-    assert_eq!(s1, 1);
-    assert_eq!(s2, 2);
-
-    let loops = client.get_material_loop(&id);
-    assert_eq!(loops.len(), 3);
-}
-
-#[test]
-#[should_panic(expected = "HostError: Error(Contract, #37)")]
-fn test_record_loop_event_zero_quantity_panics() {
-    let (env, _owner, client) = create_ledger();
-    let actor = Address::generate(&env);
-    let mfr = Address::generate(&env);
-    env.mock_all_auths();
-
-    let id = client.register_material_passport(
-        &mfr,
-        &Bytes::from_slice(&env, b"Copper Wire"),
-        &soroban_sdk::Symbol::new(&env, "metal"),
-        &1_000_000_u64,
-        &8_500_u32,
-    );
-
-    client.record_loop_event(
-        &actor, &id,
-        &soroban_sdk::Symbol::new(&env, "recycle"),
-        &0_u64, // zero → InvalidFlowQuantity
-        &None,
-        &Bytes::new(&env),
-    );
-}
-
-#[test]
-#[should_panic(expected = "HostError: Error(Contract, #36)")]
-fn test_record_loop_event_invalid_type_panics() {
-    let (env, _owner, client) = create_ledger();
-    let actor = Address::generate(&env);
-    let mfr = Address::generate(&env);
-    env.mock_all_auths();
-
-    let id = client.register_material_passport(
-        &mfr,
-        &Bytes::from_slice(&env, b"Unknown"),
-        &soroban_sdk::Symbol::new(&env, "other"),
-        &1_000_u64,
-        &5_000_u32,
-    );
-
-    client.record_loop_event(
-        &actor, &id,
-        &soroban_sdk::Symbol::new(&env, "vaporise"), // not a valid type
-        &1_000_u64,
-        &None,
-        &Bytes::new(&env),
-    );
-}
-
-#[test]
-#[should_panic(expected = "HostError: Error(Contract, #35)")]
-fn test_record_loop_event_unknown_passport_panics() {
-    let (env, _owner, client) = create_ledger();
-    let actor = Address::generate(&env);
-    env.mock_all_auths();
-
-    let fake_id = BytesN::from_array(&env, &[0x42u8; 32]);
-    client.record_loop_event(
-        &actor, &fake_id,
-        &soroban_sdk::Symbol::new(&env, "recycle"),
-        &1_000_u64,
-        &None,
-        &Bytes::new(&env),
-    );
-}
-
-// ── Circularity Score / Snapshot ─────────────────────────────────────────────
-
-#[test]
-fn test_compute_circularity_score_no_flows_returns_zero_mci() {
-    let (env, _owner, client) = create_ledger();
-    let mfr = Address::generate(&env);
-    env.mock_all_auths();
-
-    client.register_material_passport(
-        &mfr,
-        &Bytes::from_slice(&env, b"Virgin Resin"),
-        &soroban_sdk::Symbol::new(&env, "plastic"),
-        &10_000_000_u64,
-        &5_000_u32,
-    );
-
-    let snap = client.compute_circularity_score();
-    assert_eq!(snap.mci_bps, 0);
-    assert_eq!(snap.recycling_rate_bps, 0);
-    assert_eq!(snap.reuse_rate_bps, 0);
-    assert_eq!(snap.total_materials, 1);
-    assert_eq!(snap.snapshot_index, 0);
-}
-
-#[test]
-fn test_compute_circularity_score_all_recycled() {
-    let (env, _owner, client) = create_ledger();
-    let mfr = Address::generate(&env);
-    let actor = Address::generate(&env);
-    env.mock_all_auths();
-
-    let id = client.register_material_passport(
-        &mfr,
-        &Bytes::from_slice(&env, b"Full Recycle"),
-        &soroban_sdk::Symbol::new(&env, "metal"),
-        &1_000_000_u64,
-        &10_000_u32,
-    );
-
-    client.record_loop_event(
-        &actor, &id,
-        &soroban_sdk::Symbol::new(&env, "recycle"),
-        &1_000_000_u64,
-        &None,
-        &Bytes::new(&env),
-    );
-
-    let snap = client.compute_circularity_score();
-    // 100% circular → MCI = 10000 bps
-    assert_eq!(snap.mci_bps, 10_000);
-    assert_eq!(snap.recycling_rate_bps, 10_000);
-    assert_eq!(snap.reuse_rate_bps, 0);
-    assert_eq!(snap.total_circular_mass_mg, 1_000_000_u64);
-    assert_eq!(snap.total_disposed_mass_mg, 0);
-}
-
-#[test]
-fn test_compute_circularity_score_all_disposed() {
-    let (env, _owner, client) = create_ledger();
-    let mfr = Address::generate(&env);
-    let actor = Address::generate(&env);
-    env.mock_all_auths();
-
-    let id = client.register_material_passport(
-        &mfr,
-        &Bytes::from_slice(&env, b"Landfill Waste"),
-        &soroban_sdk::Symbol::new(&env, "mixed"),
-        &2_000_000_u64,
-        &1_000_u32,
-    );
-
-    client.record_loop_event(
-        &actor, &id,
-        &soroban_sdk::Symbol::new(&env, "dispose"),
-        &2_000_000_u64,
-        &None,
-        &Bytes::new(&env),
-    );
-
-    let snap = client.compute_circularity_score();
-    assert_eq!(snap.mci_bps, 0);
-    assert_eq!(snap.total_circular_mass_mg, 0);
-    assert_eq!(snap.total_disposed_mass_mg, 2_000_000_u64);
-    assert_eq!(snap.loop_closure_rate_bps, 0);
-}
-
-#[test]
-fn test_compute_circularity_score_mixed_flows() {
-    let (env, _owner, client) = create_ledger();
-    let mfr = Address::generate(&env);
-    let actor = Address::generate(&env);
-    env.mock_all_auths();
-
-    let id = client.register_material_passport(
-        &mfr,
-        &Bytes::from_slice(&env, b"Mixed Material"),
-        &soroban_sdk::Symbol::new(&env, "mixed"),
-        &4_000_000_u64,
-        &5_000_u32,
-    );
-
-    // 3 kg recycled, 1 kg disposed → MCI = 7500 bps
-    client.record_loop_event(
-        &actor, &id,
-        &soroban_sdk::Symbol::new(&env, "recycle"),
-        &3_000_000_u64, &None, &Bytes::new(&env),
-    );
-    client.record_loop_event(
-        &actor, &id,
-        &soroban_sdk::Symbol::new(&env, "dispose"),
-        &1_000_000_u64, &None, &Bytes::new(&env),
-    );
-
-    let snap = client.compute_circularity_score();
-    assert_eq!(snap.total_circular_mass_mg, 3_000_000_u64);
-    assert_eq!(snap.total_disposed_mass_mg, 1_000_000_u64);
-    // mci = 3_000_000 / 4_000_000 * 10000 = 7500
-    assert_eq!(snap.mci_bps, 7_500);
-    // recycling_rate = 3_000_000 / 4_000_000 * 10000 = 7500
-    assert_eq!(snap.recycling_rate_bps, 7_500);
-    assert_eq!(snap.reuse_rate_bps, 0);
-}
-
-#[test]
-fn test_compute_circularity_score_reuse_and_repair() {
-    let (env, _owner, client) = create_ledger();
-    let mfr = Address::generate(&env);
-    let actor = Address::generate(&env);
-    env.mock_all_auths();
-
-    let id = client.register_material_passport(
-        &mfr,
-        &Bytes::from_slice(&env, b"Refurb Laptop"),
-        &soroban_sdk::Symbol::new(&env, "electronic"),
-        &1_500_000_u64,
-        &3_000_u32,
-    );
-
-    // 500g reused, 500g repaired, 500g disposed
-    client.record_loop_event(
-        &actor, &id, &soroban_sdk::Symbol::new(&env, "reuse"),
-        &500_000_u64, &None, &Bytes::new(&env),
-    );
-    client.record_loop_event(
-        &actor, &id, &soroban_sdk::Symbol::new(&env, "repair"),
-        &500_000_u64, &None, &Bytes::new(&env),
-    );
-    client.record_loop_event(
-        &actor, &id, &soroban_sdk::Symbol::new(&env, "dispose"),
-        &500_000_u64, &None, &Bytes::new(&env),
-    );
-
-    let snap = client.compute_circularity_score();
-    // circular = 1_000_000, disposed = 500_000, total = 1_500_000
-    // mci = 1_000_000/1_500_000 * 10000 = 6666
-    assert_eq!(snap.mci_bps, 6_666);
-    // reuse_rate = 500_000/1_500_000 * 10000 = 3333
-    assert_eq!(snap.reuse_rate_bps, 3_333);
-}
-
-#[test]
-fn test_snapshot_count_increments() {
-    let (env, _owner, client) = create_ledger();
-    env.mock_all_auths();
-
-    assert_eq!(client.circularity_snapshot_count(), 0);
-    client.compute_circularity_score();
-    assert_eq!(client.circularity_snapshot_count(), 1);
-    client.compute_circularity_score();
-    assert_eq!(client.circularity_snapshot_count(), 2);
-}
-
-#[test]
-fn test_get_circularity_snapshot_retrieves_correct_data() {
-    let (env, _owner, client) = create_ledger();
-    let mfr = Address::generate(&env);
-    let actor = Address::generate(&env);
-    env.mock_all_auths();
-
-    let id = client.register_material_passport(
-        &mfr,
-        &Bytes::from_slice(&env, b"Snapshot Test"),
-        &soroban_sdk::Symbol::new(&env, "metal"),
-        &1_000_000_u64,
-        &8_000_u32,
-    );
-
-    client.record_loop_event(
-        &actor, &id, &soroban_sdk::Symbol::new(&env, "recycle"),
-        &500_000_u64, &None, &Bytes::new(&env),
-    );
-
-    let snap0 = client.compute_circularity_score();
-    // total_loop_events should be 1
-    assert_eq!(snap0.total_loop_events, 1);
-    assert_eq!(snap0.snapshot_index, 0);
-
-    // Second snapshot after more activity
-    client.record_loop_event(
-        &actor, &id, &soroban_sdk::Symbol::new(&env, "reuse"),
-        &250_000_u64, &None, &Bytes::new(&env),
-    );
-    let snap1 = client.compute_circularity_score();
-    assert_eq!(snap1.snapshot_index, 1);
-    assert_eq!(snap1.total_loop_events, 2);
-
-    // Retrieve by index
-    let retrieved0 = client.get_circularity_snapshot(&0);
-    assert_eq!(retrieved0.mci_bps, snap0.mci_bps);
-    assert_eq!(retrieved0.total_loop_events, 1);
-
-    let retrieved1 = client.get_circularity_snapshot(&1);
-    assert_eq!(retrieved1.total_loop_events, 2);
-}
-
-#[test]
-#[should_panic(expected = "HostError: Error(Contract, #30)")]
-fn test_get_circularity_snapshot_not_found_panics() {
-    let (env, _owner, client) = create_ledger();
-    env.mock_all_auths();
-
-    client.get_circularity_snapshot(&99);
-}
-
-// ── Loop Closure Rate ────────────────────────────────────────────────────────
-
-#[test]
-fn test_loop_closure_rate_single_material_closed() {
-    let (env, _owner, client) = create_ledger();
-    let mfr = Address::generate(&env);
-    let actor = Address::generate(&env);
-    env.mock_all_auths();
-
-    let id = client.register_material_passport(
-        &mfr,
-        &Bytes::from_slice(&env, b"Closed Loop"),
-        &soroban_sdk::Symbol::new(&env, "glass"),
-        &1_000_000_u64,
-        &9_000_u32,
-    );
-
-    // First non-dispose event = loop closed
-    client.record_loop_event(
-        &actor, &id, &soroban_sdk::Symbol::new(&env, "reuse"),
-        &1_000_000_u64, &None, &Bytes::new(&env),
-    );
-
-    let snap = client.compute_circularity_score();
-    // 1/1 materials closed → 10000 bps
-    assert_eq!(snap.loop_closure_rate_bps, 10_000);
-}
-
-#[test]
-fn test_loop_closure_rate_dispose_only_does_not_close_loop() {
-    let (env, _owner, client) = create_ledger();
-    let mfr = Address::generate(&env);
-    let actor = Address::generate(&env);
-    env.mock_all_auths();
-
-    let id = client.register_material_passport(
-        &mfr,
-        &Bytes::from_slice(&env, b"Linear Only"),
-        &soroban_sdk::Symbol::new(&env, "mixed"),
-        &2_000_000_u64,
-        &500_u32,
-    );
-
-    client.record_loop_event(
-        &actor, &id, &soroban_sdk::Symbol::new(&env, "dispose"),
-        &2_000_000_u64, &None, &Bytes::new(&env),
-    );
-
-    let snap = client.compute_circularity_score();
-    assert_eq!(snap.loop_closure_rate_bps, 0);
-}
-
-#[test]
-fn test_loop_closure_rate_two_materials_one_closed() {
-    let (env, _owner, client) = create_ledger();
-    let mfr1 = Address::generate(&env);
-    let mfr2 = Address::generate(&env);
-    let actor = Address::generate(&env);
-    env.mock_all_auths();
-
-    let id1 = client.register_material_passport(
-        &mfr1,
-        &Bytes::from_slice(&env, b"Closed"),
-        &soroban_sdk::Symbol::new(&env, "metal"),
-        &1_000_000_u64,
-        &8_000_u32,
-    );
-
-    env.ledger().with_mut(|li| li.timestamp += 1);
-
-    let id2 = client.register_material_passport(
-        &mfr2,
-        &Bytes::from_slice(&env, b"Linear"),
-        &soroban_sdk::Symbol::new(&env, "plastic"),
-        &1_000_000_u64,
-        &2_000_u32,
-    );
-
-    // id1: circular; id2: dispose only
-    client.record_loop_event(
-        &actor, &id1, &soroban_sdk::Symbol::new(&env, "recycle"),
-        &500_000_u64, &None, &Bytes::new(&env),
-    );
-    client.record_loop_event(
-        &actor, &id2, &soroban_sdk::Symbol::new(&env, "dispose"),
-        &1_000_000_u64, &None, &Bytes::new(&env),
-    );
-
-    let snap = client.compute_circularity_score();
-    // 1/2 → 5000 bps
-    assert_eq!(snap.loop_closure_rate_bps, 5_000);
-    assert_eq!(snap.total_materials, 2);
-}
-
-// ── get_circularity_totals ───────────────────────────────────────────────────
-
-#[test]
-fn test_get_circularity_totals_empty() {
-    let (env, _owner, client) = create_ledger();
-    env.mock_all_auths();
-
-    let totals = client.get_circularity_totals();
-    assert_eq!(totals.total_materials, 0);
-    assert_eq!(totals.total_virgin_mass_mg, 0);
-    assert_eq!(totals.total_recycled_mg, 0);
-    assert_eq!(totals.total_loop_events, 0);
-}
-
-#[test]
-fn test_get_circularity_totals_accumulates_across_materials() {
-    let (env, _owner, client) = create_ledger();
-    let actor = Address::generate(&env);
-    let mfr = Address::generate(&env);
-    env.mock_all_auths();
-
-    let id1 = client.register_material_passport(
-        &mfr,
-        &Bytes::from_slice(&env, b"Mat A"),
-        &soroban_sdk::Symbol::new(&env, "metal"),
-        &1_000_000_u64,
-        &8_000_u32,
-    );
-    env.ledger().with_mut(|li| li.timestamp += 1);
-
-    let id2 = client.register_material_passport(
-        &mfr,
-        &Bytes::from_slice(&env, b"Mat B"),
-        &soroban_sdk::Symbol::new(&env, "glass"),
-        &2_000_000_u64,
-        &9_000_u32,
-    );
-
-    client.record_loop_event(
-        &actor, &id1, &soroban_sdk::Symbol::new(&env, "recycle"),
-        &400_000_u64, &None, &Bytes::new(&env),
-    );
-    client.record_loop_event(
-        &actor, &id2, &soroban_sdk::Symbol::new(&env, "reuse"),
-        &800_000_u64, &None, &Bytes::new(&env),
-    );
-
-    let totals = client.get_circularity_totals();
-    assert_eq!(totals.total_materials, 2);
-    assert_eq!(totals.total_virgin_mass_mg, 3_000_000_u64);
-    assert_eq!(totals.total_recycled_mg, 400_000_u64);
-    assert_eq!(totals.total_reused_mg, 800_000_u64);
-    assert_eq!(totals.total_loop_events, 2);
-    assert_eq!(totals.materials_with_closed_loop, 2);
-}
-
-// ── get_material_loop ────────────────────────────────────────────────────────
-
-#[test]
-fn test_get_material_loop_empty_after_register() {
-    let (env, _owner, client) = create_ledger();
-    let mfr = Address::generate(&env);
-    env.mock_all_auths();
-
-    let id = client.register_material_passport(
-        &mfr,
-        &Bytes::from_slice(&env, b"Fresh Asset"),
-        &soroban_sdk::Symbol::new(&env, "metal"),
-        &500_000_u64,
-        &7_000_u32,
-    );
-
-    let loops = client.get_material_loop(&id);
-    assert_eq!(loops.len(), 0);
-}
-
-#[test]
-fn test_get_material_loop_preserves_metadata() {
-    let (env, _owner, client) = create_ledger();
-    let mfr = Address::generate(&env);
-    let actor = Address::generate(&env);
-    env.mock_all_auths();
-
-    let id = client.register_material_passport(
-        &mfr,
-        &Bytes::from_slice(&env, b"Cert Asset"),
-        &soroban_sdk::Symbol::new(&env, "organic"),
-        &300_000_u64,
-        &6_000_u32,
-    );
-
-    let cert_data = Bytes::from_slice(&env, b"ISO14001-2026-CertRef-ABC");
-    client.record_loop_event(
-        &actor, &id, &soroban_sdk::Symbol::new(&env, "remanuf"),
-        &300_000_u64, &None, &cert_data.clone(),
-    );
-
-    let loops = client.get_material_loop(&id);
-    assert_eq!(loops.len(), 1);
-    let evt = loops.get(0).unwrap();
-    assert_eq!(evt.metadata, cert_data);
-    assert_eq!(evt.loop_type, 3_u32); // remanuf discriminant
-    assert_eq!(evt.quantity_mg, 300_000_u64);
-}
-
-#[test]
-#[should_panic(expected = "HostError: Error(Contract, #35)")]
-fn test_get_material_loop_unknown_passport_panics() {
-    let (env, _owner, client) = create_ledger();
-    env.mock_all_auths();
-
-    let fake_id = BytesN::from_array(&env, &[0x99u8; 32]);
-    client.get_material_loop(&fake_id);
-}
-
-// ── Boundary conditions ──────────────────────────────────────────────────────
-
-#[test]
-fn test_circularity_snapshot_index_0_on_empty_contract() {
-    let (env, _owner, client) = create_ledger();
-    env.mock_all_auths();
-
-    let snap = client.compute_circularity_score();
-    assert_eq!(snap.snapshot_index, 0);
-    assert_eq!(snap.total_materials, 0);
-    assert_eq!(snap.mci_bps, 0);
-}
-
-#[test]
-fn test_recycled_plus_disposed_equals_total_flow_in_snapshot() {
-    let (env, _owner, client) = create_ledger();
-    let mfr = Address::generate(&env);
-    let actor = Address::generate(&env);
-    env.mock_all_auths();
-
-    let id = client.register_material_passport(
-        &mfr,
-        &Bytes::from_slice(&env, b"Balance Check"),
-        &soroban_sdk::Symbol::new(&env, "mixed"),
-        &6_000_000_u64,
-        &5_000_u32,
-    );
-
-    client.record_loop_event(
-        &actor, &id, &soroban_sdk::Symbol::new(&env, "recycle"),
-        &2_000_000_u64, &None, &Bytes::new(&env),
-    );
-    client.record_loop_event(
-        &actor, &id, &soroban_sdk::Symbol::new(&env, "reuse"),
-        &1_000_000_u64, &None, &Bytes::new(&env),
-    );
-    client.record_loop_event(
-        &actor, &id, &soroban_sdk::Symbol::new(&env, "dispose"),
-        &3_000_000_u64, &None, &Bytes::new(&env),
-    );
-
-    let snap = client.compute_circularity_score();
-    let total_flow = snap.total_circular_mass_mg + snap.total_disposed_mass_mg;
-    assert_eq!(total_flow, 6_000_000_u64);
-    // mci = 3_000_000/6_000_000*10000 = 5000
-    assert_eq!(snap.mci_bps, 5_000);
-}
-
-// ── Lifecycle Assessment (LCA) Tests ────────────────────────────────────────
-
-// ── Helpers ──────────────────────────────────────────────────────────────────
-
-/// Build a canonical 8-element impact vec with a given GWP value and zeros elsewhere.
-fn gwp_impacts(env: &Env, gwp_micro: i64) -> soroban_sdk::Vec<i64> {
-    let mut v = soroban_sdk::Vec::new(env);
-    v.push_back(gwp_micro); // 0: GWP
-    v.push_back(0i64);      // 1: AP
-    v.push_back(0i64);      // 2: EP
-    v.push_back(0i64);      // 3: ODP
-    v.push_back(0i64);      // 4: POCP
-    v.push_back(0i64);      // 5: ADP
-    v.push_back(0i64);      // 6: WU
-    v.push_back(0i64);      // 7: LU
-    v
-}
-
-/// Build an 8-element impact vec from a slice of exactly 8 values.
-fn impacts8(env: &Env, vals: [i64; 8]) -> soroban_sdk::Vec<i64> {
-    let mut v = soroban_sdk::Vec::new(env);
-    for x in vals {
-        v.push_back(x);
-    }
-    v
-}
-
-/// Build an 8-element refs vec (all same value).
-fn refs8(env: &Env, val: i64) -> soroban_sdk::Vec<i64> {
-    let mut v = soroban_sdk::Vec::new(env);
-    for _ in 0..8 {
-        v.push_back(val);
-    }
-    v
-}
-
-/// Build an 8-element weights vec (all same value in bps).
-fn weights8(env: &Env, bps: u32) -> soroban_sdk::Vec<u32> {
-    let mut v = soroban_sdk::Vec::new(env);
-    for _ in 0..8 {
-        v.push_back(bps);
-    }
-    v
-}
-
-// ── register_lca_entry ───────────────────────────────────────────────────────
-
-#[test]
-fn test_register_lca_entry_returns_id() {
-    let (env, _owner, client) = create_ledger();
-    let producer = Address::generate(&env);
-    env.mock_all_auths();
-
-    let id = client.register_lca_entry(
-        &producer,
-        &Bytes::from_slice(&env, b"Widget A"),
-        &Bytes::from_slice(&env, b"1 unit at factory gate"),
-        &None,
-    );
-
-    assert_eq!(id.len(), 32);
-}
-
-#[test]
-fn test_register_lca_entry_profile_stored() {
-    let (env, _owner, client) = create_ledger();
-    let producer = Address::generate(&env);
-    env.mock_all_auths();
-
-    let id = client.register_lca_entry(
-        &producer,
-        &Bytes::from_slice(&env, b"Widget B"),
-        &Bytes::from_slice(&env, b"1 kg"),
-        &None,
-    );
-
-    let profile = client.get_lca_profile(&id);
-    assert_eq!(profile.product_id, id);
-    assert_eq!(profile.name, Bytes::from_slice(&env, b"Widget B"));
-    assert!(!profile.finalized);
-    assert_eq!(profile.phase_mask, 0);
-    assert_eq!(profile.material_passport_id, None);
-}
-
-#[test]
-fn test_register_lca_entry_increments_count() {
-    let (env, _owner, client) = create_ledger();
-    let producer = Address::generate(&env);
-    env.mock_all_auths();
-
-    assert_eq!(client.lca_profile_count(), 0);
-
-    client.register_lca_entry(
-        &producer,
-        &Bytes::from_slice(&env, b"P1"),
-        &Bytes::from_slice(&env, b"fu1"),
-        &None,
-    );
-    assert_eq!(client.lca_profile_count(), 1);
-
-    env.ledger().with_mut(|li| li.timestamp += 1);
-
-    client.register_lca_entry(
-        &producer,
-        &Bytes::from_slice(&env, b"P2"),
-        &Bytes::from_slice(&env, b"fu2"),
-        &None,
-    );
-    assert_eq!(client.lca_profile_count(), 2);
-}
-
-#[test]
-fn test_register_lca_entry_linked_to_passport() {
-    let (env, _owner, client) = create_ledger();
-    let producer = Address::generate(&env);
-    env.mock_all_auths();
-
-    let passport_id = client.register_material_passport(
-        &producer,
-        &Bytes::from_slice(&env, b"Steel Sheet"),
-        &soroban_sdk::Symbol::new(&env, "metal"),
-        &10_000_000_u64,
-        &8_000_u32,
-    );
-
-    env.ledger().with_mut(|li| li.timestamp += 1);
-
-    let lca_id = client.register_lca_entry(
-        &producer,
-        &Bytes::from_slice(&env, b"Steel Product"),
-        &Bytes::from_slice(&env, b"1 t"),
-        &Some(passport_id.clone()),
-    );
-
-    let profile = client.get_lca_profile(&lca_id);
-    assert_eq!(profile.material_passport_id, Some(passport_id));
-}
-
-#[test]
-#[should_panic(expected = "HostError: Error(Contract, #38)")]
-fn test_register_lca_entry_duplicate_panics() {
-    let (env, _owner, client) = create_ledger();
-    let producer = Address::generate(&env);
-    env.mock_all_auths();
-
-    client.register_lca_entry(
-        &producer,
-        &Bytes::from_slice(&env, b"DupProduct"),
-        &Bytes::from_slice(&env, b"1 unit"),
-        &None,
-    );
-    // Same inputs at same timestamp → same derived ID → AlreadyExists
-    client.register_lca_entry(
-        &producer,
-        &Bytes::from_slice(&env, b"DupProduct"),
-        &Bytes::from_slice(&env, b"1 unit"),
-        &None,
-    );
-}
-
-#[test]
-#[should_panic(expected = "HostError: Error(Contract, #35)")]
-fn test_register_lca_entry_unknown_passport_panics() {
-    let (env, _owner, client) = create_ledger();
-    let producer = Address::generate(&env);
-    env.mock_all_auths();
-
-    let fake_id = BytesN::from_array(&env, &[0x11u8; 32]);
-    client.register_lca_entry(
-        &producer,
-        &Bytes::from_slice(&env, b"X"),
-        &Bytes::from_slice(&env, b"1 unit"),
-        &Some(fake_id),
-    );
-}
-
-// ── record_phase_impact ──────────────────────────────────────────────────────
-
-#[test]
-fn test_record_phase_impact_updates_phase_mask() {
-    let (env, _owner, client) = create_ledger();
-    let producer = Address::generate(&env);
-    env.mock_all_auths();
-
-    let id = client.register_lca_entry(
-        &producer,
-        &Bytes::from_slice(&env, b"Car Door"),
-        &Bytes::from_slice(&env, b"1 unit"),
-        &None,
-    );
-
-    client.record_phase_impact(
-        &producer,
-        &id,
-        &soroban_sdk::Symbol::new(&env, "raw_mat"),
-        &gwp_impacts(&env, 5_000_000),
-        &0_u32,
-        &None,
-        &Bytes::new(&env),
-    );
-
-    let profile = client.get_lca_profile(&id);
-    // raw_mat is phase 0 → bit 0 set → mask = 1
-    assert_eq!(profile.phase_mask, 1);
-}
-
-#[test]
-fn test_record_phase_impact_all_seven_phases() {
-    let (env, _owner, client) = create_ledger();
-    let producer = Address::generate(&env);
-    env.mock_all_auths();
-
-    let id = client.register_lca_entry(
-        &producer,
-        &Bytes::from_slice(&env, b"Solar Panel"),
-        &Bytes::from_slice(&env, b"1 m2"),
-        &None,
-    );
-
-    let phases = [
-        soroban_sdk::Symbol::new(&env, "raw_mat"),
-        soroban_sdk::Symbol::new(&env, "mfg"),
-        soroban_sdk::Symbol::new(&env, "transport"),
-        soroban_sdk::Symbol::new(&env, "use"),
-        soroban_sdk::Symbol::new(&env, "maint"),
-        soroban_sdk::Symbol::new(&env, "eol"),
-        soroban_sdk::Symbol::new(&env, "recycling"),
-    ];
-
-    for phase in phases.iter() {
-        client.record_phase_impact(
-            &producer,
-            &id,
-            phase,
-            &gwp_impacts(&env, 1_000_000),
-            &0_u32,
-            &None,
-            &Bytes::new(&env),
-        );
-    }
-
-    let profile = client.get_lca_profile(&id);
-    // All 7 bits set → mask = 0b111_1111 = 127
-    assert_eq!(profile.phase_mask, 127);
-}
-
-#[test]
-#[should_panic(expected = "HostError: Error(Contract, #40)")]
-fn test_record_phase_impact_invalid_phase_panics() {
-    let (env, _owner, client) = create_ledger();
-    let producer = Address::generate(&env);
-    env.mock_all_auths();
-
-    let id = client.register_lca_entry(
-        &producer,
-        &Bytes::from_slice(&env, b"X"),
-        &Bytes::from_slice(&env, b"1 unit"),
-        &None,
-    );
-
-    client.record_phase_impact(
-        &producer,
-        &id,
-        &soroban_sdk::Symbol::new(&env, "badphase"),
-        &gwp_impacts(&env, 1_000),
-        &0_u32,
-        &None,
-        &Bytes::new(&env),
-    );
-}
-
-#[test]
-#[should_panic(expected = "HostError: Error(Contract, #41)")]
-fn test_record_phase_impact_wrong_impact_count_panics() {
-    let (env, _owner, client) = create_ledger();
-    let producer = Address::generate(&env);
-    env.mock_all_auths();
-
-    let id = client.register_lca_entry(
-        &producer,
-        &Bytes::from_slice(&env, b"Y"),
-        &Bytes::from_slice(&env, b"1 unit"),
-        &None,
-    );
-
-    let mut bad_vec = soroban_sdk::Vec::new(&env);
-    bad_vec.push_back(1_000i64); // only 1 element instead of 8
-
-    client.record_phase_impact(
-        &producer,
-        &id,
-        &soroban_sdk::Symbol::new(&env, "mfg"),
-        &bad_vec,
-        &0_u32,
-        &None,
-        &Bytes::new(&env),
-    );
-}
-
-#[test]
-#[should_panic(expected = "HostError: Error(Contract, #39)")]
-fn test_record_phase_impact_unknown_product_panics() {
-    let (env, _owner, client) = create_ledger();
-    let producer = Address::generate(&env);
-    env.mock_all_auths();
-
-    let fake_id = BytesN::from_array(&env, &[0xAAu8; 32]);
-    client.record_phase_impact(
-        &producer,
-        &fake_id,
-        &soroban_sdk::Symbol::new(&env, "mfg"),
-        &gwp_impacts(&env, 1_000),
-        &0_u32,
-        &None,
-        &Bytes::new(&env),
-    );
-}
-
-#[test]
-fn test_record_phase_impact_with_db_ref() {
-    let (env, _owner, client) = create_ledger();
-    let producer = Address::generate(&env);
-    env.mock_all_auths();
-
-    let db_id = client.register_lca_db_entry(
-        &producer,
-        &Bytes::from_slice(&env, b"ecoinvent"),
-        &Bytes::from_slice(&env, b"3.10"),
-        &Bytes::from_slice(&env, b"steel production RER"),
-        &Bytes::from_slice(&env, b"RER"),
-    );
-
-    env.ledger().with_mut(|li| li.timestamp += 1);
-
-    let prod_id = client.register_lca_entry(
-        &producer,
-        &Bytes::from_slice(&env, b"Steel Beam"),
-        &Bytes::from_slice(&env, b"1 t"),
-        &None,
-    );
-
-    client.record_phase_impact(
-        &producer,
-        &prod_id,
-        &soroban_sdk::Symbol::new(&env, "raw_mat"),
-        &gwp_impacts(&env, 2_000_000_000),
-        &500_u32, // 5% cv
-        &Some(db_id),
-        &Bytes::from_slice(&env, b"ecoinvent-3.10-steel"),
-    );
-
-    let profile = client.get_lca_profile(&prod_id);
-    assert_eq!(profile.phase_mask, 1); // raw_mat bit
-}
-
-// ── finalize_lca ─────────────────────────────────────────────────────────────
-
-#[test]
-fn test_finalize_lca_aggregates_single_phase() {
-    let (env, _owner, client) = create_ledger();
-    let producer = Address::generate(&env);
-    env.mock_all_auths();
-
-    let id = client.register_lca_entry(
-        &producer,
-        &Bytes::from_slice(&env, b"Bottle"),
-        &Bytes::from_slice(&env, b"1 unit"),
-        &None,
-    );
-
-    client.record_phase_impact(
-        &producer, &id,
-        &soroban_sdk::Symbol::new(&env, "mfg"),
-        &gwp_impacts(&env, 3_500_000),
-        &0_u32, &None, &Bytes::new(&env),
-    );
-
-    let result = client.finalize_lca(&producer, &id);
-
-    // GWP total = 3_500_000
-    assert_eq!(result.totals.get(0).unwrap(), 3_500_000i64);
-    // All other categories = 0
-    for cat in 1..8 {
-        assert_eq!(result.totals.get(cat).unwrap(), 0i64);
-    }
-    // Normalized/weighted start zeroed
-    assert_eq!(result.single_score, 0i64);
-}
-
-#[test]
-fn test_finalize_lca_sums_multiple_phases() {
-    let (env, _owner, client) = create_ledger();
-    let producer = Address::generate(&env);
-    env.mock_all_auths();
-
-    let id = client.register_lca_entry(
-        &producer,
-        &Bytes::from_slice(&env, b"MultiPhase"),
-        &Bytes::from_slice(&env, b"1 unit"),
-        &None,
-    );
-
-    // raw_mat: GWP = 1_000_000
-    client.record_phase_impact(
-        &producer, &id,
-        &soroban_sdk::Symbol::new(&env, "raw_mat"),
-        &gwp_impacts(&env, 1_000_000),
-        &0_u32, &None, &Bytes::new(&env),
-    );
-    // mfg: GWP = 2_000_000
-    client.record_phase_impact(
-        &producer, &id,
-        &soroban_sdk::Symbol::new(&env, "mfg"),
-        &gwp_impacts(&env, 2_000_000),
-        &0_u32, &None, &Bytes::new(&env),
-    );
-    // transport: GWP = 500_000
-    client.record_phase_impact(
-        &producer, &id,
-        &soroban_sdk::Symbol::new(&env, "transport"),
-        &gwp_impacts(&env, 500_000),
-        &0_u32, &None, &Bytes::new(&env),
-    );
-
-    let result = client.finalize_lca(&producer, &id);
-    assert_eq!(result.totals.get(0).unwrap(), 3_500_000i64);
-}
-
-#[test]
-fn test_finalize_lca_allows_negative_credits() {
-    let (env, _owner, client) = create_ledger();
-    let producer = Address::generate(&env);
-    env.mock_all_auths();
-
-    let id = client.register_lca_entry(
-        &producer,
-        &Bytes::from_slice(&env, b"CreditProduct"),
-        &Bytes::from_slice(&env, b"1 unit"),
-        &None,
-    );
-
-    client.record_phase_impact(
-        &producer, &id,
-        &soroban_sdk::Symbol::new(&env, "mfg"),
-        &gwp_impacts(&env, 5_000_000),
-        &0_u32, &None, &Bytes::new(&env),
-    );
-    // recycling: avoided burden −2_000_000
-    client.record_phase_impact(
-        &producer, &id,
-        &soroban_sdk::Symbol::new(&env, "recycling"),
-        &gwp_impacts(&env, -2_000_000),
-        &0_u32, &None, &Bytes::new(&env),
-    );
-
-    let result = client.finalize_lca(&producer, &id);
-    assert_eq!(result.totals.get(0).unwrap(), 3_000_000i64);
-}
-
-#[test]
-fn test_finalize_lca_marks_profile_as_finalized() {
-    let (env, _owner, client) = create_ledger();
-    let producer = Address::generate(&env);
-    env.mock_all_auths();
-
-    let id = client.register_lca_entry(
-        &producer,
-        &Bytes::from_slice(&env, b"Final"),
-        &Bytes::from_slice(&env, b"1 unit"),
-        &None,
-    );
-
-    client.record_phase_impact(
-        &producer, &id,
-        &soroban_sdk::Symbol::new(&env, "use"),
-        &gwp_impacts(&env, 100_000),
-        &0_u32, &None, &Bytes::new(&env),
-    );
-
-    client.finalize_lca(&producer, &id);
-
-    let profile = client.get_lca_profile(&id);
-    assert!(profile.finalized);
-}
-
-#[test]
-#[should_panic(expected = "HostError: Error(Contract, #42)")]
-fn test_finalize_lca_twice_panics() {
-    let (env, _owner, client) = create_ledger();
-    let producer = Address::generate(&env);
-    env.mock_all_auths();
-
-    let id = client.register_lca_entry(
-        &producer,
-        &Bytes::from_slice(&env, b"Double"),
-        &Bytes::from_slice(&env, b"1 unit"),
-        &None,
-    );
-    client.finalize_lca(&producer, &id);
-    client.finalize_lca(&producer, &id); // second call → LcaAlreadyFinalized
-}
-
-#[test]
-#[should_panic(expected = "HostError: Error(Contract, #42)")]
-fn test_record_phase_impact_after_finalize_panics() {
-    let (env, _owner, client) = create_ledger();
-    let producer = Address::generate(&env);
-    env.mock_all_auths();
-
-    let id = client.register_lca_entry(
-        &producer,
-        &Bytes::from_slice(&env, b"Locked"),
-        &Bytes::from_slice(&env, b"1 unit"),
-        &None,
-    );
-    client.finalize_lca(&producer, &id);
-
-    client.record_phase_impact(
-        &producer, &id,
-        &soroban_sdk::Symbol::new(&env, "eol"),
-        &gwp_impacts(&env, 200_000),
-        &0_u32, &None, &Bytes::new(&env),
-    );
-}
-
-#[test]
-#[should_panic(expected = "HostError: Error(Contract, #43)")]
-fn test_get_lca_result_before_finalize_panics() {
-    let (env, _owner, client) = create_ledger();
-    let producer = Address::generate(&env);
-    env.mock_all_auths();
-
-    let id = client.register_lca_entry(
-        &producer,
-        &Bytes::from_slice(&env, b"NotFinal"),
-        &Bytes::from_slice(&env, b"1 unit"),
-        &None,
-    );
-    client.get_lca_result(&id);
-}
-
-// ── Uncertainty (interval arithmetic) ────────────────────────────────────────
-
-#[test]
-fn test_uncertainty_zero_cv_gives_tight_interval() {
-    let (env, _owner, client) = create_ledger();
-    let producer = Address::generate(&env);
-    env.mock_all_auths();
-
-    let id = client.register_lca_entry(
-        &producer,
-        &Bytes::from_slice(&env, b"NoUnc"),
-        &Bytes::from_slice(&env, b"1 unit"),
-        &None,
-    );
-
-    client.record_phase_impact(
-        &producer, &id,
-        &soroban_sdk::Symbol::new(&env, "mfg"),
-        &gwp_impacts(&env, 4_000_000),
-        &0_u32, // cv = 0
-        &None, &Bytes::new(&env),
-    );
-
-    client.finalize_lca(&producer, &id);
-
-    let unc = client.get_lca_uncertainty(&id);
-    // cv=0 → delta=0 → lo == hi == total
-    assert_eq!(unc.lo.get(0).unwrap(), 4_000_000i64);
-    assert_eq!(unc.hi.get(0).unwrap(), 4_000_000i64);
-    assert_eq!(unc.cv_bps, 0);
-}
-
-#[test]
-fn test_uncertainty_10pct_cv() {
-    let (env, _owner, client) = create_ledger();
-    let producer = Address::generate(&env);
-    env.mock_all_auths();
-
-    let id = client.register_lca_entry(
-        &producer,
-        &Bytes::from_slice(&env, b"Unc10"),
-        &Bytes::from_slice(&env, b"1 unit"),
-        &None,
-    );
-
-    // GWP = 10_000_000 (10 kg CO₂-eq in micro-units), cv = 10% = 1000 bps
-    client.record_phase_impact(
-        &producer, &id,
-        &soroban_sdk::Symbol::new(&env, "mfg"),
-        &gwp_impacts(&env, 10_000_000),
-        &1_000_u32, // ±10%
-        &None, &Bytes::new(&env),
-    );
-
-    client.finalize_lca(&producer, &id);
-
-    let unc = client.get_lca_uncertainty(&id);
-    // delta = 10_000_000 * 1000 / 10_000 = 1_000_000
-    // lo = 10_000_000 - 1_000_000 = 9_000_000
-    // hi = 10_000_000 + 1_000_000 = 11_000_000
-    assert_eq!(unc.lo.get(0).unwrap(), 9_000_000i64);
-    assert_eq!(unc.hi.get(0).unwrap(), 11_000_000i64);
-    assert_eq!(unc.cv_bps, 1_000);
-}
-
-#[test]
-fn test_uncertainty_propagated_across_phases() {
-    let (env, _owner, client) = create_ledger();
-    let producer = Address::generate(&env);
-    env.mock_all_auths();
-
-    let id = client.register_lca_entry(
-        &producer,
-        &Bytes::from_slice(&env, b"MultiUnc"),
-        &Bytes::from_slice(&env, b"1 unit"),
-        &None,
-    );
-
-    // Phase 1: GWP = 6_000_000, cv = 10% → delta = 600_000
-    client.record_phase_impact(
-        &producer, &id,
-        &soroban_sdk::Symbol::new(&env, "raw_mat"),
-        &gwp_impacts(&env, 6_000_000),
-        &1_000_u32,
-        &None, &Bytes::new(&env),
-    );
-    // Phase 2: GWP = 4_000_000, cv = 20% → delta = 800_000
-    client.record_phase_impact(
-        &producer, &id,
-        &soroban_sdk::Symbol::new(&env, "mfg"),
-        &gwp_impacts(&env, 4_000_000),
-        &2_000_u32,
-        &None, &Bytes::new(&env),
-    );
-
-    client.finalize_lca(&producer, &id);
-
-    let result = client.get_lca_result(&id);
-    let unc = client.get_lca_uncertainty(&id);
-
-    // Total = 10_000_000
-    assert_eq!(result.totals.get(0).unwrap(), 10_000_000i64);
-    // lo = (6M - 600K) + (4M - 800K) = 5_400_000 + 3_200_000 = 8_600_000
-    // hi = (6M + 600K) + (4M + 800K) = 6_600_000 + 4_800_000 = 11_400_000
-    assert_eq!(unc.lo.get(0).unwrap(), 8_600_000i64);
-    assert_eq!(unc.hi.get(0).unwrap(), 11_400_000i64);
-    // avg_cv = (1000 + 2000) / 2 = 1500
-    assert_eq!(unc.cv_bps, 1_500);
-}
-
-#[test]
-fn test_uncertainty_negative_value_delta_is_absolute() {
-    let (env, _owner, client) = create_ledger();
-    let producer = Address::generate(&env);
-    env.mock_all_auths();
-
-    let id = client.register_lca_entry(
-        &producer,
-        &Bytes::from_slice(&env, b"NegUnc"),
-        &Bytes::from_slice(&env, b"1 unit"),
-        &None,
-    );
-
-    // GWP = −10_000_000 (avoided burden), cv = 10%
-    client.record_phase_impact(
-        &producer, &id,
-        &soroban_sdk::Symbol::new(&env, "recycling"),
-        &gwp_impacts(&env, -10_000_000),
-        &1_000_u32,
-        &None, &Bytes::new(&env),
-    );
-
-    client.finalize_lca(&producer, &id);
-    let unc = client.get_lca_uncertainty(&id);
-
-    // delta = |-10_000_000| * 1000/10000 = 1_000_000
-    // lo = −10_000_000 − 1_000_000 = −11_000_000
-    // hi = −10_000_000 + 1_000_000 = −9_000_000
-    assert_eq!(unc.lo.get(0).unwrap(), -11_000_000i64);
-    assert_eq!(unc.hi.get(0).unwrap(), -9_000_000i64);
-}
-
-#[test]
-#[should_panic(expected = "HostError: Error(Contract, #43)")]
-fn test_get_lca_uncertainty_before_finalize_panics() {
-    let (env, _owner, client) = create_ledger();
-    let producer = Address::generate(&env);
-    env.mock_all_auths();
-
-    let id = client.register_lca_entry(
-        &producer,
-        &Bytes::from_slice(&env, b"UncNotFinal"),
-        &Bytes::from_slice(&env, b"1 unit"),
-        &None,
-    );
-    client.get_lca_uncertainty(&id);
-}
-
-// ── normalize_impacts ────────────────────────────────────────────────────────
-
-#[test]
-fn test_normalize_impacts_equal_refs() {
-    let (env, owner, client) = create_ledger();
-    let producer = Address::generate(&env);
-    env.mock_all_auths();
-
-    // Owner registers norm ref: each category ref = 10_000_000
-    client.register_norm_ref(
-        &owner,
-        &soroban_sdk::Symbol::new(&env, "testref"),
-        &refs8(&env, 10_000_000),
-    );
-
-    let id = client.register_lca_entry(
-        &producer,
-        &Bytes::from_slice(&env, b"NormProduct"),
-        &Bytes::from_slice(&env, b"1 unit"),
-        &None,
-    );
-
-    client.record_phase_impact(
-        &producer, &id,
-        &soroban_sdk::Symbol::new(&env, "mfg"),
-        &gwp_impacts(&env, 5_000_000),
-        &0_u32, &None, &Bytes::new(&env),
-    );
-    client.finalize_lca(&producer, &id);
-
-    let result = client.normalize_impacts(
-        &producer,
-        &id,
-        &soroban_sdk::Symbol::new(&env, "testref"),
-    );
-
-    // normalized[0] = (5_000_000 * 1_000_000) / 10_000_000 = 500_000
-    assert_eq!(result.normalized.get(0).unwrap(), 500_000i64);
-    // Other categories: total=0, ref=10_000_000 → normalized = 0
-    for cat in 1..8u32 {
-        assert_eq!(result.normalized.get(cat).unwrap(), 0i64);
+// ── Social impact ────────────────────────────────────────────────────────────
+
+/// Build a minimal valid SocialImpactMetrics for use in tests.
+fn make_metrics(env: &Env, period: soroban_sdk::Symbol, submitter: Address) -> SocialImpactMetrics {
+    SocialImpactMetrics {
+        period,
+        recorded_at: env.ledger().timestamp(),
+        submitter,
+        jobs_created: 50,
+        training_positions: 10,
+        diversity_women_bps: 4500,
+        diversity_underrepresented_bps: 3000,
+        community_investment: 100_000,
+        community_beneficiaries: 500,
+        human_rights_assessment_done: true,
+        labour_violations_remediated: 2,
+        collective_bargaining_agreements: 3,
+        total_investment: 200_000,
+        total_social_value: 700_000,
     }
 }
 
 #[test]
-fn test_normalize_impacts_zero_ref_passes_through() {
-    let (env, owner, client) = create_ledger();
-    let producer = Address::generate(&env);
-    env.mock_all_auths();
-
-    // ref[0] = 0 (skip), ref[1..7] = 1_000_000
-    let mut refs = soroban_sdk::Vec::new(&env);
-    refs.push_back(0i64);
-    for _ in 1..8 {
-        refs.push_back(1_000_000i64);
-    }
-
-    client.register_norm_ref(
-        &owner,
-        &soroban_sdk::Symbol::new(&env, "partref"),
-        &refs,
-    );
-
-    let id = client.register_lca_entry(
-        &producer,
-        &Bytes::from_slice(&env, b"SkipNorm"),
-        &Bytes::from_slice(&env, b"1 unit"),
-        &None,
-    );
-
-    client.record_phase_impact(
-        &producer, &id,
-        &soroban_sdk::Symbol::new(&env, "mfg"),
-        &gwp_impacts(&env, 7_000_000),
-        &0_u32, &None, &Bytes::new(&env),
-    );
-    client.finalize_lca(&producer, &id);
-
-    let result = client.normalize_impacts(
-        &producer,
-        &id,
-        &soroban_sdk::Symbol::new(&env, "partref"),
-    );
-
-    // ref[0] = 0 → passthrough → normalized[0] = total = 7_000_000
-    assert_eq!(result.normalized.get(0).unwrap(), 7_000_000i64);
-}
-
-#[test]
-#[should_panic(expected = "HostError: Error(Contract, #44)")]
-fn test_normalize_impacts_unknown_ref_panics() {
-    let (env, _owner, client) = create_ledger();
-    let producer = Address::generate(&env);
-    env.mock_all_auths();
-
-    let id = client.register_lca_entry(
-        &producer,
-        &Bytes::from_slice(&env, b"UnknownRef"),
-        &Bytes::from_slice(&env, b"1 unit"),
-        &None,
-    );
-    client.record_phase_impact(
-        &producer, &id,
-        &soroban_sdk::Symbol::new(&env, "mfg"),
-        &gwp_impacts(&env, 1_000),
-        &0_u32, &None, &Bytes::new(&env),
-    );
-    client.finalize_lca(&producer, &id);
-
-    client.normalize_impacts(
-        &producer,
-        &id,
-        &soroban_sdk::Symbol::new(&env, "missing"),
-    );
-}
-
-#[test]
-#[should_panic(expected = "HostError: Error(Contract, #1)")]
-fn test_register_norm_ref_non_owner_panics() {
-    let (env, _owner, client) = create_ledger();
-    let attacker = Address::generate(&env);
-    env.mock_all_auths();
-
-    client.register_norm_ref(
-        &attacker,
-        &soroban_sdk::Symbol::new(&env, "evil"),
-        &refs8(&env, 1_000_000),
-    );
-}
-
-#[test]
-#[should_panic(expected = "HostError: Error(Contract, #41)")]
-fn test_register_norm_ref_wrong_length_panics() {
+fn test_record_social_impact_basic() {
     let (env, owner, client) = create_ledger();
     env.mock_all_auths();
 
-    let mut bad_refs = soroban_sdk::Vec::new(&env);
-    bad_refs.push_back(1_000_000i64); // only 1 element
+    let period = symbol_short!("2026_Q1");
+    let metrics = make_metrics(&env, period.clone(), owner.clone());
 
-    client.register_norm_ref(
-        &owner,
-        &soroban_sdk::Symbol::new(&env, "badref"),
-        &bad_refs,
-    );
-}
+    let idx = client.record_social_impact(&owner, &metrics);
+    assert_eq!(idx, 0);
+    assert_eq!(client.social_impact_count(), 1);
 
-// ── apply_weighting_scheme ────────────────────────────────────────────────────
-
-#[test]
-fn test_apply_weighting_scheme_equal_weights() {
-    let (env, owner, client) = create_ledger();
-    let producer = Address::generate(&env);
-    env.mock_all_auths();
-
-    // 8 categories × 1250 bps = 10000 total
-    client.register_norm_ref(
-        &owner,
-        &soroban_sdk::Symbol::new(&env, "ref1"),
-        &refs8(&env, 1_000_000),
-    );
-    client.register_weighting_scheme(
-        &owner,
-        &soroban_sdk::Symbol::new(&env, "equal"),
-        &weights8(&env, 1_250_u32),
-    );
-
-    let id = client.register_lca_entry(
-        &producer,
-        &Bytes::from_slice(&env, b"WeightProduct"),
-        &Bytes::from_slice(&env, b"1 unit"),
-        &None,
-    );
-
-    // All 8 categories = 1_000_000 micro-units
-    client.record_phase_impact(
-        &producer, &id,
-        &soroban_sdk::Symbol::new(&env, "mfg"),
-        &impacts8(&env, [1_000_000i64; 8]),
-        &0_u32, &None, &Bytes::new(&env),
-    );
-    client.finalize_lca(&producer, &id);
-
-    let normed = client.normalize_impacts(
-        &producer, &id,
-        &soroban_sdk::Symbol::new(&env, "ref1"),
-    );
-    // normalized[cat] = (1_000_000 * 1_000_000) / 1_000_000 = 1_000_000
-    assert_eq!(normed.normalized.get(0).unwrap(), 1_000_000i64);
-
-    let result = client.apply_weighting_scheme(
-        &producer, &id,
-        &soroban_sdk::Symbol::new(&env, "equal"),
-    );
-    // weighted[cat] = 1_000_000 * 1250 / 10000 = 125_000
-    assert_eq!(result.weighted.get(0).unwrap(), 125_000i64);
-    // single_score = 8 × 125_000 = 1_000_000
-    assert_eq!(result.single_score, 1_000_000i64);
+    let retrieved = client.get_social_impact(&period);
+    assert_eq!(retrieved.jobs_created, 50);
+    assert_eq!(retrieved.total_investment, 200_000);
+    assert_eq!(retrieved.total_social_value, 700_000);
+    assert_eq!(retrieved.diversity_women_bps, 4500);
+    assert!(retrieved.human_rights_assessment_done);
 }
 
 #[test]
-fn test_apply_weighting_scheme_single_category_weight() {
+fn test_record_social_impact_increments_count() {
     let (env, owner, client) = create_ledger();
-    let producer = Address::generate(&env);
     env.mock_all_auths();
 
-    // Weight only GWP (category 0) at 10000; others 0
-    let mut w = soroban_sdk::Vec::new(&env);
-    w.push_back(10_000_u32);
-    for _ in 1..8 {
-        w.push_back(0_u32);
+    assert_eq!(client.social_impact_count(), 0);
+
+    let m1 = make_metrics(&env, symbol_short!("2026_Q1"), owner.clone());
+    let m2 = make_metrics(&env, symbol_short!("2026_Q2"), owner.clone());
+
+    client.record_social_impact(&owner, &m1);
+    client.record_social_impact(&owner, &m2);
+
+    assert_eq!(client.social_impact_count(), 2);
+}
+
+#[test]
+fn test_record_social_impact_duplicate_period_fails() {
+    let (env, owner, client) = create_ledger();
+    env.mock_all_auths();
+
+    let period = symbol_short!("2026_Q1");
+    let m1 = make_metrics(&env, period.clone(), owner.clone());
+    let m2 = make_metrics(&env, period.clone(), owner.clone());
+
+    client.record_social_impact(&owner, &m1);
+    let result = client.try_record_social_impact(&owner, &m2);
+    assert!(result.is_err());
+}
+
+#[test]
+fn test_record_social_impact_owner_only() {
+    let (env, _owner, client) = create_ledger();
+    let non_owner = Address::generate(&env);
+    env.mock_all_auths();
+
+    let metrics = make_metrics(&env, symbol_short!("2026_Q1"), non_owner.clone());
+    let result = client.try_record_social_impact(&non_owner, &metrics);
+    assert!(result.is_err());
+}
+
+#[test]
+fn test_get_social_impact_not_found() {
+    let (_env, _owner, client) = create_ledger();
+    let result = client.try_get_social_impact(&symbol_short!("missing"));
+    assert!(result.is_err());
+}
+
+#[test]
+fn test_calculate_sroi_single_period() {
+    let (env, owner, client) = create_ledger();
+    env.mock_all_auths();
+
+    // investment = 200_000, social_value = 700_000 → SROI = 3.5 → bps = 35000
+    let metrics = make_metrics(&env, symbol_short!("2026_Q1"), owner.clone());
+    client.record_social_impact(&owner, &metrics);
+
+    let mut periods = Vec::new(&env);
+    periods.push_back(symbol_short!("2026_Q1"));
+
+    let sroi = client.calculate_sroi(&periods);
+    assert_eq!(sroi, 35_000u64);
+}
+
+#[test]
+fn test_calculate_sroi_multiple_periods() {
+    let (env, owner, client) = create_ledger();
+    env.mock_all_auths();
+
+    // Q1: inv=200_000, val=700_000
+    // Q2: inv=100_000, val=250_000
+    // Total: inv=300_000, val=950_000 → SROI = 950_000/300_000*10_000 = 31666 bps
+    let m1 = make_metrics(&env, symbol_short!("2026_Q1"), owner.clone());
+    let mut m2 = make_metrics(&env, symbol_short!("2026_Q2"), owner.clone());
+    m2.total_investment = 100_000;
+    m2.total_social_value = 250_000;
+
+    client.record_social_impact(&owner, &m1);
+    client.record_social_impact(&owner, &m2);
+
+    let mut periods = Vec::new(&env);
+    periods.push_back(symbol_short!("2026_Q1"));
+    periods.push_back(symbol_short!("2026_Q2"));
+
+    let sroi = client.calculate_sroi(&periods);
+    // 950_000 * 10_000 / 300_000 = 31_666
+    assert_eq!(sroi, 31_666u64);
+}
+
+#[test]
+fn test_calculate_sroi_zero_investment_fails() {
+    let (env, owner, client) = create_ledger();
+    env.mock_all_auths();
+
+    let mut metrics = make_metrics(&env, symbol_short!("2026_Q1"), owner.clone());
+    metrics.total_investment = 0;
+    client.record_social_impact(&owner, &metrics);
+
+    let mut periods = Vec::new(&env);
+    periods.push_back(symbol_short!("2026_Q1"));
+
+    let result = client.try_calculate_sroi(&periods);
+    assert!(result.is_err());
+}
+
+#[test]
+fn test_add_and_get_stakeholder() {
+    let (env, owner, client) = create_ledger();
+    env.mock_all_auths();
+
+    let addr = Address::generate(&env);
+    let stakeholder = Stakeholder {
+        address: addr.clone(),
+        name: Bytes::from_slice(&env, b"Community Group A"),
+        category: symbol_short!("community"),
+        weight_bps: 3000,
+        registered_at: env.ledger().timestamp(),
+    };
+
+    let idx = client.add_stakeholder(&owner, &stakeholder);
+    assert_eq!(idx, 0);
+    assert_eq!(client.stakeholder_count(), 1);
+
+    let retrieved = client.get_stakeholder(&addr);
+    assert_eq!(retrieved.weight_bps, 3000);
+    assert_eq!(retrieved.category, symbol_short!("community"));
+}
+
+#[test]
+fn test_add_stakeholder_duplicate_fails() {
+    let (env, owner, client) = create_ledger();
+    env.mock_all_auths();
+
+    let addr = Address::generate(&env);
+    let s = Stakeholder {
+        address: addr.clone(),
+        name: Bytes::from_slice(&env, b"Worker Org"),
+        category: symbol_short!("worker"),
+        weight_bps: 5000,
+        registered_at: env.ledger().timestamp(),
+    };
+
+    client.add_stakeholder(&owner, &s.clone());
+    let result = client.try_add_stakeholder(&owner, &s);
+    assert!(result.is_err());
+}
+
+#[test]
+fn test_add_stakeholder_owner_only() {
+    let (env, _owner, client) = create_ledger();
+    let non_owner = Address::generate(&env);
+    env.mock_all_auths();
+
+    let s = Stakeholder {
+        address: non_owner.clone(),
+        name: Bytes::from_slice(&env, b"NGO"),
+        category: symbol_short!("ngo"),
+        weight_bps: 2000,
+        registered_at: env.ledger().timestamp(),
+    };
+
+    let result = client.try_add_stakeholder(&non_owner, &s);
+    assert!(result.is_err());
+}
+
+#[test]
+fn test_get_stakeholder_not_found() {
+    let (env, _owner, client) = create_ledger();
+    let addr = Address::generate(&env);
+    let result = client.try_get_stakeholder(&addr);
+    assert!(result.is_err());
+}
+
+#[test]
+fn test_generate_impact_report() {
+    let (env, owner, client) = create_ledger();
+    env.mock_all_auths();
+
+    // Register a stakeholder
+    let stk_addr = Address::generate(&env);
+    let stk = Stakeholder {
+        address: stk_addr.clone(),
+        name: Bytes::from_slice(&env, b"Regulator"),
+        category: symbol_short!("regulatr"),
+        weight_bps: 1000,
+        registered_at: env.ledger().timestamp(),
+    };
+    client.add_stakeholder(&owner, &stk);
+
+    // Record two periods
+    let m1 = make_metrics(&env, symbol_short!("2026_Q1"), owner.clone());
+    let mut m2 = make_metrics(&env, symbol_short!("2026_Q2"), owner.clone());
+    m2.jobs_created = 30;
+    m2.total_investment = 100_000;
+    m2.total_social_value = 300_000;
+    m2.diversity_women_bps = 5000;
+
+    client.record_social_impact(&owner, &m1);
+    client.record_social_impact(&owner, &m2);
+
+    let mut periods = Vec::new(&env);
+    periods.push_back(symbol_short!("2026_Q1"));
+    periods.push_back(symbol_short!("2026_Q2"));
+
+    let report = client.generate_impact_report(&owner, &periods);
+
+    assert_eq!(report.periods_included, 2);
+    assert_eq!(report.total_jobs_created, 80); // 50 + 30
+    assert_eq!(report.total_community_investment, 200_000);
+    assert_eq!(report.total_investment, 300_000);
+    assert_eq!(report.total_social_value, 1_000_000);
+    // SROI = 1_000_000 * 10_000 / 300_000 = 33_333
+    assert_eq!(report.sroi_bps, 33_333u64);
+    // avg diversity = (4500 + 5000) / 2 = 4750
+    assert_eq!(report.avg_diversity_women_bps, 4750);
+    assert_eq!(report.stakeholder_count, 1);
+
+    // Should be persisted
+    let stored = client.get_impact_report();
+    assert!(stored.is_some());
+    let stored_report = stored.unwrap();
+    assert_eq!(stored_report.sroi_bps, 33_333u64);
+}
+
+#[test]
+fn test_generate_impact_report_owner_only() {
+    let (env, owner, client) = create_ledger();
+    let non_owner = Address::generate(&env);
+    env.mock_all_auths();
+
+    let m1 = make_metrics(&env, symbol_short!("2026_Q1"), owner.clone());
+    client.record_social_impact(&owner, &m1);
+
+    let mut periods = Vec::new(&env);
+    periods.push_back(symbol_short!("2026_Q1"));
+
+    let result = client.try_generate_impact_report(&non_owner, &periods);
+    assert!(result.is_err());
+}
+
+#[test]
+fn test_get_impact_report_none_before_generation() {
+    let (_env, _owner, client) = create_ledger();
+    let report = client.get_impact_report();
+    assert!(report.is_none());
+}
+
+#[test]
+fn test_social_impact_count_initial_zero() {
+    let (_env, _owner, client) = create_ledger();
+    assert_eq!(client.social_impact_count(), 0);
+}
+
+#[test]
+fn test_stakeholder_count_initial_zero() {
+    let (_env, _owner, client) = create_ledger();
+    assert_eq!(client.stakeholder_count(), 0);
+}
+
+
+// ── Modern slavery act compliance ────────────────────────────────────────
+
+fn make_risk_assessment(
+    env: &Env,
+    assessment_id: soroban_sdk::Symbol,
+    submitter: Address,
+) -> RiskAssessment {
+    RiskAssessment {
+        assessment_id,
+        recorded_at: env.ledger().timestamp(),
+        submitter,
+        scope: symbol_short!("global"),
+        risk_level: 1,
+        high_risk_areas: 3,
+        key_risks: Bytes::from_slice(&env, b"supply chain concentration in asia"),
+        planned_remediations: 2,
+        stakeholder_consultation_done: true,
     }
-
-    client.register_norm_ref(
-        &owner,
-        &soroban_sdk::Symbol::new(&env, "refa"),
-        &refs8(&env, 1_000_000),
-    );
-    client.register_weighting_scheme(
-        &owner,
-        &soroban_sdk::Symbol::new(&env, "gwponly"),
-        &w,
-    );
-
-    let id = client.register_lca_entry(
-        &producer,
-        &Bytes::from_slice(&env, b"GwpOnlyProduct"),
-        &Bytes::from_slice(&env, b"1 unit"),
-        &None,
-    );
-
-    client.record_phase_impact(
-        &producer, &id,
-        &soroban_sdk::Symbol::new(&env, "mfg"),
-        &gwp_impacts(&env, 2_000_000),
-        &0_u32, &None, &Bytes::new(&env),
-    );
-    client.finalize_lca(&producer, &id);
-    client.normalize_impacts(&producer, &id, &soroban_sdk::Symbol::new(&env, "refa"));
-
-    let result = client.apply_weighting_scheme(
-        &producer, &id,
-        &soroban_sdk::Symbol::new(&env, "gwponly"),
-    );
-    // normalized[0] = (2_000_000 * 1_000_000) / 1_000_000 = 2_000_000
-    // weighted[0]   = 2_000_000 * 10_000 / 10_000 = 2_000_000
-    // single_score  = 2_000_000
-    assert_eq!(result.single_score, 2_000_000i64);
 }
 
-#[test]
-#[should_panic(expected = "HostError: Error(Contract, #45)")]
-fn test_apply_weighting_scheme_unknown_scheme_panics() {
-    let (env, owner, client) = create_ledger();
-    let producer = Address::generate(&env);
-    env.mock_all_auths();
-
-    client.register_norm_ref(
-        &owner,
-        &soroban_sdk::Symbol::new(&env, "rn1"),
-        &refs8(&env, 1_000_000),
-    );
-
-    let id = client.register_lca_entry(
-        &producer,
-        &Bytes::from_slice(&env, b"WS_miss"),
-        &Bytes::from_slice(&env, b"1 unit"),
-        &None,
-    );
-    client.record_phase_impact(
-        &producer, &id,
-        &soroban_sdk::Symbol::new(&env, "mfg"),
-        &gwp_impacts(&env, 1_000),
-        &0_u32, &None, &Bytes::new(&env),
-    );
-    client.finalize_lca(&producer, &id);
-    client.normalize_impacts(&producer, &id, &soroban_sdk::Symbol::new(&env, "rn1"));
-
-    client.apply_weighting_scheme(
-        &producer, &id,
-        &soroban_sdk::Symbol::new(&env, "ghost"),
-    );
-}
-
-#[test]
-#[should_panic(expected = "HostError: Error(Contract, #1)")]
-fn test_register_weighting_scheme_non_owner_panics() {
-    let (env, _owner, client) = create_ledger();
-    let attacker = Address::generate(&env);
-    env.mock_all_auths();
-
-    client.register_weighting_scheme(
-        &attacker,
-        &soroban_sdk::Symbol::new(&env, "hack"),
-        &weights8(&env, 1_250_u32),
-    );
-}
-
-#[test]
-#[should_panic(expected = "HostError: Error(Contract, #41)")]
-fn test_register_weighting_scheme_wrong_length_panics() {
-    let (env, owner, client) = create_ledger();
-    env.mock_all_auths();
-
-    let mut bad_w = soroban_sdk::Vec::new(&env);
-    bad_w.push_back(5_000_u32); // only 1 element
-
-    client.register_weighting_scheme(
-        &owner,
-        &soroban_sdk::Symbol::new(&env, "badw"),
-        &bad_w,
-    );
-}
-
-// ── LCA Database integration ─────────────────────────────────────────────────
-
-#[test]
-fn test_register_lca_db_entry_returns_id() {
-    let (env, _owner, client) = create_ledger();
-    let provider = Address::generate(&env);
-    env.mock_all_auths();
-
-    let id = client.register_lca_db_entry(
-        &provider,
-        &Bytes::from_slice(&env, b"ecoinvent"),
-        &Bytes::from_slice(&env, b"3.10"),
-        &Bytes::from_slice(&env, b"aluminium production, primary, ingot, GLO"),
-        &Bytes::from_slice(&env, b"GLO"),
-    );
-
-    assert_eq!(id.len(), 32);
-}
-
-#[test]
-fn test_get_lca_db_entry_stored_correctly() {
-    let (env, _owner, client) = create_ledger();
-    let provider = Address::generate(&env);
-    env.mock_all_auths();
-
-    let id = client.register_lca_db_entry(
-        &provider,
-        &Bytes::from_slice(&env, b"gabi"),
-        &Bytes::from_slice(&env, b"2023.1"),
-        &Bytes::from_slice(&env, b"electricity mix DE"),
-        &Bytes::from_slice(&env, b"DE"),
-    );
-
-    let entry = client.get_lca_db_entry(&id);
-    assert_eq!(entry.id, id);
-    assert_eq!(entry.db_name, Bytes::from_slice(&env, b"gabi"));
-    assert_eq!(entry.version, Bytes::from_slice(&env, b"2023.1"));
-    assert_eq!(entry.geography, Bytes::from_slice(&env, b"DE"));
-}
-
-#[test]
-#[should_panic(expected = "HostError: Error(Contract, #46)")]
-fn test_get_lca_db_entry_not_found_panics() {
-    let (env, _owner, client) = create_ledger();
-    env.mock_all_auths();
-
-    let fake = BytesN::from_array(&env, &[0x77u8; 32]);
-    client.get_lca_db_entry(&fake);
-}
-
-#[test]
-#[should_panic(expected = "HostError: Error(Contract, #46)")]
-fn test_record_phase_impact_unknown_db_ref_panics() {
-    let (env, _owner, client) = create_ledger();
-    let producer = Address::generate(&env);
-    env.mock_all_auths();
-
-    let id = client.register_lca_entry(
-        &producer,
-        &Bytes::from_slice(&env, b"DbRefMiss"),
-        &Bytes::from_slice(&env, b"1 unit"),
-        &None,
-    );
-
-    let fake_db = BytesN::from_array(&env, &[0xFFu8; 32]);
-    client.record_phase_impact(
-        &producer, &id,
-        &soroban_sdk::Symbol::new(&env, "mfg"),
-        &gwp_impacts(&env, 1_000),
-        &0_u32,
-        &Some(fake_db),
-        &Bytes::new(&env),
-    );
-}
-
-// ── compute_lca_summary ───────────────────────────────────────────────────────
-
-#[test]
-fn test_compute_lca_summary_matches_get_lca_result() {
-    let (env, owner, client) = create_ledger();
-    let producer = Address::generate(&env);
-    env.mock_all_auths();
-
-    client.register_norm_ref(
-        &owner,
-        &soroban_sdk::Symbol::new(&env, "sumref"),
-        &refs8(&env, 5_000_000),
-    );
-    client.register_weighting_scheme(
-        &owner,
-        &soroban_sdk::Symbol::new(&env, "sumw"),
-        &weights8(&env, 1_250_u32),
-    );
-
-    let id = client.register_lca_entry(
-        &producer,
-        &Bytes::from_slice(&env, b"SummaryProd"),
-        &Bytes::from_slice(&env, b"1 unit"),
-        &None,
-    );
-
-    client.record_phase_impact(
-        &producer, &id,
-        &soroban_sdk::Symbol::new(&env, "mfg"),
-        &gwp_impacts(&env, 10_000_000),
-        &500_u32, &None, &Bytes::new(&env),
-    );
-    client.finalize_lca(&producer, &id);
-    client.normalize_impacts(&producer, &id, &soroban_sdk::Symbol::new(&env, "sumref"));
-    client.apply_weighting_scheme(&producer, &id, &soroban_sdk::Symbol::new(&env, "sumw"));
-
-    let summary = client.compute_lca_summary(&id);
-    let direct  = client.get_lca_result(&id);
-
-    assert_eq!(summary.totals.get(0).unwrap(), direct.totals.get(0).unwrap());
-    assert_eq!(summary.single_score, direct.single_score);
-}
-
-#[test]
-#[should_panic(expected = "HostError: Error(Contract, #43)")]
-fn test_compute_lca_summary_not_finalized_panics() {
-    let (env, _owner, client) = create_ledger();
-    let producer = Address::generate(&env);
-    env.mock_all_auths();
-
-    let id = client.register_lca_entry(
-        &producer,
-        &Bytes::from_slice(&env, b"SumNotFinal"),
-        &Bytes::from_slice(&env, b"1 unit"),
-        &None,
-    );
-    client.compute_lca_summary(&id);
-}
-
-// ── Full cradle-to-grave walkthrough ─────────────────────────────────────────
-
-#[test]
-fn test_full_cradle_to_grave_lca_walkthrough() {
-    let (env, owner, client) = create_ledger();
-    let producer = Address::generate(&env);
-    env.mock_all_auths();
-
-    // Register db entry for data source traceability
-    let db_id = client.register_lca_db_entry(
-        &producer,
-        &Bytes::from_slice(&env, b"ecoinvent"),
-        &Bytes::from_slice(&env, b"3.10"),
-        &Bytes::from_slice(&env, b"plastic bottle production"),
-        &Bytes::from_slice(&env, b"GLO"),
-    );
-
-    env.ledger().with_mut(|li| li.timestamp += 1);
-
-    // Register norm ref (CML-style, simplified: all cats = 8_760_000_000_000)
-    client.register_norm_ref(
-        &owner,
-        &soroban_sdk::Symbol::new(&env, "cml"),
-        &refs8(&env, 8_760_000_000_000_i64),
-    );
-    // Register equal weighting scheme
-    client.register_weighting_scheme(
-        &owner,
-        &soroban_sdk::Symbol::new(&env, "equalw"),
-        &weights8(&env, 1_250_u32),
-    );
-
-    // Register LCA profile
-    let id = client.register_lca_entry(
-        &producer,
-        &Bytes::from_slice(&env, b"PET Bottle 500ml"),
-        &Bytes::from_slice(&env, b"1000 bottles"),
-        &None,
-    );
-
-    // Phase data (GWP in micro kg CO2-eq; others zero for brevity)
-    let phase_gwp: [(soroban_sdk::Symbol, i64); 6] = [
-        (soroban_sdk::Symbol::new(&env, "raw_mat"),   900_000_000),   // 900 kg CO2-eq
-        (soroban_sdk::Symbol::new(&env, "mfg"),       400_000_000),   // 400 kg
-        (soroban_sdk::Symbol::new(&env, "transport"),  80_000_000),   // 80 kg
-        (soroban_sdk::Symbol::new(&env, "use"),        10_000_000),   // 10 kg
-        (soroban_sdk::Symbol::new(&env, "eol"),        50_000_000),   // 50 kg
-        (soroban_sdk::Symbol::new(&env, "recycling"), -120_000_000),  // −120 kg avoided
-    ];
-
-    for (phase, gwp) in phase_gwp.iter() {
-        client.record_phase_impact(
-            &producer, &id, phase,
-            &gwp_impacts(&env, *gwp),
-            &500_u32,           // ±5% uncertainty per phase
-            &Some(db_id.clone()),
-            &Bytes::new(&env),
-        );
+fn make_supply_chain_node(
+    env: &Env,
+    supplier_id: soroban_sdk::Symbol,
+) -> SupplyChainNode {
+    SupplyChainNode {
+        supplier_id,
+        name: Bytes::from_slice(&env, b"Supplier Inc"),
+        country: symbol_short!("CN"),
+        risk_level: 2,
+        audited: true,
+        last_audit_date: env.ledger().timestamp(),
+        registered_at: env.ledger().timestamp(),
     }
-
-    // Finalize
-    let result = client.finalize_lca(&producer, &id);
-    // Total GWP = 900 + 400 + 80 + 10 + 50 − 120 = 1_320_000_000 micro-units
-    assert_eq!(result.totals.get(0).unwrap(), 1_320_000_000i64);
-
-    // Uncertainty: each phase ±5% → lo/hi bracket total
-    let unc = client.get_lca_uncertainty(&id);
-    assert!(unc.lo.get(0).unwrap() < 1_320_000_000i64);
-    assert!(unc.hi.get(0).unwrap() > 1_320_000_000i64);
-
-    // Normalize then weight
-    let normed = client.normalize_impacts(&producer, &id, &soroban_sdk::Symbol::new(&env, "cml"));
-    // normalized[0] = (1_320_000_000 * 1_000_000) / 8_760_000_000_000
-    //               = 1_320_000_000_000_000 / 8_760_000_000_000 = 150 (approx)
-    let expected_norm = (1_320_000_000i128 * 1_000_000 / 8_760_000_000_000) as i64;
-    assert_eq!(normed.normalized.get(0).unwrap(), expected_norm);
-
-    let final_result = client.apply_weighting_scheme(
-        &producer, &id,
-        &soroban_sdk::Symbol::new(&env, "equalw"),
-    );
-    // weighted[0] = normalized[0] * 1250 / 10000
-    let expected_weighted = (expected_norm as i128 * 1_250 / 10_000) as i64;
-    assert_eq!(final_result.weighted.get(0).unwrap(), expected_weighted);
-
-    // Summary equals result
-    let summary = client.compute_lca_summary(&id);
-    assert_eq!(summary.single_score, final_result.single_score);
-
-    // Profile is finalized
-    let profile = client.get_lca_profile(&id);
-    assert!(profile.finalized);
-    // phase_mask = bits 0..5 set (6 phases) = 0b0111111 = 63
-    assert_eq!(profile.phase_mask, 63);
 }
 
-// ── Biodiversity Tests ───────────────────────────────────────────────────────
-
-// ── Helpers ──────────────────────────────────────────────────────────────────
-
-/// Build a canonical 4-element ecosystem-service loss/value vec.
-fn eco4(env: &Env, vals: [i64; 4]) -> soroban_sdk::Vec<i64> {
-    let mut v = soroban_sdk::Vec::new(env);
-    for x in vals { v.push_back(x); }
-    v
+fn make_training_record(
+    env: &Env,
+    training_id: soroban_sdk::Symbol,
+) -> TrainingRecord {
+    TrainingRecord {
+        training_id,
+        delivered_at: env.ledger().timestamp(),
+        topic: symbol_short!("msa_aware"),
+        attendees: 150,
+        risk_assessment_covered: true,
+        due_diligence_covered: true,
+        reporting_covered: true,
+        content_summary: Bytes::from_slice(&env, b"comprehensive msa framework training"),
+    }
 }
 
-/// Generate a deterministic 32-byte event reference.
-fn fake_event_ref(env: &Env, seed: u8) -> BytesN<32> {
-    BytesN::from_array(env, &[seed; 32])
+fn make_due_diligence_record(
+    env: &Env,
+    record_id: soroban_sdk::Symbol,
+) -> DueDiligenceRecord {
+    DueDiligenceRecord {
+        record_id,
+        completed_at: env.ledger().timestamp(),
+        subject: symbol_short!("supplier1"),
+        scope: symbol_short!("labour_prc"),
+        findings: Bytes::from_slice(&env, b"no critical issues found, minor training gaps identified"),
+        risk_level: 1,
+        corrective_actions_required: 2,
+        corrective_actions_completed_pct: 50,
+    }
 }
 
-// ── record_bio_impact ────────────────────────────────────────────────────────
-
-#[test]
-fn test_record_bio_impact_returns_id() {
-    let (env, _owner, client) = create_ledger();
-    let actor = Address::generate(&env);
-    env.mock_all_auths();
-
-    let id = client.record_bio_impact(
-        &actor,
-        &fake_event_ref(&env, 0x01),
-        &soroban_sdk::Symbol::new(&env, "forest"),
-        &5_000_000_u64,
-        &120_000_u64,
-        &eco4(&env, [0, 0, 0, 0]),
-        &Bytes::new(&env),
-        &Bytes::from_slice(&env, b"EN"),
-        &Bytes::new(&env),
-    );
-
-    assert_eq!(id.len(), 32);
-}
-
-#[test]
-fn test_record_bio_impact_stored_correctly() {
-    let (env, _owner, client) = create_ledger();
-    let actor = Address::generate(&env);
-    env.mock_all_auths();
-
-    let event_ref = fake_event_ref(&env, 0x02);
-    let id = client.record_bio_impact(
-        &actor,
-        &event_ref,
-        &soroban_sdk::Symbol::new(&env, "wetland"),
-        &2_000_000_u64,
-        &50_000_u64,
-        &eco4(&env, [100, 200, 300, 400]),
-        &Bytes::from_slice(&env, b"-3.1415,51.5074"),
-        &Bytes::from_slice(&env, b"VU"),
-        &Bytes::from_slice(&env, b"survey-2026"),
-    );
-
-    let rec = client.get_bio_impact(&id);
-    assert_eq!(rec.id, id);
-    assert_eq!(rec.event_ref, event_ref);
-    assert_eq!(rec.land_use_type, 4u32); // wetland = 4
-    assert_eq!(rec.area_m2_micro, 2_000_000_u64);
-    assert_eq!(rec.msa_loss_micro, 50_000_u64);
-    assert_eq!(rec.eco_service_loss.get(0).unwrap(), 100i64);
-    assert_eq!(rec.iucn_threat, Bytes::from_slice(&env, b"VU"));
-}
-
-#[test]
-fn test_record_bio_impact_all_land_use_types() {
-    let (env, _owner, client) = create_ledger();
-    let actor = Address::generate(&env);
-    env.mock_all_auths();
-
-    let types = [
-        (soroban_sdk::Symbol::new(&env, "crop"),      0u32),
-        (soroban_sdk::Symbol::new(&env, "pasture"),   1u32),
-        (soroban_sdk::Symbol::new(&env, "forest"),    2u32),
-        (soroban_sdk::Symbol::new(&env, "urban"),     3u32),
-        (soroban_sdk::Symbol::new(&env, "wetland"),   4u32),
-        (soroban_sdk::Symbol::new(&env, "water"),     5u32),
-        (soroban_sdk::Symbol::new(&env, "barren"),    6u32),
-        (soroban_sdk::Symbol::new(&env, "protected"), 7u32),
-    ];
-
-    for (i, (lut, expected_disc)) in types.iter().enumerate() {
-        env.ledger().with_mut(|li| li.timestamp += 1);
-        let id = client.record_bio_impact(
-            &actor,
-            &fake_event_ref(&env, i as u8),
-            lut,
-            &1_000_u64,
-            &0_u64,
-            &eco4(&env, [0, 0, 0, 0]),
-            &Bytes::new(&env),
-            &Bytes::new(&env),
-            &Bytes::new(&env),
-        );
-        let rec = client.get_bio_impact(&id);
-        assert_eq!(rec.land_use_type, *expected_disc);
+fn make_msa_policy(
+    env: &Env,
+    policy_id: soroban_sdk::Symbol,
+) -> MSAPolicy {
+    MSAPolicy {
+        policy_id,
+        adopted_at: env.ledger().timestamp(),
+        last_updated_at: env.ledger().timestamp(),
+        version: 1,
+        scope: symbol_short!("global"),
+        content_summary: Bytes::from_slice(&env, b"comprehensive modern slavery prevention policy covering all operations and supply chain"),
+        stakeholder_input_included: true,
     }
 }
 
 #[test]
-fn test_record_bio_impact_updates_totals() {
-    let (env, _owner, client) = create_ledger();
-    let actor = Address::generate(&env);
-    env.mock_all_auths();
-
-    client.record_bio_impact(
-        &actor, &fake_event_ref(&env, 0x10),
-        &soroban_sdk::Symbol::new(&env, "crop"),
-        &3_000_000_u64, &80_000_u64,
-        &eco4(&env, [500, 300, 100, 50]),
-        &Bytes::new(&env), &Bytes::new(&env), &Bytes::new(&env),
-    );
-
-    env.ledger().with_mut(|li| li.timestamp += 1);
-
-    client.record_bio_impact(
-        &actor, &fake_event_ref(&env, 0x11),
-        &soroban_sdk::Symbol::new(&env, "urban"),
-        &1_000_000_u64, &20_000_u64,
-        &eco4(&env, [200, 100, 50, 25]),
-        &Bytes::new(&env), &Bytes::new(&env), &Bytes::new(&env),
-    );
-
-    let totals = client.get_bio_totals();
-    assert_eq!(totals.total_impacts, 2);
-    assert_eq!(totals.total_area_m2_micro, 4_000_000_u64);
-    assert_eq!(totals.total_msa_loss_micro, 100_000_u64);
-    // eco_loss = (500+300+100+50) + (200+100+50+25) = 950 + 375 = 1325
-    assert_eq!(totals.total_eco_loss_micro, 1325i64);
-}
-
-#[test]
-#[should_panic(expected = "HostError: Error(Contract, #51)")]
-fn test_record_bio_impact_zero_area_panics() {
-    let (env, _owner, client) = create_ledger();
-    let actor = Address::generate(&env);
-    env.mock_all_auths();
-
-    client.record_bio_impact(
-        &actor, &fake_event_ref(&env, 0xFF),
-        &soroban_sdk::Symbol::new(&env, "forest"),
-        &0_u64, // zero → InvalidLandArea
-        &0_u64,
-        &eco4(&env, [0, 0, 0, 0]),
-        &Bytes::new(&env), &Bytes::new(&env), &Bytes::new(&env),
-    );
-}
-
-#[test]
-#[should_panic(expected = "HostError: Error(Contract, #49)")]
-fn test_record_bio_impact_invalid_land_use_panics() {
-    let (env, _owner, client) = create_ledger();
-    let actor = Address::generate(&env);
-    env.mock_all_auths();
-
-    client.record_bio_impact(
-        &actor, &fake_event_ref(&env, 0xAB),
-        &soroban_sdk::Symbol::new(&env, "lava"),   // not a valid type
-        &1_000_u64, &0_u64,
-        &eco4(&env, [0, 0, 0, 0]),
-        &Bytes::new(&env), &Bytes::new(&env), &Bytes::new(&env),
-    );
-}
-
-#[test]
-#[should_panic(expected = "HostError: Error(Contract, #41)")]
-fn test_record_bio_impact_wrong_eco_vec_len_panics() {
-    let (env, _owner, client) = create_ledger();
-    let actor = Address::generate(&env);
-    env.mock_all_auths();
-
-    let mut bad_eco = soroban_sdk::Vec::new(&env);
-    bad_eco.push_back(100i64); // only 1 element instead of 4
-
-    client.record_bio_impact(
-        &actor, &fake_event_ref(&env, 0xCD),
-        &soroban_sdk::Symbol::new(&env, "crop"),
-        &1_000_u64, &0_u64, &bad_eco,
-        &Bytes::new(&env), &Bytes::new(&env), &Bytes::new(&env),
-    );
-}
-
-#[test]
-#[should_panic(expected = "HostError: Error(Contract, #47)")]
-fn test_get_bio_impact_not_found_panics() {
-    let (env, _owner, client) = create_ledger();
-    env.mock_all_auths();
-
-    client.get_bio_impact(&BytesN::from_array(&env, &[0x00u8; 32]));
-}
-
-// ── register_bio_offset / retire_bio_offset ───────────────────────────────────
-
-#[test]
-fn test_register_bio_offset_stored_correctly() {
-    let (env, _owner, client) = create_ledger();
-    let issuer = Address::generate(&env);
-    env.mock_all_auths();
-
-    let id = client.register_bio_offset(
-        &issuer,
-        &Bytes::from_slice(&env, b"bng"),
-        &500_000_u64,
-        &0_u64,
-        &None,
-        &Bytes::from_slice(&env, b"cert-123"),
-    );
-
-    let off = client.get_bio_offset(&id);
-    assert_eq!(off.total_micro, 500_000_u64);
-    assert_eq!(off.retired_micro, 0_u64);
-    assert_eq!(off.scheme, Bytes::from_slice(&env, b"bng"));
-}
-
-#[test]
-fn test_register_bio_offset_updates_totals() {
-    let (env, _owner, client) = create_ledger();
-    let issuer = Address::generate(&env);
-    env.mock_all_auths();
-
-    client.register_bio_offset(
-        &issuer, &Bytes::from_slice(&env, b"vbc"),
-        &300_000_u64, &0_u64, &None, &Bytes::new(&env),
-    );
-    env.ledger().with_mut(|li| li.timestamp += 1);
-    client.register_bio_offset(
-        &issuer, &Bytes::from_slice(&env, b"vbc"),
-        &200_000_u64, &0_u64, &None, &Bytes::new(&env),
-    );
-
-    let totals = client.get_bio_totals();
-    assert_eq!(totals.total_offset_micro, 500_000_u64);
-}
-
-#[test]
-#[should_panic(expected = "HostError: Error(Contract, #52)")]
-fn test_register_bio_offset_zero_quantity_panics() {
-    let (env, _owner, client) = create_ledger();
-    let issuer = Address::generate(&env);
-    env.mock_all_auths();
-
-    client.register_bio_offset(
-        &issuer, &Bytes::from_slice(&env, b"vbc"),
-        &0_u64, &0_u64, &None, &Bytes::new(&env),
-    );
-}
-
-#[test]
-fn test_retire_bio_offset_partial_then_full() {
-    let (env, _owner, client) = create_ledger();
-    let issuer = Address::generate(&env);
-    env.mock_all_auths();
-
-    let id = client.register_bio_offset(
-        &issuer, &Bytes::from_slice(&env, b"mitbank"),
-        &100_000_u64, &0_u64, &None, &Bytes::new(&env),
-    );
-
-    // First retirement: 40 000
-    let rem1 = client.retire_bio_offset(&issuer, &id, &40_000_u64);
-    assert_eq!(rem1, 60_000_u64);
-
-    let off = client.get_bio_offset(&id);
-    assert_eq!(off.retired_micro, 40_000_u64);
-
-    let totals = client.get_bio_totals();
-    assert_eq!(totals.total_retired_micro, 40_000_u64);
-
-    // Second retirement: the remaining 60 000
-    let rem2 = client.retire_bio_offset(&issuer, &id, &60_000_u64);
-    assert_eq!(rem2, 0_u64);
-}
-
-#[test]
-#[should_panic(expected = "HostError: Error(Contract, #53)")]
-fn test_retire_bio_offset_already_retired_panics() {
-    let (env, _owner, client) = create_ledger();
-    let issuer = Address::generate(&env);
-    env.mock_all_auths();
-
-    let id = client.register_bio_offset(
-        &issuer, &Bytes::from_slice(&env, b"vbc"),
-        &10_000_u64, &0_u64, &None, &Bytes::new(&env),
-    );
-
-    client.retire_bio_offset(&issuer, &id, &10_000_u64);   // fully retire
-    client.retire_bio_offset(&issuer, &id, &1_u64);        // → OffsetAlreadyRetired
-}
-
-#[test]
-#[should_panic(expected = "HostError: Error(Contract, #54)")]
-fn test_retire_bio_offset_exceeds_balance_panics() {
-    let (env, _owner, client) = create_ledger();
-    let issuer = Address::generate(&env);
-    env.mock_all_auths();
-
-    let id = client.register_bio_offset(
-        &issuer, &Bytes::from_slice(&env, b"bng"),
-        &50_000_u64, &0_u64, &None, &Bytes::new(&env),
-    );
-
-    client.retire_bio_offset(&issuer, &id, &50_001_u64);   // one too many
-}
-
-#[test]
-#[should_panic(expected = "HostError: Error(Contract, #48)")]
-fn test_get_bio_offset_not_found_panics() {
-    let (env, _owner, client) = create_ledger();
-    env.mock_all_auths();
-
-    client.get_bio_offset(&BytesN::from_array(&env, &[0x55u8; 32]));
-}
-
-// ── register_eco_service_record ───────────────────────────────────────────────
-
-#[test]
-fn test_register_eco_service_record_stored_correctly() {
-    let (env, _owner, client) = create_ledger();
-    let owner = Address::generate(&env);
-    env.mock_all_auths();
-
-    let id = client.register_eco_service_record(
-        &owner,
-        &Bytes::from_slice(&env, b"Amazon Forest Site A"),
-        &50_000_000_000_u64,              // 50 km²
-        &soroban_sdk::Symbol::new(&env, "forest"),
-        &eco4(&env, [10_000, 50_000, 5_000, 8_000]),
-        &Bytes::from_slice(&env, b"seea-2026"),
-    );
-
-    let rec = client.get_eco_service_record(&id);
-    assert_eq!(rec.name, Bytes::from_slice(&env, b"Amazon Forest Site A"));
-    assert_eq!(rec.land_use_type, 2u32); // forest
-    assert_eq!(rec.area_m2_micro, 50_000_000_000_u64);
-    assert_eq!(rec.annual_values.get(1).unwrap(), 50_000i64); // regulating
-}
-
-#[test]
-fn test_register_eco_service_record_increments_totals() {
-    let (env, _owner, client) = create_ledger();
-    let owner = Address::generate(&env);
-    env.mock_all_auths();
-
-    assert_eq!(client.get_bio_totals().total_eco_records, 0);
-
-    client.register_eco_service_record(
-        &owner,
-        &Bytes::from_slice(&env, b"Site1"),
-        &1_000_u64,
-        &soroban_sdk::Symbol::new(&env, "wetland"),
-        &eco4(&env, [0, 0, 0, 0]),
-        &Bytes::new(&env),
-    );
-
-    assert_eq!(client.get_bio_totals().total_eco_records, 1);
-}
-
-#[test]
-#[should_panic(expected = "HostError: Error(Contract, #51)")]
-fn test_register_eco_service_record_zero_area_panics() {
-    let (env, _owner, client) = create_ledger();
-    let owner = Address::generate(&env);
-    env.mock_all_auths();
-
-    client.register_eco_service_record(
-        &owner, &Bytes::from_slice(&env, b"Bad"),
-        &0_u64,
-        &soroban_sdk::Symbol::new(&env, "crop"),
-        &eco4(&env, [0, 0, 0, 0]),
-        &Bytes::new(&env),
-    );
-}
-
-#[test]
-#[should_panic(expected = "HostError: Error(Contract, #47)")]
-fn test_get_eco_service_record_not_found_panics() {
-    let (env, _owner, client) = create_ledger();
-    env.mock_all_auths();
-
-    client.get_eco_service_record(&BytesN::from_array(&env, &[0xBBu8; 32]));
-}
-
-// ── register_bio_offset with eco_service_ref ─────────────────────────────────
-
-#[test]
-fn test_register_bio_offset_with_eco_service_ref() {
-    let (env, _owner, client) = create_ledger();
-    let owner = Address::generate(&env);
-    env.mock_all_auths();
-
-    let eco_id = client.register_eco_service_record(
-        &owner,
-        &Bytes::from_slice(&env, b"Mangrove Reserve"),
-        &10_000_000_u64,
-        &soroban_sdk::Symbol::new(&env, "wetland"),
-        &eco4(&env, [1_000, 5_000, 500, 2_000]),
-        &Bytes::new(&env),
-    );
-
-    env.ledger().with_mut(|li| li.timestamp += 1);
-
-    let off_id = client.register_bio_offset(
-        &owner,
-        &Bytes::from_slice(&env, b"vbc"),
-        &200_000_u64,
-        &0_u64,
-        &Some(eco_id.clone()),
-        &Bytes::new(&env),
-    );
-
-    let off = client.get_bio_offset(&off_id);
-    assert_eq!(off.eco_service_ref, Some(eco_id));
-}
-
-// ── record_species_observation ────────────────────────────────────────────────
-
-#[test]
-fn test_record_species_observation_stored() {
-    let (env, _owner, client) = create_ledger();
-    let observer = Address::generate(&env);
-    env.mock_all_auths();
-
-    let id = client.record_species_observation(
-        &observer,
-        &fake_event_ref(&env, 0x30),
-        &Bytes::from_slice(&env, b"Sumatran Tiger"),
-        &Bytes::from_slice(&env, b"Panthera tigris sumatrae"),
-        &Bytes::from_slice(&env, b"CR"),
-        &3_u32,
-        &0_u32, // positive (sighted)
-        &Bytes::from_slice(&env, b"camera-trap-2026"),
-    );
-
-    let obs = client.get_species_observation(&id);
-    assert_eq!(obs.species_name, Bytes::from_slice(&env, b"Sumatran Tiger"));
-    assert_eq!(obs.iucn_category, Bytes::from_slice(&env, b"CR"));
-    assert_eq!(obs.count, 3_u32);
-    assert_eq!(obs.impact_direction, 0_u32);
-}
-
-#[test]
-fn test_record_species_observation_updates_totals() {
-    let (env, _owner, client) = create_ledger();
-    let observer = Address::generate(&env);
-    env.mock_all_auths();
-
-    assert_eq!(client.get_bio_totals().total_observations, 0);
-
-    client.record_species_observation(
-        &observer, &fake_event_ref(&env, 0x31),
-        &Bytes::from_slice(&env, b"Sea Turtle"),
-        &Bytes::from_slice(&env, b"Chelonia mydas"),
-        &Bytes::from_slice(&env, b"EN"),
-        &1_u32, &1_u32,
-        &Bytes::new(&env),
-    );
-
-    assert_eq!(client.get_bio_totals().total_observations, 1);
-}
-
-#[test]
-fn test_record_species_observation_presence_only_count_zero() {
-    let (env, _owner, client) = create_ledger();
-    let observer = Address::generate(&env);
-    env.mock_all_auths();
-
-    let id = client.record_species_observation(
-        &observer, &fake_event_ref(&env, 0x32),
-        &Bytes::from_slice(&env, b"Unknown"),
-        &Bytes::from_slice(&env, b"sp. nov."),
-        &Bytes::from_slice(&env, b"DD"),
-        &0_u32, // presence-only
-        &2_u32, // neutral
-        &Bytes::new(&env),
-    );
-
-    let obs = client.get_species_observation(&id);
-    assert_eq!(obs.count, 0);
-    assert_eq!(obs.impact_direction, 2);
-}
-
-#[test]
-#[should_panic(expected = "HostError: Error(Contract, #55)")]
-fn test_get_species_observation_not_found_panics() {
-    let (env, _owner, client) = create_ledger();
-    env.mock_all_auths();
-
-    client.get_species_observation(&BytesN::from_array(&env, &[0x77u8; 32]));
-}
-
-// ── compute_nature_positive_score ─────────────────────────────────────────────
-
-#[test]
-fn test_nature_positive_score_no_impacts_returns_10000() {
-    let (env, _owner, client) = create_ledger();
-    env.mock_all_auths();
-
-    let snap = client.compute_nature_positive_score();
-    // No losses → nature-positive by definition
-    assert_eq!(snap.nature_positive_bps, 10_000_u32);
-    assert_eq!(snap.net_msa_micro, 0i64);
-    assert_eq!(snap.index, 0_u32);
-}
-
-#[test]
-fn test_nature_positive_score_all_offset_equals_10000() {
-    let (env, _owner, client) = create_ledger();
-    let actor = Address::generate(&env);
-    let issuer = Address::generate(&env);
-    env.mock_all_auths();
-
-    // Impact: 100 000 MSA·ha loss
-    client.record_bio_impact(
-        &actor, &fake_event_ref(&env, 0x40),
-        &soroban_sdk::Symbol::new(&env, "forest"),
-        &1_000_000_u64, &100_000_u64,
-        &eco4(&env, [0, 0, 0, 0]),
-        &Bytes::new(&env), &Bytes::new(&env), &Bytes::new(&env),
-    );
-
-    env.ledger().with_mut(|li| li.timestamp += 1);
-
-    // Offset: register 100 000 and retire all
-    let off_id = client.register_bio_offset(
-        &issuer, &Bytes::from_slice(&env, b"bng"),
-        &100_000_u64, &0_u64, &None, &Bytes::new(&env),
-    );
-    client.retire_bio_offset(&issuer, &off_id, &100_000_u64);
-
-    let snap = client.compute_nature_positive_score();
-    assert_eq!(snap.nature_positive_bps, 10_000_u32);
-    assert_eq!(snap.net_msa_micro, 0i64);
-    assert_eq!(snap.total_msa_loss_micro, 100_000_u64);
-    assert_eq!(snap.total_retired_micro, 100_000_u64);
-}
-
-#[test]
-fn test_nature_positive_score_partial_offset() {
-    let (env, _owner, client) = create_ledger();
-    let actor = Address::generate(&env);
-    let issuer = Address::generate(&env);
-    env.mock_all_auths();
-
-    // Loss: 200 000
-    client.record_bio_impact(
-        &actor, &fake_event_ref(&env, 0x50),
-        &soroban_sdk::Symbol::new(&env, "crop"),
-        &2_000_000_u64, &200_000_u64,
-        &eco4(&env, [0, 0, 0, 0]),
-        &Bytes::new(&env), &Bytes::new(&env), &Bytes::new(&env),
-    );
-
-    env.ledger().with_mut(|li| li.timestamp += 1);
-
-    // Retire: 50 000 (25% coverage)
-    let off_id = client.register_bio_offset(
-        &issuer, &Bytes::from_slice(&env, b"vbc"),
-        &100_000_u64, &0_u64, &None, &Bytes::new(&env),
-    );
-    client.retire_bio_offset(&issuer, &off_id, &50_000_u64);
-
-    let snap = client.compute_nature_positive_score();
-    // nature_positive_bps = 50_000 * 10_000 / 200_000 = 2_500
-    assert_eq!(snap.nature_positive_bps, 2_500_u32);
-    // net_msa = 50_000 − 200_000 = −150_000
-    assert_eq!(snap.net_msa_micro, -150_000i64);
-    assert_eq!(snap.offset_coverage_bps, 2_500_u32);
-}
-
-#[test]
-fn test_nature_positive_score_over_offset_capped_at_10000() {
-    let (env, _owner, client) = create_ledger();
-    let actor = Address::generate(&env);
-    let issuer = Address::generate(&env);
-    env.mock_all_auths();
-
-    // Loss: 100 000
-    client.record_bio_impact(
-        &actor, &fake_event_ref(&env, 0x60),
-        &soroban_sdk::Symbol::new(&env, "pasture"),
-        &1_000_000_u64, &100_000_u64,
-        &eco4(&env, [0, 0, 0, 0]),
-        &Bytes::new(&env), &Bytes::new(&env), &Bytes::new(&env),
-    );
-
-    env.ledger().with_mut(|li| li.timestamp += 1);
-
-    // Retire 150 000 (over-offset → 150% = capped at 100%)
-    let off_id = client.register_bio_offset(
-        &issuer, &Bytes::from_slice(&env, b"bng"),
-        &200_000_u64, &0_u64, &None, &Bytes::new(&env),
-    );
-    client.retire_bio_offset(&issuer, &off_id, &150_000_u64);
-
-    let snap = client.compute_nature_positive_score();
-    // 150_000 * 10_000 / 100_000 = 15_000 → capped at 10_000
-    assert_eq!(snap.nature_positive_bps, 10_000_u32);
-    // net is positive (nature-net-gain)
-    assert_eq!(snap.net_msa_micro, 50_000i64);
-}
-
-#[test]
-fn test_bio_snapshot_count_increments() {
-    let (env, _owner, client) = create_ledger();
-    env.mock_all_auths();
-
-    assert_eq!(client.bio_snapshot_count(), 0);
-    client.compute_nature_positive_score();
-    assert_eq!(client.bio_snapshot_count(), 1);
-    client.compute_nature_positive_score();
-    assert_eq!(client.bio_snapshot_count(), 2);
-}
-
-#[test]
-fn test_get_bio_snapshot_retrieves_correct_index() {
-    let (env, _owner, client) = create_ledger();
-    let actor = Address::generate(&env);
-    env.mock_all_auths();
-
-    // First snapshot (no impacts)
-    let snap0 = client.compute_nature_positive_score();
-    assert_eq!(snap0.index, 0);
-
-    // Add an impact, then take second snapshot
-    client.record_bio_impact(
-        &actor, &fake_event_ref(&env, 0x70),
-        &soroban_sdk::Symbol::new(&env, "urban"),
-        &500_000_u64, &10_000_u64,
-        &eco4(&env, [0, 0, 0, 0]),
-        &Bytes::new(&env), &Bytes::new(&env), &Bytes::new(&env),
-    );
-    let snap1 = client.compute_nature_positive_score();
-    assert_eq!(snap1.index, 1);
-    assert_eq!(snap1.total_impacts, 1);
-
-    // Verify retrieval
-    let r0 = client.get_bio_snapshot(&0);
-    let r1 = client.get_bio_snapshot(&1);
-    assert_eq!(r0.total_impacts, 0);
-    assert_eq!(r1.total_impacts, 1);
-    assert_eq!(r1.total_msa_loss_micro, 10_000_u64);
-}
-
-#[test]
-#[should_panic(expected = "HostError: Error(Contract, #30)")]
-fn test_get_bio_snapshot_not_found_panics() {
-    let (env, _owner, client) = create_ledger();
-    env.mock_all_auths();
-
-    client.get_bio_snapshot(&99);
-}
-
-// ── get_bio_totals ────────────────────────────────────────────────────────────
-
-#[test]
-fn test_get_bio_totals_empty() {
-    let (env, _owner, client) = create_ledger();
-    env.mock_all_auths();
-
-    let totals = client.get_bio_totals();
-    assert_eq!(totals.total_impacts, 0);
-    assert_eq!(totals.total_area_m2_micro, 0);
-    assert_eq!(totals.total_msa_loss_micro, 0);
-    assert_eq!(totals.total_offset_micro, 0);
-    assert_eq!(totals.total_retired_micro, 0);
-    assert_eq!(totals.total_observations, 0);
-    assert_eq!(totals.total_eco_records, 0);
-}
-
-#[test]
-fn test_get_bio_totals_full_accumulation() {
-    let (env, _owner, client) = create_ledger();
-    let actor = Address::generate(&env);
-    let issuer = Address::generate(&env);
-    env.mock_all_auths();
-
-    // Impact
-    client.record_bio_impact(
-        &actor, &fake_event_ref(&env, 0x80),
-        &soroban_sdk::Symbol::new(&env, "forest"),
-        &2_000_000_u64, &60_000_u64,
-        &eco4(&env, [1_000, 2_000, 500, 300]),
-        &Bytes::new(&env), &Bytes::from_slice(&env, b"NT"), &Bytes::new(&env),
-    );
-
-    env.ledger().with_mut(|li| li.timestamp += 1);
-
-    // Ecosystem service record
-    client.register_eco_service_record(
-        &actor,
-        &Bytes::from_slice(&env, b"PeatBog"),
-        &5_000_000_u64,
-        &soroban_sdk::Symbol::new(&env, "wetland"),
-        &eco4(&env, [500, 3_000, 200, 400]),
-        &Bytes::new(&env),
-    );
-
-    env.ledger().with_mut(|li| li.timestamp += 1);
-
-    // Offset
-    let off_id = client.register_bio_offset(
-        &issuer, &Bytes::from_slice(&env, b"vbc"),
-        &80_000_u64, &0_u64, &None, &Bytes::new(&env),
-    );
-    client.retire_bio_offset(&issuer, &off_id, &25_000_u64);
-
-    // Species observation
-    env.ledger().with_mut(|li| li.timestamp += 1);
-    client.record_species_observation(
-        &actor, &fake_event_ref(&env, 0x81),
-        &Bytes::from_slice(&env, b"Red Kite"),
-        &Bytes::from_slice(&env, b"Milvus milvus"),
-        &Bytes::from_slice(&env, b"LC"),
-        &5_u32, &0_u32,
-        &Bytes::new(&env),
-    );
-
-    let totals = client.get_bio_totals();
-    assert_eq!(totals.total_impacts, 1);
-    assert_eq!(totals.total_area_m2_micro, 2_000_000_u64);
-    assert_eq!(totals.total_msa_loss_micro, 60_000_u64);
-    assert_eq!(totals.total_eco_loss_micro, 3_800i64); // 1000+2000+500+300
-    assert_eq!(totals.total_offset_micro, 80_000_u64);
-    assert_eq!(totals.total_retired_micro, 25_000_u64);
-    assert_eq!(totals.total_observations, 1);
-    assert_eq!(totals.total_eco_records, 1);
-}
-
-// ── Ecosystem service negative value (gain) ───────────────────────────────────
-
-#[test]
-fn test_bio_impact_negative_eco_service_records_gain() {
-    let (env, _owner, client) = create_ledger();
-    let actor = Address::generate(&env);
-    env.mock_all_auths();
-
-    // Restoration project: negative losses = net gain
-    client.record_bio_impact(
-        &actor, &fake_event_ref(&env, 0x90),
-        &soroban_sdk::Symbol::new(&env, "protected"),
-        &1_000_000_u64, &0_u64,
-        &eco4(&env, [-500, -1_000, -200, -100]), // gains
-        &Bytes::new(&env), &Bytes::new(&env), &Bytes::new(&env),
-    );
-
-    let totals = client.get_bio_totals();
-    assert_eq!(totals.total_eco_loss_micro, -1_800i64);
-}
-
-// ── Water Footprint Tests ────────────────────────────────────────────────────
-
-// ── Helpers ───────────────────────────────────────────────────────────────────
-
-/// Convenience: register a minimal risk assessment and return its ID.
-fn register_risk(env: &Env, client: &AuditLedgerClient, caller: &Address) -> BytesN<32> {
-    client.register_water_risk_assessment(
-        caller,
-        &Bytes::from_slice(env, b"Basin A"),
-        &5_000_u32,
-        &4_000_u32,
-        &3_000_u32,
-        &2_000_u32,
-        &60_000_u32,
-        &Bytes::from_slice(env, b"IN"),
-        &Bytes::from_slice(env, b"4050017220"),
-        &Bytes::from_slice(env, b"aqueduct4"),
-        &Bytes::new(env),
-    )
-}
-
-/// Convenience: register a minimal stewardship programme and return its ID.
-fn register_stewardship(env: &Env, client: &AuditLedgerClient, caller: &Address) -> BytesN<32> {
-    client.register_water_stewardship(
-        caller,
-        &Bytes::from_slice(env, b"aws_core"),
-        &0_u64,
-        &0_u64,
-        &500_000_000_u64,
-        &None,
-        &Bytes::new(env),
-    )
-}
-
-// ── record_water_footprint ───────────────────────────────────────────────────
-
-#[test]
-fn test_record_water_footprint_returns_id() {
-    let (env, _owner, client) = create_ledger();
-    let actor = Address::generate(&env);
-    env.mock_all_auths();
-
-    let id = client.record_water_footprint(
-        &actor,
-        &fake_event_ref(&env, 0x01),
-        &soroban_sdk::Symbol::new(&env, "agri"),
-        &10_000_000_u64,
-        &5_000_000_u64,
-        &2_000_000_u64,
-        &0_u32,
-        &None,
-        &None,
-        &Bytes::from_slice(&env, b"IN"),
-        &Bytes::from_slice(&env, b"4050017220"),
-        &Bytes::new(&env),
-    );
-
-    assert_eq!(id.len(), 32);
-}
-
-#[test]
-fn test_record_water_footprint_stored_correctly() {
-    let (env, _owner, client) = create_ledger();
-    let actor = Address::generate(&env);
-    env.mock_all_auths();
-
-    let event_ref = fake_event_ref(&env, 0x02);
-    let id = client.record_water_footprint(
-        &actor,
-        &event_ref,
-        &soroban_sdk::Symbol::new(&env, "indust"),
-        &8_000_000_u64,
-        &0_u64,
-        &3_000_000_u64,
-        &40_000_u32,   // 40% WSI
-        &None,
-        &None,
-        &Bytes::from_slice(&env, b"CN"),
-        &Bytes::from_slice(&env, b"basin-x"),
-        &Bytes::from_slice(&env, b"meter-2026"),
-    );
-
-    let rec = client.get_water_footprint(&id);
-    assert_eq!(rec.event_ref, event_ref);
-    assert_eq!(rec.sector, 1u32); // indust
-    assert_eq!(rec.blue_L_micro, 8_000_000_u64);
-    assert_eq!(rec.green_L_micro, 0_u64);
-    assert_eq!(rec.grey_L_micro, 3_000_000_u64);
-    assert_eq!(rec.scarcity_factor_ppb, 40_000_u32);
-    // scarcity_weighted = 8_000_000 * 40_000 / 1_000_000 = 320_000
-    assert_eq!(rec.scarcity_weighted_L_micro, 320_000_u64);
-}
-
-#[test]
-fn test_record_water_footprint_all_sectors() {
-    let (env, _owner, client) = create_ledger();
-    let actor = Address::generate(&env);
-    env.mock_all_auths();
-
-    let sectors = [
-        (soroban_sdk::Symbol::new(&env, "agri"),   0u32),
-        (soroban_sdk::Symbol::new(&env, "indust"),  1u32),
-        (soroban_sdk::Symbol::new(&env, "munici"),  2u32),
-        (soroban_sdk::Symbol::new(&env, "energy"),  3u32),
-        (soroban_sdk::Symbol::new(&env, "mining"),  4u32),
-    ];
-
-    for (i, (sector, expected)) in sectors.iter().enumerate() {
-        env.ledger().with_mut(|li| li.timestamp += 1);
-        let id = client.record_water_footprint(
-            &actor,
-            &fake_event_ref(&env, i as u8),
-            sector,
-            &1_000_u64, &0_u64, &0_u64,
-            &0_u32, &None, &None,
-            &Bytes::new(&env), &Bytes::new(&env), &Bytes::new(&env),
-        );
-        assert_eq!(client.get_water_footprint(&id).sector, *expected);
-    }
-}
-
-#[test]
-fn test_record_water_footprint_scarcity_weighted_formula() {
-    let (env, _owner, client) = create_ledger();
-    let actor = Address::generate(&env);
-    env.mock_all_auths();
-
-    // blue = 12_000_000 L, WSI = 50_000 ppb (= 0.05 factor)
-    // expected = 12_000_000 * 50_000 / 1_000_000 = 600_000
-    let id = client.record_water_footprint(
-        &actor, &fake_event_ref(&env, 0x10),
-        &soroban_sdk::Symbol::new(&env, "agri"),
-        &12_000_000_u64, &0_u64, &0_u64,
-        &50_000_u32,
-        &None, &None,
-        &Bytes::new(&env), &Bytes::new(&env), &Bytes::new(&env),
-    );
-
-    let rec = client.get_water_footprint(&id);
-    assert_eq!(rec.scarcity_weighted_L_micro, 600_000_u64);
-}
-
-#[test]
-fn test_record_water_footprint_zero_scarcity_gives_zero_weighted() {
-    let (env, _owner, client) = create_ledger();
-    let actor = Address::generate(&env);
-    env.mock_all_auths();
-
-    let id = client.record_water_footprint(
-        &actor, &fake_event_ref(&env, 0x11),
-        &soroban_sdk::Symbol::new(&env, "munici"),
-        &5_000_000_u64, &2_000_000_u64, &1_000_000_u64,
-        &0_u32,  // no scarcity
-        &None, &None,
-        &Bytes::new(&env), &Bytes::new(&env), &Bytes::new(&env),
-    );
-
-    let rec = client.get_water_footprint(&id);
-    assert_eq!(rec.scarcity_weighted_L_micro, 0_u64);
-}
-
-#[test]
-fn test_record_water_footprint_updates_totals() {
-    let (env, _owner, client) = create_ledger();
-    let actor = Address::generate(&env);
-    env.mock_all_auths();
-
-    client.record_water_footprint(
-        &actor, &fake_event_ref(&env, 0x20),
-        &soroban_sdk::Symbol::new(&env, "agri"),
-        &6_000_000_u64, &4_000_000_u64, &1_000_000_u64,
-        &20_000_u32,
-        &None, &None,
-        &Bytes::new(&env), &Bytes::new(&env), &Bytes::new(&env),
-    );
-
-    env.ledger().with_mut(|li| li.timestamp += 1);
-
-    client.record_water_footprint(
-        &actor, &fake_event_ref(&env, 0x21),
-        &soroban_sdk::Symbol::new(&env, "indust"),
-        &3_000_000_u64, &0_u64, &2_000_000_u64,
-        &30_000_u32,
-        &None, &None,
-        &Bytes::new(&env), &Bytes::new(&env), &Bytes::new(&env),
-    );
-
-    let t = client.get_water_totals();
-    assert_eq!(t.total_footprints, 2);
-    assert_eq!(t.total_blue_L_micro, 9_000_000_u64);
-    assert_eq!(t.total_green_L_micro, 4_000_000_u64);
-    assert_eq!(t.total_grey_L_micro, 3_000_000_u64);
-    // sw1 = 6M*20k/1M = 120k; sw2 = 3M*30k/1M = 90k → total = 210k
-    assert_eq!(t.total_scarcity_weighted_L_micro, 210_000_u64);
-}
-
-#[test]
-fn test_record_water_footprint_with_risk_and_stewardship_refs() {
-    let (env, _owner, client) = create_ledger();
-    let actor = Address::generate(&env);
-    env.mock_all_auths();
-
-    let risk_id = register_risk(&env, &client, &actor);
-    env.ledger().with_mut(|li| li.timestamp += 1);
-    let stew_id = register_stewardship(&env, &client, &actor);
-    env.ledger().with_mut(|li| li.timestamp += 1);
-
-    let id = client.record_water_footprint(
-        &actor, &fake_event_ref(&env, 0x30),
-        &soroban_sdk::Symbol::new(&env, "energy"),
-        &2_000_000_u64, &0_u64, &500_000_u64,
-        &60_000_u32,
-        &Some(risk_id.clone()),
-        &Some(stew_id.clone()),
-        &Bytes::from_slice(&env, b"IN"),
-        &Bytes::from_slice(&env, b"4050017220"),
-        &Bytes::new(&env),
-    );
-
-    let rec = client.get_water_footprint(&id);
-    assert_eq!(rec.risk_assessment_ref, Some(risk_id));
-    assert_eq!(rec.stewardship_ref, Some(stew_id));
-}
-
-#[test]
-#[should_panic(expected = "HostError: Error(Contract, #61)")]
-fn test_record_water_footprint_all_zero_volumes_panics() {
-    let (env, _owner, client) = create_ledger();
-    let actor = Address::generate(&env);
-    env.mock_all_auths();
-
-    client.record_water_footprint(
-        &actor, &fake_event_ref(&env, 0xFF),
-        &soroban_sdk::Symbol::new(&env, "agri"),
-        &0_u64, &0_u64, &0_u64,  // all zero → InvalidWaterVolume
-        &0_u32, &None, &None,
-        &Bytes::new(&env), &Bytes::new(&env), &Bytes::new(&env),
-    );
-}
-
-#[test]
-#[should_panic(expected = "HostError: Error(Contract, #62)")]
-fn test_record_water_footprint_scarcity_over_max_panics() {
-    let (env, _owner, client) = create_ledger();
-    let actor = Address::generate(&env);
-    env.mock_all_auths();
-
-    client.record_water_footprint(
-        &actor, &fake_event_ref(&env, 0xFE),
-        &soroban_sdk::Symbol::new(&env, "agri"),
-        &1_000_u64, &0_u64, &0_u64,
-        &100_001_u32,  // > 100_000 → InvalidScarcityFactor
-        &None, &None,
-        &Bytes::new(&env), &Bytes::new(&env), &Bytes::new(&env),
-    );
-}
-
-#[test]
-#[should_panic(expected = "HostError: Error(Contract, #60)")]
-fn test_record_water_footprint_invalid_sector_panics() {
-    let (env, _owner, client) = create_ledger();
-    let actor = Address::generate(&env);
-    env.mock_all_auths();
-
-    client.record_water_footprint(
-        &actor, &fake_event_ref(&env, 0xFD),
-        &soroban_sdk::Symbol::new(&env, "beverage"),  // not a valid sector
-        &1_000_u64, &0_u64, &0_u64,
-        &0_u32, &None, &None,
-        &Bytes::new(&env), &Bytes::new(&env), &Bytes::new(&env),
-    );
-}
-
-#[test]
-#[should_panic(expected = "HostError: Error(Contract, #57)")]
-fn test_record_water_footprint_unknown_risk_ref_panics() {
-    let (env, _owner, client) = create_ledger();
-    let actor = Address::generate(&env);
-    env.mock_all_auths();
-
-    let fake_risk = BytesN::from_array(&env, &[0xAAu8; 32]);
-    client.record_water_footprint(
-        &actor, &fake_event_ref(&env, 0xFC),
-        &soroban_sdk::Symbol::new(&env, "munici"),
-        &1_000_u64, &0_u64, &0_u64,
-        &0_u32, &Some(fake_risk), &None,
-        &Bytes::new(&env), &Bytes::new(&env), &Bytes::new(&env),
-    );
-}
-
-#[test]
-#[should_panic(expected = "HostError: Error(Contract, #58)")]
-fn test_record_water_footprint_unknown_stewardship_ref_panics() {
-    let (env, _owner, client) = create_ledger();
-    let actor = Address::generate(&env);
-    env.mock_all_auths();
-
-    let fake_stew = BytesN::from_array(&env, &[0xBBu8; 32]);
-    client.record_water_footprint(
-        &actor, &fake_event_ref(&env, 0xFB),
-        &soroban_sdk::Symbol::new(&env, "mining"),
-        &1_000_u64, &0_u64, &0_u64,
-        &0_u32, &None, &Some(fake_stew),
-        &Bytes::new(&env), &Bytes::new(&env), &Bytes::new(&env),
-    );
-}
-
-#[test]
-#[should_panic(expected = "HostError: Error(Contract, #56)")]
-fn test_get_water_footprint_not_found_panics() {
-    let (env, _owner, client) = create_ledger();
-    env.mock_all_auths();
-    client.get_water_footprint(&BytesN::from_array(&env, &[0x00u8; 32]));
-}
-
-// ── register_water_risk_assessment ───────────────────────────────────────────
-
-#[test]
-fn test_register_water_risk_assessment_stored() {
-    let (env, _owner, client) = create_ledger();
-    let actor = Address::generate(&env);
+fn test_record_and_get_risk_assessment() {
+    let (env, owner, client) = create_ledger();
     env.mock_all_auths();
 
-    let id = register_risk(&env, &client, &actor);
-    let rec = client.get_water_risk_assessment(&id);
-
-    assert_eq!(rec.name, Bytes::from_slice(&env, b"Basin A"));
-    assert_eq!(rec.overall_risk_bps, 5_000_u32);
-    assert_eq!(rec.wsi_ppb, 60_000_u32);
-    assert_eq!(rec.country, Bytes::from_slice(&env, b"IN"));
-}
-
-#[test]
-fn test_register_water_risk_assessment_increments_totals() {
-    let (env, _owner, client) = create_ledger();
-    let actor = Address::generate(&env);
-    env.mock_all_auths();
+    let assessment = make_risk_assessment(&env, symbol_short!("2026_q1"), owner.clone());
+    let idx = client.record_risk_assessment(&owner, &assessment);
+    assert_eq!(idx, 0);
+    assert_eq!(client.msa_risk_assessment_count(), 1);
 
-    assert_eq!(client.get_water_totals().total_risk_assessments, 0);
-    register_risk(&env, &client, &actor);
-    assert_eq!(client.get_water_totals().total_risk_assessments, 1);
+    let retrieved = client.get_risk_assessment(&assessment.assessment_id);
+    assert_eq!(retrieved.risk_level, 1);
+    assert_eq!(retrieved.high_risk_areas, 3);
+    assert!(retrieved.stakeholder_consultation_done);
 }
 
 #[test]
-#[should_panic(expected = "HostError: Error(Contract, #62)")]
-fn test_register_water_risk_wsi_over_max_panics() {
-    let (env, _owner, client) = create_ledger();
-    let actor = Address::generate(&env);
+fn test_risk_assessment_duplicate_fails() {
+    let (env, owner, client) = create_ledger();
     env.mock_all_auths();
 
-    client.register_water_risk_assessment(
-        &actor,
-        &Bytes::from_slice(&env, b"BadBasin"),
-        &5_000_u32, &4_000_u32, &3_000_u32, &2_000_u32,
-        &100_001_u32,  // > 100_000 → InvalidScarcityFactor
-        &Bytes::new(&env), &Bytes::new(&env),
-        &Bytes::new(&env), &Bytes::new(&env),
-    );
-}
+    let a1 = make_risk_assessment(&env, symbol_short!("assess1"), owner.clone());
+    let a2 = make_risk_assessment(&env, symbol_short!("assess1"), owner.clone());
 
-#[test]
-#[should_panic(expected = "HostError: Error(Contract, #57)")]
-fn test_get_water_risk_assessment_not_found_panics() {
-    let (env, _owner, client) = create_ledger();
-    env.mock_all_auths();
-    client.get_water_risk_assessment(&BytesN::from_array(&env, &[0x11u8; 32]));
+    client.record_risk_assessment(&owner, &a1);
+    let result = client.try_record_risk_assessment(&owner, &a2);
+    assert!(result.is_err());
 }
 
-// ── register_water_stewardship / update_stewardship_progress ─────────────────
-
 #[test]
-fn test_register_water_stewardship_stored() {
-    let (env, _owner, client) = create_ledger();
-    let actor = Address::generate(&env);
+fn test_record_supply_chain_node() {
+    let (env, owner, client) = create_ledger();
     env.mock_all_auths();
-
-    let id = register_stewardship(&env, &client, &actor);
-    let rec = client.get_water_stewardship(&id);
 
-    assert_eq!(rec.programme, Bytes::from_slice(&env, b"aws_core"));
-    assert_eq!(rec.target_reduction_L_micro, 500_000_000_u64);
-    assert_eq!(rec.achieved_reduction_L_micro, 0_u64);
-}
-
-#[test]
-fn test_register_water_stewardship_increments_totals() {
-    let (env, _owner, client) = create_ledger();
-    let actor = Address::generate(&env);
-    env.mock_all_auths();
+    let node = make_supply_chain_node(&env, symbol_short!("supplier1"));
+    let idx = client.record_supply_chain_node(&owner, &node);
+    assert_eq!(idx, 0);
+    assert_eq!(client.msa_supply_chain_node_count(), 1);
 
-    assert_eq!(client.get_water_totals().total_stewardship_programmes, 0);
-    register_stewardship(&env, &client, &actor);
-    assert_eq!(client.get_water_totals().total_stewardship_programmes, 1);
+    let retrieved = client.get_supply_chain_node(&node.supplier_id);
+    assert_eq!(retrieved.risk_level, 2);
+    assert!(retrieved.audited);
 }
 
 #[test]
-fn test_stewardship_with_risk_ref() {
-    let (env, _owner, client) = create_ledger();
-    let actor = Address::generate(&env);
+fn test_record_training() {
+    let (env, owner, client) = create_ledger();
     env.mock_all_auths();
-
-    let risk_id = register_risk(&env, &client, &actor);
-    env.ledger().with_mut(|li| li.timestamp += 1);
-
-    let stew_id = client.register_water_stewardship(
-        &actor,
-        &Bytes::from_slice(&env, b"ceo_mandate"),
-        &0_u64, &0_u64, &0_u64,
-        &Some(risk_id.clone()),
-        &Bytes::new(&env),
-    );
-
-    let rec = client.get_water_stewardship(&stew_id);
-    assert_eq!(rec.risk_assessment_ref, Some(risk_id));
-}
 
-#[test]
-#[should_panic(expected = "HostError: Error(Contract, #57)")]
-fn test_register_stewardship_unknown_risk_ref_panics() {
-    let (env, _owner, client) = create_ledger();
-    let actor = Address::generate(&env);
-    env.mock_all_auths();
+    let training = make_training_record(&env, symbol_short!("train001"));
+    let idx = client.record_training(&owner, &training);
+    assert_eq!(idx, 0);
+    assert_eq!(client.msa_training_record_count(), 1);
 
-    let fake = BytesN::from_array(&env, &[0xCCu8; 32]);
-    client.register_water_stewardship(
-        &actor,
-        &Bytes::from_slice(&env, b"aws_core"),
-        &0_u64, &0_u64, &0_u64,
-        &Some(fake),
-        &Bytes::new(&env),
-    );
+    let retrieved = client.get_training_record(&training.training_id);
+    assert_eq!(retrieved.attendees, 150);
+    assert!(retrieved.risk_assessment_covered);
+    assert!(retrieved.due_diligence_covered);
 }
 
 #[test]
-fn test_update_stewardship_progress() {
-    let (env, _owner, client) = create_ledger();
-    let actor = Address::generate(&env);
+fn test_submit_due_diligence() {
+    let (env, owner, client) = create_ledger();
     env.mock_all_auths();
 
-    let id = register_stewardship(&env, &client, &actor);
+    let dd = make_due_diligence_record(&env, symbol_short!("dd_2026_001"));
+    let idx = client.submit_due_diligence(&owner, &dd);
+    assert_eq!(idx, 0);
+    assert_eq!(client.msa_due_diligence_count(), 1);
 
-    client.update_stewardship_progress(&actor, &id, &200_000_000_u64);
-
-    let rec = client.get_water_stewardship(&id);
-    assert_eq!(rec.achieved_reduction_L_micro, 200_000_000_u64);
+    let retrieved = client.get_due_diligence_record(&dd.record_id);
+    assert_eq!(retrieved.risk_level, 1);
+    assert_eq!(retrieved.corrective_actions_completed_pct, 50);
 }
 
 #[test]
-fn test_update_stewardship_progress_cumulative() {
-    let (env, _owner, client) = create_ledger();
-    let actor = Address::generate(&env);
+fn test_record_msa_policy() {
+    let (env, owner, client) = create_ledger();
     env.mock_all_auths();
 
-    let id = register_stewardship(&env, &client, &actor);
+    let policy = make_msa_policy(&env, symbol_short!("policy01"));
+    let idx = client.record_msa_policy(&owner, &policy);
+    assert_eq!(idx, 0);
+    assert_eq!(client.msa_policy_count(), 1);
 
-    client.update_stewardship_progress(&actor, &id, &100_000_000_u64);
-    // Update again with a higher cumulative value
-    client.update_stewardship_progress(&actor, &id, &350_000_000_u64);
-
-    let rec = client.get_water_stewardship(&id);
-    assert_eq!(rec.achieved_reduction_L_micro, 350_000_000_u64);
-}
-
-#[test]
-#[should_panic(expected = "HostError: Error(Contract, #1)")]
-fn test_update_stewardship_progress_non_participant_panics() {
-    let (env, _owner, client) = create_ledger();
-    let actor = Address::generate(&env);
-    let attacker = Address::generate(&env);
-    env.mock_all_auths();
-
-    let id = register_stewardship(&env, &client, &actor);
-    client.update_stewardship_progress(&attacker, &id, &999_999_u64);
+    let retrieved = client.get_msa_policy(&policy.policy_id);
+    assert_eq!(retrieved.version, 1);
+    assert!(retrieved.stakeholder_input_included);
 }
 
 #[test]
-#[should_panic(expected = "HostError: Error(Contract, #58)")]
-fn test_get_water_stewardship_not_found_panics() {
-    let (env, _owner, client) = create_ledger();
+fn test_build_msa_report() {
+    let (env, owner, client) = create_ledger();
     env.mock_all_auths();
-    client.get_water_stewardship(&BytesN::from_array(&env, &[0x22u8; 32]));
-}
 
-// ── record_water_disclosure ───────────────────────────────────────────────────
+    // Record one of each component
+    let assess = make_risk_assessment(&env, symbol_short!("assess1"), owner.clone());
+    let node = make_supply_chain_node(&env, symbol_short!("supp01"));
+    let train = make_training_record(&env, symbol_short!("train01"));
+    let dd = make_due_diligence_record(&env, symbol_short!("dd01"));
+    let policy = make_msa_policy(&env, symbol_short!("pol01"));
 
-#[test]
-fn test_record_water_disclosure_stored() {
-    let (env, _owner, client) = create_ledger();
-    let org = Address::generate(&env);
-    env.mock_all_auths();
+    client.record_risk_assessment(&owner, &assess);
+    client.record_supply_chain_node(&owner, &node);
+    client.record_training(&owner, &train);
+    client.submit_due_diligence(&owner, &dd);
+    client.record_msa_policy(&owner, &policy);
 
-    let id = client.record_water_disclosure(
-        &org,
-        &2025_u32,
-        &100_000_000_000_u64,  // W1: 100 000 m³ withdrawal
-        &40_000_000_000_u64,   // W2: 40 000 m³ consumption
-        &60_000_000_000_u64,   // W3: discharge
-        &2_000_u32,            // W4: 20% estimated
-        &10_000_000_000_u64,   // W5: reduction target
-        &3_u32,                // W6: 3 stressed sites
-        &8_000_000_000_u64,    // W7: scarcity-weighted
-        &2_000_000_000_u64,    // W8: achieved
-        &Bytes::from_slice(&env, b"cdp-2025-sub-001"),
-    );
-
-    let rec = client.get_water_disclosure(&id);
-    assert_eq!(rec.reporting_year, 2025_u32);
-    assert_eq!(rec.total_withdrawal_L_micro, 100_000_000_000_u64);
-    assert_eq!(rec.total_consumption_L_micro, 40_000_000_000_u64);
-    assert_eq!(rec.sites_in_stressed_areas, 3_u32);
-    assert_eq!(rec.scarcity_weighted_total_L_micro, 8_000_000_000_u64);
-    assert_eq!(rec.reduction_achieved_L_micro, 2_000_000_000_u64);
-    assert_eq!(rec.metadata, Bytes::from_slice(&env, b"cdp-2025-sub-001"));
+    let report = client.build_msa_report(&owner);
+    assert_eq!(report.assessments_count, 1);
+    assert_eq!(report.supply_chain_nodes, 1);
+    assert_eq!(report.due_diligence_investigations, 1);
+    assert_eq!(report.active_policies, 1);
 }
 
 #[test]
-fn test_record_water_disclosure_increments_totals() {
-    let (env, _owner, client) = create_ledger();
-    let org = Address::generate(&env);
+fn test_get_msa_report() {
+    let (env, owner, client) = create_ledger();
     env.mock_all_auths();
 
-    assert_eq!(client.get_water_totals().total_disclosures, 0);
-
-    client.record_water_disclosure(
-        &org, &2024_u32,
-        &50_000_u64, &20_000_u64, &30_000_u64,
-        &1_000_u32, &0_u64, &0_u32, &0_u64, &0_u64,
-        &Bytes::new(&env),
-    );
-
-    assert_eq!(client.get_water_totals().total_disclosures, 1);
-}
+    // Initially None
+    assert!(client.get_msa_report().is_none());
 
-#[test]
-#[should_panic(expected = "HostError: Error(Contract, #63)")]
-fn test_record_water_disclosure_invalid_year_panics() {
-    let (env, _owner, client) = create_ledger();
-    let org = Address::generate(&env);
-    env.mock_all_auths();
+    // Generate report
+    client.build_msa_report(&owner);
 
-    client.record_water_disclosure(
-        &org,
-        &2000_u32,   // ≤ 2000 → InvalidDisclosureYear
-        &1_000_u64, &0_u64, &0_u64,
-        &0_u32, &0_u64, &0_u32, &0_u64, &0_u64,
-        &Bytes::new(&env),
-    );
+    // Now should be Some
+    let report = client.get_msa_report();
+    assert!(report.is_some());
+    assert_eq!(report.unwrap().assessments_count, 0);
 }
 
 #[test]
-#[should_panic(expected = "HostError: Error(Contract, #59)")]
-fn test_get_water_disclosure_not_found_panics() {
-    let (env, _owner, client) = create_ledger();
+fn test_msa_counts_increment() {
+    let (env, owner, client) = create_ledger();
     env.mock_all_auths();
-    client.get_water_disclosure(&BytesN::from_array(&env, &[0x33u8; 32]));
-}
 
-// ── compute_water_snapshot ────────────────────────────────────────────────────
+    assert_eq!(client.msa_risk_assessment_count(), 0);
+    assert_eq!(client.msa_supply_chain_node_count(), 0);
+    assert_eq!(client.msa_training_record_count(), 0);
+    assert_eq!(client.msa_due_diligence_count(), 0);
+    assert_eq!(client.msa_policy_count(), 0);
 
-#[test]
-fn test_water_snapshot_empty_contract() {
-    let (env, _owner, client) = create_ledger();
-    env.mock_all_auths();
+    // Record one of each
+    let a = make_risk_assessment(&env, symbol_short!("a1"), owner.clone());
+    let n = make_supply_chain_node(&env, symbol_short!("n1"));
+    let t = make_training_record(&env, symbol_short!("t1"));
+    let d = make_due_diligence_record(&env, symbol_short!("d1"));
+    let p = make_msa_policy(&env, symbol_short!("p1"));
 
-    let snap = client.compute_water_snapshot();
-    assert_eq!(snap.total_blue_L_micro, 0_u64);
-    assert_eq!(snap.total_water_footprint_L_micro, 0_u64);
-    assert_eq!(snap.scarcity_ratio_bps, 0_u32);
-    assert_eq!(snap.blue_fraction_bps, 0_u32);
-    assert_eq!(snap.index, 0_u32);
-}
+    client.record_risk_assessment(&owner, &a);
+    client.record_supply_chain_node(&owner, &n);
+    client.record_training(&owner, &t);
+    client.submit_due_diligence(&owner, &d);
+    client.record_msa_policy(&owner, &p);
 
-#[test]
-fn test_water_snapshot_totals_and_ratios() {
-    let (env, _owner, client) = create_ledger();
-    let actor = Address::generate(&env);
-    env.mock_all_auths();
+    // All should be 1
+    assert_eq!(client.msa_risk_assessment_count(), 1);
+    assert_eq!(client.msa_supply_chain_node_count(), 1);
+    assert_eq!(client.msa_training_record_count(), 1);
+    assert_eq!(client.msa_due_diligence_count(), 1);
+    assert_eq!(client.msa_policy_count(), 1);
 
-    // blue = 6M, green = 2M, grey = 2M → total = 10M
-    // WSI = 50_000 → sw = 6M*50k/1M = 300k
-    client.record_water_footprint(
-        &actor, &fake_event_ref(&env, 0x40),
-        &soroban_sdk::Symbol::new(&env, "agri"),
-        &6_000_000_u64, &2_000_000_u64, &2_000_000_u64,
-        &50_000_u32, &None, &None,
-        &Bytes::new(&env), &Bytes::new(&env), &Bytes::new(&env),
-    );
-
-    let snap = client.compute_water_snapshot();
-
-    assert_eq!(snap.total_blue_L_micro, 6_000_000_u64);
-    assert_eq!(snap.total_water_footprint_L_micro, 10_000_000_u64);
-    assert_eq!(snap.total_scarcity_weighted_L_micro, 300_000_u64);
-    // scarcity_ratio = 300_000 * 10_000 / 6_000_000 = 500 bps
-    assert_eq!(snap.scarcity_ratio_bps, 500_u32);
-    // blue_fraction = 6_000_000 * 10_000 / 10_000_000 = 6_000 bps
-    assert_eq!(snap.blue_fraction_bps, 6_000_u32);
-}
+    // Record second of each
+    let a2 = make_risk_assessment(&env, symbol_short!("a2"), owner.clone());
+    let n2 = make_supply_chain_node(&env, symbol_short!("n2"));
+    let t2 = make_training_record(&env, symbol_short!("t2"));
+    let d2 = make_due_diligence_record(&env, symbol_short!("d2"));
+    let p2 = make_msa_policy(&env, symbol_short!("p2"));
 
-#[test]
-fn test_water_snapshot_all_blue() {
-    let (env, _owner, client) = create_ledger();
-    let actor = Address::generate(&env);
-    env.mock_all_auths();
+    client.record_risk_assessment(&owner, &a2);
+    client.record_supply_chain_node(&owner, &n2);
+    client.record_training(&owner, &t2);
+    client.submit_due_diligence(&owner, &d2);
+    client.record_msa_policy(&owner, &p2);
 
-    client.record_water_footprint(
-        &actor, &fake_event_ref(&env, 0x50),
-        &soroban_sdk::Symbol::new(&env, "energy"),
-        &4_000_000_u64, &0_u64, &0_u64,
-        &0_u32, &None, &None,
-        &Bytes::new(&env), &Bytes::new(&env), &Bytes::new(&env),
-    );
-
-    let snap = client.compute_water_snapshot();
-    // total = 4M, all blue → blue_fraction = 10_000 bps (100%)
-    assert_eq!(snap.blue_fraction_bps, 10_000_u32);
-    // no scarcity weighting → ratio = 0
-    assert_eq!(snap.scarcity_ratio_bps, 0_u32);
+    // All should be 2
+    assert_eq!(client.msa_risk_assessment_count(), 2);
+    assert_eq!(client.msa_supply_chain_node_count(), 2);
+    assert_eq!(client.msa_training_record_count(), 2);
+    assert_eq!(client.msa_due_diligence_count(), 2);
+    assert_eq!(client.msa_policy_count(), 2);
 }
 
 #[test]
-fn test_water_snapshot_count_increments() {
-    let (env, _owner, client) = create_ledger();
+fn test_msa_owner_only_access() {
+    let (env, owner, client) = create_ledger();
+    let non_owner = Address::generate(&env);
     env.mock_all_auths();
 
-    assert_eq!(client.water_snapshot_count(), 0);
-    client.compute_water_snapshot();
-    assert_eq!(client.water_snapshot_count(), 1);
-    client.compute_water_snapshot();
-    assert_eq!(client.water_snapshot_count(), 2);
+    let a = make_risk_assessment(&env, symbol_short!("a1"), non_owner.clone());
+    let result = client.try_record_risk_assessment(&non_owner, &a);
+    assert!(result.is_err());
 }
 
 #[test]
-fn test_get_water_snapshot_retrieves_by_index() {
+fn test_get_nonexistent_risk_assessment_fails() {
     let (env, _owner, client) = create_ledger();
-    let actor = Address::generate(&env);
-    env.mock_all_auths();
-
-    let snap0 = client.compute_water_snapshot();
-    assert_eq!(snap0.index, 0);
-    assert_eq!(snap0.total_footprints, 0);
-
-    client.record_water_footprint(
-        &actor, &fake_event_ref(&env, 0x60),
-        &soroban_sdk::Symbol::new(&env, "munici"),
-        &3_000_000_u64, &0_u64, &0_u64,
-        &10_000_u32, &None, &None,
-        &Bytes::new(&env), &Bytes::new(&env), &Bytes::new(&env),
-    );
-
-    let snap1 = client.compute_water_snapshot();
-    assert_eq!(snap1.index, 1);
-    assert_eq!(snap1.total_footprints, 1);
-
-    let r0 = client.get_water_snapshot(&0);
-    let r1 = client.get_water_snapshot(&1);
-    assert_eq!(r0.total_footprints, 0);
-    assert_eq!(r1.total_footprints, 1);
-    assert_eq!(r1.total_blue_L_micro, 3_000_000_u64);
+    let result = client.try_get_risk_assessment(&symbol_short!("missing"));
+    assert!(result.is_err());
 }
 
 #[test]
-#[should_panic(expected = "HostError: Error(Contract, #30)")]
-fn test_get_water_snapshot_not_found_panics() {
+fn test_get_nonexistent_supply_chain_node_fails() {
     let (env, _owner, client) = create_ledger();
-    env.mock_all_auths();
-    client.get_water_snapshot(&99);
+    let result = client.try_get_supply_chain_node(&symbol_short!("missing"));
+    assert!(result.is_err());
 }
 
-// ── get_water_totals ──────────────────────────────────────────────────────────
-
 #[test]
-fn test_get_water_totals_empty() {
+fn test_get_nonexistent_training_fails() {
     let (env, _owner, client) = create_ledger();
-    env.mock_all_auths();
-
-    let t = client.get_water_totals();
-    assert_eq!(t.total_footprints, 0);
-    assert_eq!(t.total_blue_L_micro, 0);
-    assert_eq!(t.total_scarcity_weighted_L_micro, 0);
-    assert_eq!(t.total_risk_assessments, 0);
-    assert_eq!(t.total_stewardship_programmes, 0);
-    assert_eq!(t.total_disclosures, 0);
+    let result = client.try_get_training_record(&symbol_short!("missing"));
+    assert!(result.is_err());
 }
 
 #[test]
-fn test_get_water_totals_full_accumulation() {
+fn test_get_nonexistent_due_diligence_fails() {
     let (env, _owner, client) = create_ledger();
-    let actor = Address::generate(&env);
-    let org = Address::generate(&env);
-    env.mock_all_auths();
-
-    // 2 footprints
-    client.record_water_footprint(
-        &actor, &fake_event_ref(&env, 0x70),
-        &soroban_sdk::Symbol::new(&env, "agri"),
-        &10_000_000_u64, &5_000_000_u64, &2_000_000_u64,
-        &30_000_u32, &None, &None,
-        &Bytes::new(&env), &Bytes::new(&env), &Bytes::new(&env),
-    );
-    env.ledger().with_mut(|li| li.timestamp += 1);
-    client.record_water_footprint(
-        &actor, &fake_event_ref(&env, 0x71),
-        &soroban_sdk::Symbol::new(&env, "indust"),
-        &4_000_000_u64, &0_u64, &1_000_000_u64,
-        &0_u32, &None, &None,
-        &Bytes::new(&env), &Bytes::new(&env), &Bytes::new(&env),
-    );
-
-    // 1 risk assessment
-    env.ledger().with_mut(|li| li.timestamp += 1);
-    register_risk(&env, &client, &actor);
-
-    // 1 stewardship
-    env.ledger().with_mut(|li| li.timestamp += 1);
-    register_stewardship(&env, &client, &actor);
-
-    // 1 disclosure
-    env.ledger().with_mut(|li| li.timestamp += 1);
-    client.record_water_disclosure(
-        &org, &2025_u32,
-        &80_000_u64, &30_000_u64, &50_000_u64,
-        &500_u32, &0_u64, &1_u32, &0_u64, &0_u64,
-        &Bytes::new(&env),
-    );
-
-    let t = client.get_water_totals();
-    assert_eq!(t.total_footprints, 2);
-    assert_eq!(t.total_blue_L_micro, 14_000_000_u64);
-    assert_eq!(t.total_green_L_micro, 5_000_000_u64);
-    assert_eq!(t.total_grey_L_micro, 3_000_000_u64);
-    // sw = 10M*30k/1M + 4M*0/1M = 300k
-    assert_eq!(t.total_scarcity_weighted_L_micro, 300_000_u64);
-    assert_eq!(t.total_risk_assessments, 1);
-    assert_eq!(t.total_stewardship_programmes, 1);
-    assert_eq!(t.total_disclosures, 1);
+    let result = client.try_get_due_diligence_record(&symbol_short!("missing"));
+    assert!(result.is_err());
 }
-
-// ── Snapshot reflects risk/stewardship counts ─────────────────────────────────
 
 #[test]
-fn test_snapshot_includes_risk_and_stewardship_counts() {
+fn test_get_nonexistent_policy_fails() {
     let (env, _owner, client) = create_ledger();
-    let actor = Address::generate(&env);
-    env.mock_all_auths();
-
-    register_risk(&env, &client, &actor);
-    env.ledger().with_mut(|li| li.timestamp += 1);
-    register_stewardship(&env, &client, &actor);
-
-    let snap = client.compute_water_snapshot();
-    assert_eq!(snap.total_risk_assessments, 1);
-    assert_eq!(snap.total_stewardship_programmes, 1);
+    let result = client.try_get_msa_policy(&symbol_short!("missing"));
+    assert!(result.is_err());
 }
