@@ -1,6 +1,6 @@
 use super::*;
 use soroban_sdk::testutils::{Address as _, Events, Ledger};
-use soroban_sdk::{symbol_short, Bytes, BytesN, Env, IntoVal, Symbol, Vec};
+use soroban_sdk::{symbol_short, Bytes, BytesN, Env, Vec};
 
 fn create_ledger() -> (Env, Address, AuditLedgerClient<'static>) {
     let env = Env::default();
@@ -122,9 +122,11 @@ fn test_initialize_reinitialization_panics() {
     let client = AuditLedgerClient::new(&env, &contract_id);
 
     env.mock_all_auths();
-    client.initialize(&owner, &100, &4096);
+    let mut owners = Vec::new(&env);
+    owners.push_back(owner.clone());
+    client.initialize(&owners, &100, &4096);
     // Try to re-initialize — should fail with AlreadyInitialized (error #19)
-    client.initialize(&owner, &200, &4096);
+    client.initialize(&owners, &200, &4096);
 }
 
 #[test]
@@ -137,14 +139,16 @@ fn test_initialize_reinitialization_after_ownership_transfer_panics() {
     let client = AuditLedgerClient::new(&env, &contract_id);
 
     env.mock_all_auths();
-    client.initialize(&owner, &100, &4096);
+    let mut owners = Vec::new(&env);
+    owners.push_back(owner.clone());
+    client.initialize(&owners, &100, &4096);
     
     // Transfer ownership
     client.transfer_ownership(&owner, &new_owner);
 
     // Try to re-initialize with new owner — should still fail with AlreadyInitialized
     // (demonstrates that version counter protects against re-init even if owner changes)
-    client.initialize(&new_owner, &200, &4096);
+    client.initialize(&owners, &200, &4096);
 }
 
 #[test]
@@ -809,7 +813,7 @@ fn test_log_event_metadata_too_large_reverts() {
     let (env, _owner, client) = create_ledger();
     let submitter = Address::generate(&env);
     let payment = symbol_short!("payment");
-    let mut meta_vec = vec![0u8; 4097];
+    let meta_vec = [0u8; 4097];
     let metadata = Bytes::from_slice(&env, &meta_vec);
 
     env.mock_all_auths();
@@ -822,7 +826,7 @@ fn test_log_events_metadata_too_large_reverts() {
     let (env, _owner, client) = create_ledger();
     let submitter = Address::generate(&env);
     let payment = symbol_short!("payment");
-    let mut meta_vec = vec![0u8; 4097];
+    let meta_vec = [0u8; 4097];
     let metadata = Bytes::from_slice(&env, &meta_vec);
     let events = soroban_sdk::vec![
         &env,
@@ -1037,7 +1041,9 @@ fn test_log_event_rejects_total_events_overflow() {
     let client = AuditLedgerClient::new(&env, &contract_id);
 
     env.mock_all_auths();
-    client.initialize(&owner, &u32::MAX, &4096);
+    let mut owners = Vec::new(&env);
+    owners.push_back(owner.clone());
+    client.initialize(&owners, &u32::MAX, &4096);
     env.storage()
         .instance()
         .set(&super::DataKey::TotalEvents, &u32::MAX);
@@ -1295,8 +1301,6 @@ fn test_log_event_signed_stores_signature() {
         &submitter,
         &symbol_short!("pay"),
         &Bytes::from_slice(&env, b"data"),
-        &None,
-        &None,
         &sig_payload,
     );
     let stored = client.get_event_signature(&id);
@@ -1316,8 +1320,6 @@ fn test_log_event_signed_rejects_wrong_length() {
         &submitter,
         &symbol_short!("pay"),
         &Bytes::from_slice(&env, b"data"),
-        &None,
-        &None,
         &short_payload,
     );
 }
@@ -2203,6 +2205,134 @@ fn test_update_event_nonexistent_panics() {
     client.update_event(&owner, &0, &Bytes::from_slice(&env, b"updated"));
 }
 
+// ── issue #204: event versioning with rollback ────────────────────────────────
+
+#[test]
+fn test_rollback_event_to_original() {
+    let (env, owner, client) = create_ledger();
+    let submitter = Address::generate(&env);
+    let payment = symbol_short!("payment");
+
+    env.mock_all_auths();
+    let id0 = client.log_event(
+        &submitter,
+        &payment,
+        &Bytes::from_slice(&env, b"original"),
+        &None,
+        &None,
+        &false,
+    );
+    let new_id = client.update_event(&owner, &0, &Bytes::from_slice(&env, b"updated"));
+    assert_ne!(id0, new_id);
+
+    let rolled_id = client.rollback_event(&owner, &0, &0);
+    assert_eq!(rolled_id, id0);
+
+    let evt = client.get_event(&id0);
+    assert_eq!(evt.metadata, Bytes::from_slice(&env, b"original"));
+
+    let history = client.get_event_history(&0);
+    assert_eq!(history.len(), 3);
+    assert_eq!(history.get(2).unwrap().data.metadata, Bytes::from_slice(&env, b"original"));
+}
+
+#[test]
+fn test_rollback_event_to_specific_version() {
+    let (env, owner, client) = create_ledger();
+    let submitter = Address::generate(&env);
+    let payment = symbol_short!("payment");
+
+    env.mock_all_auths();
+    client.log_event(
+        &submitter,
+        &payment,
+        &Bytes::from_slice(&env, b"v0"),
+        &None,
+        &None,
+        &false,
+    );
+    client.update_event(&owner, &0, &Bytes::from_slice(&env, b"v1"));
+    client.update_event(&owner, &0, &Bytes::from_slice(&env, b"v2"));
+
+    let history = client.get_event_history(&0);
+    assert_eq!(history.len(), 4);
+
+    client.rollback_event(&owner, &0, &1);
+    let evt = client.get_event_by_order(&0);
+    assert_eq!(evt.metadata, Bytes::from_slice(&env, b"v1"));
+
+    let new_history = client.get_event_history(&0);
+    assert_eq!(new_history.len(), 5);
+    assert_eq!(new_history.get(4).unwrap().data.metadata, Bytes::from_slice(&env, b"v1"));
+}
+
+#[test]
+fn test_rollback_preserves_hash_chain() {
+    let (env, owner, client) = create_ledger();
+    let submitter = Address::generate(&env);
+
+    env.mock_all_auths();
+    client.log_event(&submitter, &symbol_short!("a"), &Bytes::from_slice(&env, b"1"), &None, &None, &false);
+    client.log_event(&submitter, &symbol_short!("b"), &Bytes::from_slice(&env, b"2"), &None, &None, &false);
+    client.log_event(&submitter, &symbol_short!("c"), &Bytes::from_slice(&env, b"3"), &None, &None, &false);
+
+    assert!(client.verify_integrity());
+
+    client.update_event(&owner, &0, &Bytes::from_slice(&env, b"1-updated"));
+    assert!(client.verify_integrity());
+
+    client.rollback_event(&owner, &0, &0);
+    assert!(client.verify_integrity());
+}
+
+#[test]
+#[should_panic(expected = "HostError: Error(Contract, #33)")]
+fn test_rollback_invalid_version_panics() {
+    let (env, owner, client) = create_ledger();
+    let submitter = Address::generate(&env);
+    env.mock_all_auths();
+    client.log_event(&submitter, &symbol_short!("t"), &Bytes::from_slice(&env, b"x"), &None, &None, &false);
+    client.rollback_event(&owner, &0, &5);
+}
+
+#[test]
+#[should_panic(expected = "HostError: Error(Contract, #1)")]
+fn test_rollback_non_owner_panics() {
+    let (env, _owner, client) = create_ledger();
+    let attacker = Address::generate(&env);
+    env.mock_all_auths();
+    client.rollback_event(&attacker, &0, &0);
+}
+
+#[test]
+fn test_get_event_version_count() {
+    let (env, owner, client) = create_ledger();
+    let submitter = Address::generate(&env);
+    env.mock_all_auths();
+    client.log_event(&submitter, &symbol_short!("t"), &Bytes::from_slice(&env, b"x"), &None, &None, &false);
+    assert_eq!(client.get_event_version_count(&0), 1);
+
+    client.update_event(&owner, &0, &Bytes::from_slice(&env, b"y"));
+    assert_eq!(client.get_event_version_count(&0), 2);
+
+    client.update_event(&owner, &0, &Bytes::from_slice(&env, b"z"));
+    assert_eq!(client.get_event_version_count(&0), 3);
+}
+
+#[test]
+fn test_compare_event_versions() {
+    let (env, owner, client) = create_ledger();
+    let submitter = Address::generate(&env);
+    env.mock_all_auths();
+    client.log_event(&submitter, &symbol_short!("t"), &Bytes::from_slice(&env, b"short"), &None, &None, &false);
+    client.update_event(&owner, &0, &Bytes::from_slice(&env, b"much longer metadata"));
+
+    assert_eq!(client.compare_event_versions(&0, &0, &0), 0);
+    assert_eq!(client.compare_event_versions(&0, &1, &1), 0);
+    assert!(client.compare_event_versions(&0, &0, &1) < 0);
+    assert!(client.compare_event_versions(&0, &1, &0) > 0);
+}
+
 // ── Hash Chain Integrity Verification (Issue #144) ───────────────────────────
 
 #[test]
@@ -2910,4 +3040,1006 @@ fn test_get_events_by_type_preserves_insertion_order() {
     assert_eq!(page.get(0).unwrap().metadata, Bytes::from_slice(&env, b"first"));
     assert_eq!(page.get(1).unwrap().metadata, Bytes::from_slice(&env, b"second"));
     assert_eq!(page.get(2).unwrap().metadata, Bytes::from_slice(&env, b"third"));
+}
+
+// ── issue #202: metadata schema validation ────────────────────────────────────
+
+#[test]
+fn test_set_metadata_schema_and_get() {
+    let (env, owner, client) = create_ledger();
+    let event_type = symbol_short!("payment");
+    env.mock_all_auths();
+    // schema: min_len = 5
+    let schema = Bytes::from_slice(&env, &[5u8, 0, 0, 0]);
+    client.set_metadata_schema(&owner, &event_type, &schema);
+    let retrieved = client.get_metadata_schema(&event_type);
+    assert_eq!(retrieved, schema);
+}
+
+#[test]
+fn test_get_metadata_schema_returns_empty_when_not_set() {
+    let (env, _owner, client) = create_ledger();
+    let event_type = symbol_short!("payment");
+    let schema = client.get_metadata_schema(&event_type);
+    assert_eq!(schema.len(), 0);
+}
+
+#[test]
+fn test_metadata_schema_passes_when_met() {
+    let (env, owner, client) = create_ledger();
+    let submitter = Address::generate(&env);
+    let event_type = symbol_short!("payment");
+    env.mock_all_auths();
+    // schema: min_len = 5
+    let schema = Bytes::from_slice(&env, &[5u8, 0, 0, 0]);
+    client.set_metadata_schema(&owner, &event_type, &schema);
+    // 5 bytes passes
+    let id = client.log_event(
+        &submitter,
+        &event_type,
+        &Bytes::from_slice(&env, b"12345"),
+        &None,
+        &None,
+        &false,
+    );
+    assert_eq!(client.total_events(), 1);
+    // 10 bytes also passes
+    client.log_event(
+        &submitter,
+        &event_type,
+        &Bytes::from_slice(&env, b"0123456789"),
+        &None,
+        &None,
+        &false,
+    );
+    assert_eq!(client.total_events(), 2);
+}
+
+#[test]
+#[should_panic(expected = "HostError: Error(Contract, #32)")]
+fn test_metadata_schema_fails_when_too_short() {
+    let (env, owner, client) = create_ledger();
+    let submitter = Address::generate(&env);
+    let event_type = symbol_short!("payment");
+    env.mock_all_auths();
+    // schema: min_len = 10
+    let schema = Bytes::from_slice(&env, &[10u8, 0, 0, 0]);
+    client.set_metadata_schema(&owner, &event_type, &schema);
+    // 5 bytes is too short
+    client.log_event(
+        &submitter,
+        &event_type,
+        &Bytes::from_slice(&env, b"12345"),
+        &None,
+        &None,
+        &false,
+    );
+}
+
+#[test]
+fn test_metadata_schema_empty_passes_any() {
+    let (env, owner, client) = create_ledger();
+    let submitter = Address::generate(&env);
+    let event_type = symbol_short!("payment");
+    env.mock_all_auths();
+    // empty schema = no constraint
+    client.set_metadata_schema(&owner, &event_type, &Bytes::new(&env));
+    client.log_event(
+        &submitter,
+        &event_type,
+        &Bytes::new(&env),
+        &None,
+        &None,
+        &false,
+    );
+    assert_eq!(client.total_events(), 1);
+}
+
+#[test]
+fn test_metadata_schema_non_owner_cannot_set() {
+    let (env, _owner, client) = create_ledger();
+    let attacker = Address::generate(&env);
+    let event_type = symbol_short!("payment");
+    env.mock_all_auths();
+    let schema = Bytes::from_slice(&env, &[5u8, 0, 0, 0]);
+    let result = client.try_set_metadata_schema(&attacker, &event_type, &schema);
+    assert!(result.is_err());
+}
+
+#[test]
+#[should_panic(expected = "HostError: Error(Contract, #32)")]
+fn test_metadata_schema_enforced_on_update() {
+    let (env, owner, client) = create_ledger();
+    let submitter = Address::generate(&env);
+    let event_type = symbol_short!("payment");
+    env.mock_all_auths();
+    // schema: min_len = 10
+    let schema = Bytes::from_slice(&env, &[10u8, 0, 0, 0]);
+    client.set_metadata_schema(&owner, &event_type, &schema);
+    // log a valid event first
+    let id = client.log_event(
+        &submitter,
+        &event_type,
+        &Bytes::from_slice(&env, b"0123456789"),
+        &None,
+        &None,
+        &false,
+    );
+    // attempt to update with too-short metadata
+    client.update_event(&owner, &0, &Bytes::from_slice(&env, b"short"));
+}
+
+#[test]
+fn test_metadata_schema_per_type_isolation() {
+    let (env, owner, client) = create_ledger();
+    let submitter = Address::generate(&env);
+    let payment = symbol_short!("payment");
+    let refund = symbol_short!("refund");
+    env.mock_all_auths();
+    // payment requires min 8 bytes
+    let schema_payment = Bytes::from_slice(&env, &[8u8, 0, 0, 0]);
+    client.set_metadata_schema(&owner, &payment, &schema_payment);
+    // refund has no schema
+    // refund short metadata passes
+    client.log_event(
+        &submitter,
+        &refund,
+        &Bytes::from_slice(&env, b"1"),
+        &None,
+        &None,
+        &false,
+    );
+    assert_eq!(client.total_events(), 1);
+    // payment short metadata fails
+    let result = client.try_log_event(
+        &submitter,
+        &payment,
+        &Bytes::from_slice(&env, b"1"),
+        &None,
+        &None,
+        &false,
+    );
+    assert!(result.is_err());
+    // payment long metadata passes
+    client.log_event(
+        &submitter,
+        &payment,
+        &Bytes::from_slice(&env, b"01234567"),
+        &None,
+        &None,
+        &false,
+    );
+    assert_eq!(client.total_events(), 2);
+}
+
+// ── TTL auto-cleanup (#200) ───────────────────────────────────────────────────
+
+/// cleanup_expired_events returns 0 when TTL is disabled (ttl = 0).
+#[test]
+fn test_cleanup_expired_events_returns_zero_when_ttl_disabled() {
+    let (env, owner, client) = create_ledger();
+    let submitter = Address::generate(&env);
+    env.mock_all_auths();
+
+    client.log_event(&submitter, &symbol_short!("pay"), &Bytes::from_slice(&env, b"a"), &None, &None, &false);
+    // TTL not set — cleanup should be a no-op
+    let removed = client.cleanup_expired_events(&owner, &0, &100);
+    assert_eq!(removed, 0);
+}
+
+/// cleanup_expired_events with TTL set and no expired entries returns 0.
+#[test]
+fn test_cleanup_expired_events_no_expiry_returns_zero() {
+    let (env, owner, client) = create_ledger();
+    let submitter = Address::generate(&env);
+    env.mock_all_auths();
+
+    client.set_event_ttl(&owner, &10000);
+    client.log_event(&submitter, &symbol_short!("pay"), &Bytes::from_slice(&env, b"a"), &None, &None, &false);
+    // Persistent entry is still alive, so nothing should be counted as expired.
+    let removed = client.cleanup_expired_events(&owner, &0, &100);
+    assert_eq!(removed, 0);
+}
+
+/// cleanup_expired_events increments the run counter each time.
+#[test]
+fn test_cleanup_stats_run_counter_increments() {
+    let (env, owner, client) = create_ledger();
+    env.mock_all_auths();
+
+    client.set_event_ttl(&owner, &1000);
+
+    let before = client.get_cleanup_stats();
+    assert_eq!(before.runs, 0);
+
+    client.cleanup_expired_events(&owner, &0, &100);
+    let after1 = client.get_cleanup_stats();
+    assert_eq!(after1.runs, 1);
+
+    client.cleanup_expired_events(&owner, &0, &100);
+    let after2 = client.get_cleanup_stats();
+    assert_eq!(after2.runs, 2);
+}
+
+/// cleanup_expired_events records the ledger sequence of the last run.
+#[test]
+fn test_cleanup_stats_last_run_ledger_updated() {
+    let (env, owner, client) = create_ledger();
+    env.mock_all_auths();
+
+    client.set_event_ttl(&owner, &1000);
+
+    let stats_before = client.get_cleanup_stats();
+    assert_eq!(stats_before.last_run_ledger, 0);
+
+    client.cleanup_expired_events(&owner, &0, &100);
+
+    let stats_after = client.get_cleanup_stats();
+    assert!(stats_after.last_run_ledger > 0, "last_run_ledger should be set after cleanup");
+}
+
+/// get_cleanup_stats returns zero-valued struct when no cleanup has run.
+#[test]
+fn test_get_cleanup_stats_default_zero() {
+    let (_env, _owner, client) = create_ledger();
+    let stats = client.get_cleanup_stats();
+    assert_eq!(stats.runs, 0);
+    assert_eq!(stats.cleaned, 0);
+    assert_eq!(stats.ttl_extensions, 0);
+    assert_eq!(stats.last_run_ledger, 0);
+}
+
+/// Non-owner cannot call cleanup_expired_events.
+#[test]
+fn test_cleanup_expired_events_non_owner_rejected() {
+    let (env, _owner, client) = create_ledger();
+    let attacker = Address::generate(&env);
+    env.mock_all_auths();
+
+    client.set_event_ttl(&_owner, &1000);
+    let result = client.try_cleanup_expired_events(&attacker, &0, &100);
+    assert!(result.is_err());
+}
+
+/// cleanup_expired_events emits a monitoring event.
+#[test]
+fn test_cleanup_expired_events_emits_event() {
+    let (env, owner, client) = create_ledger();
+    env.mock_all_auths();
+
+    client.set_event_ttl(&owner, &1000);
+    let before = env.events().all().events().len();
+    client.cleanup_expired_events(&owner, &0, &100);
+    let after = env.events().all().events().len();
+    assert!(after > before, "cleanup_expired_events should emit a monitoring event");
+}
+
+/// TTL extension on read: get_event extends the persistent TTL.
+#[test]
+fn test_get_event_extends_ttl_on_read() {
+    let (env, owner, client) = create_ledger();
+    let submitter = Address::generate(&env);
+    env.mock_all_auths();
+
+    client.set_event_ttl(&owner, &1000);
+    let id = client.log_event(
+        &submitter,
+        &symbol_short!("pay"),
+        &Bytes::from_slice(&env, b"extend_test"),
+        &None,
+        &None,
+        &false,
+    );
+
+    let stats_before = client.get_cleanup_stats();
+    assert_eq!(stats_before.ttl_extensions, 0);
+
+    // Reading the event should extend TTL and increment the counter.
+    let evt = client.get_event(&id);
+    assert_eq!(evt.metadata, Bytes::from_slice(&env, b"extend_test"));
+
+    let stats_after = client.get_cleanup_stats();
+    assert_eq!(stats_after.ttl_extensions, 1, "TTL extension counter should increment on read");
+}
+
+/// TTL extension is skipped when TTL is disabled.
+#[test]
+fn test_get_event_no_extension_when_ttl_disabled() {
+    let (env, _owner, client) = create_ledger();
+    let submitter = Address::generate(&env);
+    env.mock_all_auths();
+
+    // No set_event_ttl call — TTL disabled.
+    let id = client.log_event(
+        &submitter,
+        &symbol_short!("pay"),
+        &Bytes::from_slice(&env, b"no_ext"),
+        &None,
+        &None,
+        &false,
+    );
+
+    client.get_event(&id);
+
+    let stats = client.get_cleanup_stats();
+    assert_eq!(stats.ttl_extensions, 0, "TTL extensions should stay 0 when TTL is disabled");
+}
+
+/// Multiple reads accumulate the ttl_extensions counter.
+#[test]
+fn test_get_event_ttl_extension_counter_accumulates() {
+    let (env, owner, client) = create_ledger();
+    let submitter = Address::generate(&env);
+    env.mock_all_auths();
+
+    client.set_event_ttl(&owner, &1000);
+    let id = client.log_event(
+        &submitter,
+        &symbol_short!("pay"),
+        &Bytes::from_slice(&env, b"multi_read"),
+        &None,
+        &None,
+        &false,
+    );
+
+    client.get_event(&id);
+    client.get_event(&id);
+    client.get_event(&id);
+
+    let stats = client.get_cleanup_stats();
+    assert_eq!(stats.ttl_extensions, 3, "Each read should increment ttl_extensions");
+}
+
+/// batch_size limits the scan range of cleanup_expired_events.
+#[test]
+fn test_cleanup_expired_events_batch_size_respected() {
+    let (env, owner, client) = create_ledger();
+    let submitter = Address::generate(&env);
+    env.mock_all_auths();
+
+    client.set_event_ttl(&owner, &1000);
+    // Log 10 events
+    for i in 0..10u32 {
+        client.log_event(
+            &submitter,
+            &symbol_short!("pay"),
+            &Bytes::from_slice(&env, &[i as u8]),
+            &None,
+            &None,
+            &false,
+        );
+    }
+
+    // Run cleanup with batch_size=5, starting at 0 — should process indices 0..5 only.
+    client.cleanup_expired_events(&owner, &0, &5);
+    let stats = client.get_cleanup_stats();
+    assert_eq!(stats.runs, 1);
+}
+
+/// cleanup_expired_events with start_index beyond total is a no-op (no panic).
+#[test]
+fn test_cleanup_expired_events_start_beyond_total_is_noop() {
+    let (env, owner, client) = create_ledger();
+    env.mock_all_auths();
+
+    client.set_event_ttl(&owner, &1000);
+    // No events — start at 999
+    let removed = client.cleanup_expired_events(&owner, &999, &100);
+    assert_eq!(removed, 0);
+    let stats = client.get_cleanup_stats();
+    assert_eq!(stats.runs, 1);  // run was recorded even if nothing to clean
+}
+
+// ── Social impact ────────────────────────────────────────────────────────────
+
+/// Build a minimal valid SocialImpactMetrics for use in tests.
+fn make_metrics(env: &Env, period: soroban_sdk::Symbol, submitter: Address) -> SocialImpactMetrics {
+    SocialImpactMetrics {
+        period,
+        recorded_at: env.ledger().timestamp(),
+        submitter,
+        jobs_created: 50,
+        training_positions: 10,
+        diversity_women_bps: 4500,
+        diversity_underrepresented_bps: 3000,
+        community_investment: 100_000,
+        community_beneficiaries: 500,
+        human_rights_assessment_done: true,
+        labour_violations_remediated: 2,
+        collective_bargaining_agreements: 3,
+        total_investment: 200_000,
+        total_social_value: 700_000,
+    }
+}
+
+#[test]
+fn test_record_social_impact_basic() {
+    let (env, owner, client) = create_ledger();
+    env.mock_all_auths();
+
+    let period = symbol_short!("2026_Q1");
+    let metrics = make_metrics(&env, period.clone(), owner.clone());
+
+    let idx = client.record_social_impact(&owner, &metrics);
+    assert_eq!(idx, 0);
+    assert_eq!(client.social_impact_count(), 1);
+
+    let retrieved = client.get_social_impact(&period);
+    assert_eq!(retrieved.jobs_created, 50);
+    assert_eq!(retrieved.total_investment, 200_000);
+    assert_eq!(retrieved.total_social_value, 700_000);
+    assert_eq!(retrieved.diversity_women_bps, 4500);
+    assert!(retrieved.human_rights_assessment_done);
+}
+
+#[test]
+fn test_record_social_impact_increments_count() {
+    let (env, owner, client) = create_ledger();
+    env.mock_all_auths();
+
+    assert_eq!(client.social_impact_count(), 0);
+
+    let m1 = make_metrics(&env, symbol_short!("2026_Q1"), owner.clone());
+    let m2 = make_metrics(&env, symbol_short!("2026_Q2"), owner.clone());
+
+    client.record_social_impact(&owner, &m1);
+    client.record_social_impact(&owner, &m2);
+
+    assert_eq!(client.social_impact_count(), 2);
+}
+
+#[test]
+fn test_record_social_impact_duplicate_period_fails() {
+    let (env, owner, client) = create_ledger();
+    env.mock_all_auths();
+
+    let period = symbol_short!("2026_Q1");
+    let m1 = make_metrics(&env, period.clone(), owner.clone());
+    let m2 = make_metrics(&env, period.clone(), owner.clone());
+
+    client.record_social_impact(&owner, &m1);
+    let result = client.try_record_social_impact(&owner, &m2);
+    assert!(result.is_err());
+}
+
+#[test]
+fn test_record_social_impact_owner_only() {
+    let (env, _owner, client) = create_ledger();
+    let non_owner = Address::generate(&env);
+    env.mock_all_auths();
+
+    let metrics = make_metrics(&env, symbol_short!("2026_Q1"), non_owner.clone());
+    let result = client.try_record_social_impact(&non_owner, &metrics);
+    assert!(result.is_err());
+}
+
+#[test]
+fn test_get_social_impact_not_found() {
+    let (_env, _owner, client) = create_ledger();
+    let result = client.try_get_social_impact(&symbol_short!("missing"));
+    assert!(result.is_err());
+}
+
+#[test]
+fn test_calculate_sroi_single_period() {
+    let (env, owner, client) = create_ledger();
+    env.mock_all_auths();
+
+    // investment = 200_000, social_value = 700_000 → SROI = 3.5 → bps = 35000
+    let metrics = make_metrics(&env, symbol_short!("2026_Q1"), owner.clone());
+    client.record_social_impact(&owner, &metrics);
+
+    let mut periods = Vec::new(&env);
+    periods.push_back(symbol_short!("2026_Q1"));
+
+    let sroi = client.calculate_sroi(&periods);
+    assert_eq!(sroi, 35_000u64);
+}
+
+#[test]
+fn test_calculate_sroi_multiple_periods() {
+    let (env, owner, client) = create_ledger();
+    env.mock_all_auths();
+
+    // Q1: inv=200_000, val=700_000
+    // Q2: inv=100_000, val=250_000
+    // Total: inv=300_000, val=950_000 → SROI = 950_000/300_000*10_000 = 31666 bps
+    let m1 = make_metrics(&env, symbol_short!("2026_Q1"), owner.clone());
+    let mut m2 = make_metrics(&env, symbol_short!("2026_Q2"), owner.clone());
+    m2.total_investment = 100_000;
+    m2.total_social_value = 250_000;
+
+    client.record_social_impact(&owner, &m1);
+    client.record_social_impact(&owner, &m2);
+
+    let mut periods = Vec::new(&env);
+    periods.push_back(symbol_short!("2026_Q1"));
+    periods.push_back(symbol_short!("2026_Q2"));
+
+    let sroi = client.calculate_sroi(&periods);
+    // 950_000 * 10_000 / 300_000 = 31_666
+    assert_eq!(sroi, 31_666u64);
+}
+
+#[test]
+fn test_calculate_sroi_zero_investment_fails() {
+    let (env, owner, client) = create_ledger();
+    env.mock_all_auths();
+
+    let mut metrics = make_metrics(&env, symbol_short!("2026_Q1"), owner.clone());
+    metrics.total_investment = 0;
+    client.record_social_impact(&owner, &metrics);
+
+    let mut periods = Vec::new(&env);
+    periods.push_back(symbol_short!("2026_Q1"));
+
+    let result = client.try_calculate_sroi(&periods);
+    assert!(result.is_err());
+}
+
+#[test]
+fn test_add_and_get_stakeholder() {
+    let (env, owner, client) = create_ledger();
+    env.mock_all_auths();
+
+    let addr = Address::generate(&env);
+    let stakeholder = Stakeholder {
+        address: addr.clone(),
+        name: Bytes::from_slice(&env, b"Community Group A"),
+        category: symbol_short!("community"),
+        weight_bps: 3000,
+        registered_at: env.ledger().timestamp(),
+    };
+
+    let idx = client.add_stakeholder(&owner, &stakeholder);
+    assert_eq!(idx, 0);
+    assert_eq!(client.stakeholder_count(), 1);
+
+    let retrieved = client.get_stakeholder(&addr);
+    assert_eq!(retrieved.weight_bps, 3000);
+    assert_eq!(retrieved.category, symbol_short!("community"));
+}
+
+#[test]
+fn test_add_stakeholder_duplicate_fails() {
+    let (env, owner, client) = create_ledger();
+    env.mock_all_auths();
+
+    let addr = Address::generate(&env);
+    let s = Stakeholder {
+        address: addr.clone(),
+        name: Bytes::from_slice(&env, b"Worker Org"),
+        category: symbol_short!("worker"),
+        weight_bps: 5000,
+        registered_at: env.ledger().timestamp(),
+    };
+
+    client.add_stakeholder(&owner, &s.clone());
+    let result = client.try_add_stakeholder(&owner, &s);
+    assert!(result.is_err());
+}
+
+#[test]
+fn test_add_stakeholder_owner_only() {
+    let (env, _owner, client) = create_ledger();
+    let non_owner = Address::generate(&env);
+    env.mock_all_auths();
+
+    let s = Stakeholder {
+        address: non_owner.clone(),
+        name: Bytes::from_slice(&env, b"NGO"),
+        category: symbol_short!("ngo"),
+        weight_bps: 2000,
+        registered_at: env.ledger().timestamp(),
+    };
+
+    let result = client.try_add_stakeholder(&non_owner, &s);
+    assert!(result.is_err());
+}
+
+#[test]
+fn test_get_stakeholder_not_found() {
+    let (env, _owner, client) = create_ledger();
+    let addr = Address::generate(&env);
+    let result = client.try_get_stakeholder(&addr);
+    assert!(result.is_err());
+}
+
+#[test]
+fn test_generate_impact_report() {
+    let (env, owner, client) = create_ledger();
+    env.mock_all_auths();
+
+    // Register a stakeholder
+    let stk_addr = Address::generate(&env);
+    let stk = Stakeholder {
+        address: stk_addr.clone(),
+        name: Bytes::from_slice(&env, b"Regulator"),
+        category: symbol_short!("regulatr"),
+        weight_bps: 1000,
+        registered_at: env.ledger().timestamp(),
+    };
+    client.add_stakeholder(&owner, &stk);
+
+    // Record two periods
+    let m1 = make_metrics(&env, symbol_short!("2026_Q1"), owner.clone());
+    let mut m2 = make_metrics(&env, symbol_short!("2026_Q2"), owner.clone());
+    m2.jobs_created = 30;
+    m2.total_investment = 100_000;
+    m2.total_social_value = 300_000;
+    m2.diversity_women_bps = 5000;
+
+    client.record_social_impact(&owner, &m1);
+    client.record_social_impact(&owner, &m2);
+
+    let mut periods = Vec::new(&env);
+    periods.push_back(symbol_short!("2026_Q1"));
+    periods.push_back(symbol_short!("2026_Q2"));
+
+    let report = client.generate_impact_report(&owner, &periods);
+
+    assert_eq!(report.periods_included, 2);
+    assert_eq!(report.total_jobs_created, 80); // 50 + 30
+    assert_eq!(report.total_community_investment, 200_000);
+    assert_eq!(report.total_investment, 300_000);
+    assert_eq!(report.total_social_value, 1_000_000);
+    // SROI = 1_000_000 * 10_000 / 300_000 = 33_333
+    assert_eq!(report.sroi_bps, 33_333u64);
+    // avg diversity = (4500 + 5000) / 2 = 4750
+    assert_eq!(report.avg_diversity_women_bps, 4750);
+    assert_eq!(report.stakeholder_count, 1);
+
+    // Should be persisted
+    let stored = client.get_impact_report();
+    assert!(stored.is_some());
+    let stored_report = stored.unwrap();
+    assert_eq!(stored_report.sroi_bps, 33_333u64);
+}
+
+#[test]
+fn test_generate_impact_report_owner_only() {
+    let (env, owner, client) = create_ledger();
+    let non_owner = Address::generate(&env);
+    env.mock_all_auths();
+
+    let m1 = make_metrics(&env, symbol_short!("2026_Q1"), owner.clone());
+    client.record_social_impact(&owner, &m1);
+
+    let mut periods = Vec::new(&env);
+    periods.push_back(symbol_short!("2026_Q1"));
+
+    let result = client.try_generate_impact_report(&non_owner, &periods);
+    assert!(result.is_err());
+}
+
+#[test]
+fn test_get_impact_report_none_before_generation() {
+    let (_env, _owner, client) = create_ledger();
+    let report = client.get_impact_report();
+    assert!(report.is_none());
+}
+
+#[test]
+fn test_social_impact_count_initial_zero() {
+    let (_env, _owner, client) = create_ledger();
+    assert_eq!(client.social_impact_count(), 0);
+}
+
+#[test]
+fn test_stakeholder_count_initial_zero() {
+    let (_env, _owner, client) = create_ledger();
+    assert_eq!(client.stakeholder_count(), 0);
+}
+
+
+// ── Modern slavery act compliance ────────────────────────────────────────
+
+fn make_risk_assessment(
+    env: &Env,
+    assessment_id: soroban_sdk::Symbol,
+    submitter: Address,
+) -> RiskAssessment {
+    RiskAssessment {
+        assessment_id,
+        recorded_at: env.ledger().timestamp(),
+        submitter,
+        scope: symbol_short!("global"),
+        risk_level: 1,
+        high_risk_areas: 3,
+        key_risks: Bytes::from_slice(&env, b"supply chain concentration in asia"),
+        planned_remediations: 2,
+        stakeholder_consultation_done: true,
+    }
+}
+
+fn make_supply_chain_node(
+    env: &Env,
+    supplier_id: soroban_sdk::Symbol,
+) -> SupplyChainNode {
+    SupplyChainNode {
+        supplier_id,
+        name: Bytes::from_slice(&env, b"Supplier Inc"),
+        country: symbol_short!("CN"),
+        risk_level: 2,
+        audited: true,
+        last_audit_date: env.ledger().timestamp(),
+        registered_at: env.ledger().timestamp(),
+    }
+}
+
+fn make_training_record(
+    env: &Env,
+    training_id: soroban_sdk::Symbol,
+) -> TrainingRecord {
+    TrainingRecord {
+        training_id,
+        delivered_at: env.ledger().timestamp(),
+        topic: symbol_short!("msa_aware"),
+        attendees: 150,
+        risk_assessment_covered: true,
+        due_diligence_covered: true,
+        reporting_covered: true,
+        content_summary: Bytes::from_slice(&env, b"comprehensive msa framework training"),
+    }
+}
+
+fn make_due_diligence_record(
+    env: &Env,
+    record_id: soroban_sdk::Symbol,
+) -> DueDiligenceRecord {
+    DueDiligenceRecord {
+        record_id,
+        completed_at: env.ledger().timestamp(),
+        subject: symbol_short!("supplier1"),
+        scope: symbol_short!("labour_prc"),
+        findings: Bytes::from_slice(&env, b"no critical issues found, minor training gaps identified"),
+        risk_level: 1,
+        corrective_actions_required: 2,
+        corrective_actions_completed_pct: 50,
+    }
+}
+
+fn make_msa_policy(
+    env: &Env,
+    policy_id: soroban_sdk::Symbol,
+) -> MSAPolicy {
+    MSAPolicy {
+        policy_id,
+        adopted_at: env.ledger().timestamp(),
+        last_updated_at: env.ledger().timestamp(),
+        version: 1,
+        scope: symbol_short!("global"),
+        content_summary: Bytes::from_slice(&env, b"comprehensive modern slavery prevention policy covering all operations and supply chain"),
+        stakeholder_input_included: true,
+    }
+}
+
+#[test]
+fn test_record_and_get_risk_assessment() {
+    let (env, owner, client) = create_ledger();
+    env.mock_all_auths();
+
+    let assessment = make_risk_assessment(&env, symbol_short!("2026_q1"), owner.clone());
+    let idx = client.record_risk_assessment(&owner, &assessment);
+    assert_eq!(idx, 0);
+    assert_eq!(client.msa_risk_assessment_count(), 1);
+
+    let retrieved = client.get_risk_assessment(&assessment.assessment_id);
+    assert_eq!(retrieved.risk_level, 1);
+    assert_eq!(retrieved.high_risk_areas, 3);
+    assert!(retrieved.stakeholder_consultation_done);
+}
+
+#[test]
+fn test_risk_assessment_duplicate_fails() {
+    let (env, owner, client) = create_ledger();
+    env.mock_all_auths();
+
+    let a1 = make_risk_assessment(&env, symbol_short!("assess1"), owner.clone());
+    let a2 = make_risk_assessment(&env, symbol_short!("assess1"), owner.clone());
+
+    client.record_risk_assessment(&owner, &a1);
+    let result = client.try_record_risk_assessment(&owner, &a2);
+    assert!(result.is_err());
+}
+
+#[test]
+fn test_record_supply_chain_node() {
+    let (env, owner, client) = create_ledger();
+    env.mock_all_auths();
+
+    let node = make_supply_chain_node(&env, symbol_short!("supplier1"));
+    let idx = client.record_supply_chain_node(&owner, &node);
+    assert_eq!(idx, 0);
+    assert_eq!(client.msa_supply_chain_node_count(), 1);
+
+    let retrieved = client.get_supply_chain_node(&node.supplier_id);
+    assert_eq!(retrieved.risk_level, 2);
+    assert!(retrieved.audited);
+}
+
+#[test]
+fn test_record_training() {
+    let (env, owner, client) = create_ledger();
+    env.mock_all_auths();
+
+    let training = make_training_record(&env, symbol_short!("train001"));
+    let idx = client.record_training(&owner, &training);
+    assert_eq!(idx, 0);
+    assert_eq!(client.msa_training_record_count(), 1);
+
+    let retrieved = client.get_training_record(&training.training_id);
+    assert_eq!(retrieved.attendees, 150);
+    assert!(retrieved.risk_assessment_covered);
+    assert!(retrieved.due_diligence_covered);
+}
+
+#[test]
+fn test_submit_due_diligence() {
+    let (env, owner, client) = create_ledger();
+    env.mock_all_auths();
+
+    let dd = make_due_diligence_record(&env, symbol_short!("dd_2026_001"));
+    let idx = client.submit_due_diligence(&owner, &dd);
+    assert_eq!(idx, 0);
+    assert_eq!(client.msa_due_diligence_count(), 1);
+
+    let retrieved = client.get_due_diligence_record(&dd.record_id);
+    assert_eq!(retrieved.risk_level, 1);
+    assert_eq!(retrieved.corrective_actions_completed_pct, 50);
+}
+
+#[test]
+fn test_record_msa_policy() {
+    let (env, owner, client) = create_ledger();
+    env.mock_all_auths();
+
+    let policy = make_msa_policy(&env, symbol_short!("policy01"));
+    let idx = client.record_msa_policy(&owner, &policy);
+    assert_eq!(idx, 0);
+    assert_eq!(client.msa_policy_count(), 1);
+
+    let retrieved = client.get_msa_policy(&policy.policy_id);
+    assert_eq!(retrieved.version, 1);
+    assert!(retrieved.stakeholder_input_included);
+}
+
+#[test]
+fn test_build_msa_report() {
+    let (env, owner, client) = create_ledger();
+    env.mock_all_auths();
+
+    // Record one of each component
+    let assess = make_risk_assessment(&env, symbol_short!("assess1"), owner.clone());
+    let node = make_supply_chain_node(&env, symbol_short!("supp01"));
+    let train = make_training_record(&env, symbol_short!("train01"));
+    let dd = make_due_diligence_record(&env, symbol_short!("dd01"));
+    let policy = make_msa_policy(&env, symbol_short!("pol01"));
+
+    client.record_risk_assessment(&owner, &assess);
+    client.record_supply_chain_node(&owner, &node);
+    client.record_training(&owner, &train);
+    client.submit_due_diligence(&owner, &dd);
+    client.record_msa_policy(&owner, &policy);
+
+    let report = client.build_msa_report(&owner);
+    assert_eq!(report.assessments_count, 1);
+    assert_eq!(report.supply_chain_nodes, 1);
+    assert_eq!(report.due_diligence_investigations, 1);
+    assert_eq!(report.active_policies, 1);
+}
+
+#[test]
+fn test_get_msa_report() {
+    let (env, owner, client) = create_ledger();
+    env.mock_all_auths();
+
+    // Initially None
+    assert!(client.get_msa_report().is_none());
+
+    // Generate report
+    client.build_msa_report(&owner);
+
+    // Now should be Some
+    let report = client.get_msa_report();
+    assert!(report.is_some());
+    assert_eq!(report.unwrap().assessments_count, 0);
+}
+
+#[test]
+fn test_msa_counts_increment() {
+    let (env, owner, client) = create_ledger();
+    env.mock_all_auths();
+
+    assert_eq!(client.msa_risk_assessment_count(), 0);
+    assert_eq!(client.msa_supply_chain_node_count(), 0);
+    assert_eq!(client.msa_training_record_count(), 0);
+    assert_eq!(client.msa_due_diligence_count(), 0);
+    assert_eq!(client.msa_policy_count(), 0);
+
+    // Record one of each
+    let a = make_risk_assessment(&env, symbol_short!("a1"), owner.clone());
+    let n = make_supply_chain_node(&env, symbol_short!("n1"));
+    let t = make_training_record(&env, symbol_short!("t1"));
+    let d = make_due_diligence_record(&env, symbol_short!("d1"));
+    let p = make_msa_policy(&env, symbol_short!("p1"));
+
+    client.record_risk_assessment(&owner, &a);
+    client.record_supply_chain_node(&owner, &n);
+    client.record_training(&owner, &t);
+    client.submit_due_diligence(&owner, &d);
+    client.record_msa_policy(&owner, &p);
+
+    // All should be 1
+    assert_eq!(client.msa_risk_assessment_count(), 1);
+    assert_eq!(client.msa_supply_chain_node_count(), 1);
+    assert_eq!(client.msa_training_record_count(), 1);
+    assert_eq!(client.msa_due_diligence_count(), 1);
+    assert_eq!(client.msa_policy_count(), 1);
+
+    // Record second of each
+    let a2 = make_risk_assessment(&env, symbol_short!("a2"), owner.clone());
+    let n2 = make_supply_chain_node(&env, symbol_short!("n2"));
+    let t2 = make_training_record(&env, symbol_short!("t2"));
+    let d2 = make_due_diligence_record(&env, symbol_short!("d2"));
+    let p2 = make_msa_policy(&env, symbol_short!("p2"));
+
+    client.record_risk_assessment(&owner, &a2);
+    client.record_supply_chain_node(&owner, &n2);
+    client.record_training(&owner, &t2);
+    client.submit_due_diligence(&owner, &d2);
+    client.record_msa_policy(&owner, &p2);
+
+    // All should be 2
+    assert_eq!(client.msa_risk_assessment_count(), 2);
+    assert_eq!(client.msa_supply_chain_node_count(), 2);
+    assert_eq!(client.msa_training_record_count(), 2);
+    assert_eq!(client.msa_due_diligence_count(), 2);
+    assert_eq!(client.msa_policy_count(), 2);
+}
+
+#[test]
+fn test_msa_owner_only_access() {
+    let (env, owner, client) = create_ledger();
+    let non_owner = Address::generate(&env);
+    env.mock_all_auths();
+
+    let a = make_risk_assessment(&env, symbol_short!("a1"), non_owner.clone());
+    let result = client.try_record_risk_assessment(&non_owner, &a);
+    assert!(result.is_err());
+}
+
+#[test]
+fn test_get_nonexistent_risk_assessment_fails() {
+    let (env, _owner, client) = create_ledger();
+    let result = client.try_get_risk_assessment(&symbol_short!("missing"));
+    assert!(result.is_err());
+}
+
+#[test]
+fn test_get_nonexistent_supply_chain_node_fails() {
+    let (env, _owner, client) = create_ledger();
+    let result = client.try_get_supply_chain_node(&symbol_short!("missing"));
+    assert!(result.is_err());
+}
+
+#[test]
+fn test_get_nonexistent_training_fails() {
+    let (env, _owner, client) = create_ledger();
+    let result = client.try_get_training_record(&symbol_short!("missing"));
+    assert!(result.is_err());
+}
+
+#[test]
+fn test_get_nonexistent_due_diligence_fails() {
+    let (env, _owner, client) = create_ledger();
+    let result = client.try_get_due_diligence_record(&symbol_short!("missing"));
+    assert!(result.is_err());
+}
+
+#[test]
+fn test_get_nonexistent_policy_fails() {
+    let (env, _owner, client) = create_ledger();
+    let result = client.try_get_msa_policy(&symbol_short!("missing"));
+    assert!(result.is_err());
 }

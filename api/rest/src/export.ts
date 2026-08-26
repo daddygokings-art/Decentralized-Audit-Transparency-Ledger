@@ -1,21 +1,48 @@
 /**
- * Event Export Module (#273)
+ * Event Export Module (#201)
  *
- * Provides CSV, JSON, and streaming export of audit events
- * with progress tracking.
+ * Provides export_events with time range filtering, CSV and JSON formats,
+ * streaming export for large datasets, and integrity proofs in exports.
  */
 
-import { resolvers } from "../graphql/src/resolvers";
+import { resolvers } from "../../graphql/src/resolvers";
+import { createHash } from "crypto";
 
 // ── Types ─────────────────────────────────────────────────────────────────────
 
+export interface ExportFilter {
+  /** Epoch seconds — only events at or after this time are included. */
+  startTime?: number;
+  /** Epoch seconds — only events at or before this time are included. */
+  endTime?: number;
+  /** Only events of this type are included. */
+  type?: string;
+  /** Only events from this submitter are included. */
+  submitter?: string;
+}
+
 export interface ExportOptions {
   format: "csv" | "json";
-  filter?: Record<string, unknown>;
+  filter?: ExportFilter;
   limit?: number;
   offset?: number;
+  /** Subset of fields to include in the output. Defaults to DEFAULT_FIELDS. */
   fields?: string[];
+  /** When true, return a streaming async generator rather than buffered output. */
   stream?: boolean;
+  /** When true, append an integrity proof block to the export. */
+  includeProof?: boolean;
+}
+
+export interface IntegrityProof {
+  /** Total events included in this export. */
+  eventCount: number;
+  /** SHA-256 of the concatenated event_hash values in export order. */
+  exportHash: string;
+  /** Unix ms timestamp when the proof was generated. */
+  generatedAt: number;
+  /** Filters applied, for auditor reference. */
+  appliedFilter?: ExportFilter;
 }
 
 export interface ExportProgress {
@@ -33,9 +60,11 @@ export interface ExportResult {
   contentType: string;
   filename: string;
   progress: ExportProgress;
+  /** Present when options.includeProof is true. */
+  proof?: IntegrityProof;
 }
 
-const DEFAULT_FIELDS = [
+export const DEFAULT_FIELDS = [
   "index",
   "timestamp",
   "event_type",
@@ -45,7 +74,9 @@ const DEFAULT_FIELDS = [
   "prev_hash",
 ];
 
-// ── Helpers ───────────────────────────────────────────────────────────────────
+const BATCH_SIZE = 500;
+
+// ── Internal helpers ──────────────────────────────────────────────────────────
 
 function escapeCsvField(value: unknown): string {
   const str = String(value ?? "");
@@ -55,11 +86,17 @@ function escapeCsvField(value: unknown): string {
   return str;
 }
 
-function eventToCsvRow(event: Record<string, unknown>, fields: string[]): string {
+function eventToCsvRow(
+  event: Record<string, unknown>,
+  fields: string[],
+): string {
   return fields.map((f) => escapeCsvField(event[f])).join(",");
 }
 
-function eventToJson(event: Record<string, unknown>, fields: string[]): Record<string, unknown> {
+function projectFields(
+  event: Record<string, unknown>,
+  fields: string[],
+): Record<string, unknown> {
   const obj: Record<string, unknown> = {};
   for (const f of fields) {
     obj[f] = event[f];
@@ -67,39 +104,99 @@ function eventToJson(event: Record<string, unknown>, fields: string[]): Record<s
   return obj;
 }
 
-function getAllEvents(
-  filter?: Record<string, unknown>,
-  limit?: number,
-  offset?: number
-): Record<string, unknown>[] {
-  const result = resolvers.Query.events(null, {
-    limit: limit ?? 100000,
-    offset: offset ?? 0,
-    filter,
-  }, null) as Record<string, unknown>[];
-  return result;
+function buildProof(
+  events: Record<string, unknown>[],
+  filter?: ExportFilter,
+): IntegrityProof {
+  const hasher = createHash("sha256");
+  for (const e of events) {
+    hasher.update(String(e["event_hash"] ?? ""));
+  }
+  return {
+    eventCount: events.length,
+    exportHash: hasher.digest("hex"),
+    generatedAt: Date.now(),
+    appliedFilter: filter,
+  };
 }
 
-// ── Export functions ──────────────────────────────────────────────────────────
+/**
+ * Fetch all events that satisfy the given filter. The underlying resolver
+ * already understands startTime / endTime via its filter parameter.
+ */
+function fetchEvents(
+  filter?: ExportFilter,
+  limit?: number,
+  offset?: number,
+): Record<string, unknown>[] {
+  return resolvers.Query.events(
+    null,
+    { limit: limit ?? 1_000_000, offset: offset ?? 0, filter },
+    null,
+  ) as Record<string, unknown>[];
+}
+
+// ── Public API ────────────────────────────────────────────────────────────────
+
+/**
+ * Export events within an optional time range (and other filter criteria).
+ *
+ * Fulfils issue #201:
+ *   - Time range filtering via filter.startTime / filter.endTime
+ *   - CSV and JSON format support
+ *   - Streaming via options.stream = true
+ *   - Integrity proofs via options.includeProof = true
+ */
+export function export_events(options: ExportOptions): ExportResult {
+  if (options.stream) {
+    // For streaming we return metadata only; caller uses createStreamingExporter.
+    const exporter = createStreamingExporter(options);
+    return {
+      data: "",
+      contentType:
+        options.format === "csv"
+          ? "text/csv; charset=utf-8"
+          : "application/json; charset=utf-8",
+      filename: `audit-events-${Date.now()}.${options.format}`,
+      progress: exporter.progress,
+    };
+  }
+
+  return options.format === "csv"
+    ? exportCsv(options)
+    : exportJson(options);
+}
 
 export function exportCsv(options: ExportOptions): ExportResult {
   const fields = options.fields ?? DEFAULT_FIELDS;
-  const events = getAllEvents(options.filter, options.limit, options.offset);
+  const events = fetchEvents(options.filter, options.limit, options.offset);
+  const startedAt = Date.now();
 
   const header = fields.join(",");
   const rows = events.map((e) => eventToCsvRow(e, fields));
-  const data = [header, ...rows].join("\n");
+
+  let data = [header, ...rows].join("\n");
+
+  let proof: IntegrityProof | undefined;
+  if (options.includeProof) {
+    proof = buildProof(events, options.filter);
+    // Append proof as a comment block at the end of the CSV
+    data +=
+      "\n# integrity_proof," +
+      escapeCsvField(JSON.stringify(proof));
+  }
 
   return {
     data,
     contentType: "text/csv; charset=utf-8",
     filename: `audit-events-${Date.now()}.csv`,
+    proof,
     progress: {
       total: events.length,
       exported: events.length,
       percentage: 100,
       status: "completed",
-      startedAt: Date.now(),
+      startedAt,
       completedAt: Date.now(),
     },
   };
@@ -107,26 +204,44 @@ export function exportCsv(options: ExportOptions): ExportResult {
 
 export function exportJson(options: ExportOptions): ExportResult {
   const fields = options.fields ?? DEFAULT_FIELDS;
-  const events = getAllEvents(options.filter, options.limit, options.offset);
+  const events = fetchEvents(options.filter, options.limit, options.offset);
+  const startedAt = Date.now();
 
-  const mapped = events.map((e) => eventToJson(e, fields));
-  const data = JSON.stringify({ data: mapped, total: mapped.length }, null, 2);
+  const mapped = events.map((e) => projectFields(e, fields));
+
+  let proof: IntegrityProof | undefined;
+  if (options.includeProof) {
+    proof = buildProof(events, options.filter);
+  }
+
+  const payload: Record<string, unknown> = {
+    data: mapped,
+    total: mapped.length,
+  };
+  if (proof) {
+    payload["integrity_proof"] = proof;
+  }
 
   return {
-    data,
+    data: JSON.stringify(payload, null, 2),
     contentType: "application/json; charset=utf-8",
     filename: `audit-events-${Date.now()}.json`,
+    proof,
     progress: {
       total: events.length,
       exported: events.length,
       percentage: 100,
       status: "completed",
-      startedAt: Date.now(),
+      startedAt,
       completedAt: Date.now(),
     },
   };
 }
 
+/**
+ * Create a streaming exporter for large datasets.
+ * Returns a progress tracker and an async generator that yields chunks.
+ */
 export function createStreamingExporter(options: ExportOptions) {
   const fields = options.fields ?? DEFAULT_FIELDS;
   const progress: ExportProgress = {
@@ -137,15 +252,14 @@ export function createStreamingExporter(options: ExportOptions) {
     startedAt: Date.now(),
   };
 
-  const BATCH_SIZE = 100;
-
   return {
     progress,
 
     async *generate(): AsyncGenerator<string> {
       try {
-        let offset = 0;
-        const limit = options.limit ?? 100000;
+        let offset = options.offset ?? 0;
+        const hardLimit = options.limit ?? Number.MAX_SAFE_INTEGER;
+        const hasher = options.includeProof ? createHash("sha256") : null;
 
         if (options.format === "csv") {
           yield fields.join(",") + "\n";
@@ -154,33 +268,61 @@ export function createStreamingExporter(options: ExportOptions) {
         }
 
         let isFirst = true;
-        while (offset < limit) {
-          const batch = getAllEvents(options.filter, BATCH_SIZE, offset);
+        let totalExported = 0;
+
+        while (totalExported < hardLimit) {
+          const batchSize = Math.min(BATCH_SIZE, hardLimit - totalExported);
+          const batch = fetchEvents(options.filter, batchSize, offset) as Record<string, unknown>[];
           if (batch.length === 0) break;
 
           progress.total += batch.length;
 
           for (const event of batch) {
+            if (hasher) {
+              hasher.update(String(event["event_hash"] ?? ""));
+            }
+
             if (options.format === "csv") {
               yield eventToCsvRow(event, fields) + "\n";
             } else {
               if (!isFirst) yield ",";
-              yield JSON.stringify(eventToJson(event, fields));
+              yield JSON.stringify(projectFields(event, fields));
               isFirst = false;
             }
+
             progress.exported++;
-            progress.percentage = progress.total > 0
-              ? Math.round((progress.exported / progress.total) * 100)
-              : 0;
+            totalExported++;
+            progress.percentage =
+              progress.total > 0
+                ? Math.round((progress.exported / progress.total) * 100)
+                : 0;
           }
 
-          offset += BATCH_SIZE;
-
-          if (batch.length < BATCH_SIZE) break;
+          offset += batch.length;
+          if (batch.length < batchSize) break;
         }
 
         if (options.format === "json") {
-          yield '],"total":' + String(progress.exported) + "}";
+          let suffix = `],"total":${progress.exported}`;
+          if (options.includeProof && hasher) {
+            const proof: IntegrityProof = {
+              eventCount: progress.exported,
+              exportHash: hasher.digest("hex"),
+              generatedAt: Date.now(),
+              appliedFilter: options.filter,
+            };
+            suffix += `,"integrity_proof":${JSON.stringify(proof)}`;
+          }
+          suffix += "}";
+          yield suffix;
+        } else if (options.format === "csv" && options.includeProof && hasher) {
+          const proof: IntegrityProof = {
+            eventCount: progress.exported,
+            exportHash: hasher.digest("hex"),
+            generatedAt: Date.now(),
+            appliedFilter: options.filter,
+          };
+          yield "\n# integrity_proof," + escapeCsvField(JSON.stringify(proof));
         }
 
         progress.status = "completed";
@@ -193,24 +335,4 @@ export function createStreamingExporter(options: ExportOptions) {
       }
     },
   };
-}
-
-export function exportEvents(options: ExportOptions): ExportResult {
-  if (options.stream) {
-    const exporter = createStreamingExporter(options);
-    const chunks: string[] = {
-      [Symbol.asyncIterator]() {
-        return exporter.generate();
-      },
-    } as unknown as AsyncGenerator<string>;
-
-    return {
-      data: "",
-      contentType: options.format === "csv" ? "text/csv" : "application/json",
-      filename: `audit-events-${Date.now()}.${options.format}`,
-      progress: exporter.progress,
-    };
-  }
-
-  return options.format === "csv" ? exportCsv(options) : exportJson(options);
 }

@@ -5,6 +5,7 @@ extern crate std;
 use super::*;
 use proptest::prelude::*;
 use rand::prelude::*;
+use rand::Rng;
 use soroban_sdk::testutils::{Address as _, Events, Ledger};
 use soroban_sdk::{symbol_short, Bytes, BytesN, Env, Symbol, Vec};
 use std::string::String;
@@ -90,7 +91,7 @@ proptest! {
                 &Bytes::from_slice(&env, &metadata),
                 &None, &None, &false,
             ) {
-                ids.push(id);
+                ids.push(id.unwrap());
             }
         }
 
@@ -231,11 +232,10 @@ fn mutation_event_emission_modes_affect_events() {
 
     env.mock_all_auths();
     client.set_event_emission_mode(&owner, &3);
+    let before = env.events().all().events().len();
     client.log_event(&submitter, &symbol_short!("t"), &Bytes::from_slice(&env, b"x"), &None, &None, &false);
-
-    let emitted = env.events().all();
-    let has_audit = emitted.events().iter().any(|e| e.topics.get(0).unwrap() == Symbol::new(&env, "audit"));
-    assert!(!has_audit);
+    let after = env.events().all().events().len();
+    assert_eq!(before, after, "emission mode 3 must not publish any events");
 }
 
 // ── Boundary Testing (extended) ─────────────────────────────────────────────
@@ -307,7 +307,7 @@ fn boundary_many_event_types_each_at_limit() {
     env.ledger().set_timestamp(1000);
 
     for t in 0u8..20 {
-        let et = Symbol::new(&env, &format!("type_{}", t));
+        let et = Symbol::new(&env, &std::format!("type_{}", t));
         client.set_event_max_logs(&owner, &et, &1);
         client.log_event(&submitter, &et, &Bytes::from_slice(&env, &[t]), &None, &None, &false);
         let result = client.try_log_event(&submitter, &et, &Bytes::from_slice(&env, &[t + 1]), &None, &None, &false);
@@ -406,7 +406,7 @@ fn crash_list_archived_with_no_archives() {
     let (env, _owner, client) = create_ledger();
     let result = client.try_list_archived_events(&0, &10);
     assert!(result.is_ok());
-    assert_eq!(result.unwrap().len(), 0);
+    assert_eq!(result.unwrap().unwrap().len(), 0);
 }
 
 // ── Assertion-based fuzz (non-proptest) ─────────────────────────────────────
@@ -458,7 +458,7 @@ fn fuzz_mixed_random_operations_no_crash() {
 fn fuzz_random_ownership_transfers_no_crash() {
     let (env, owner, client) = create_ledger();
     env.mock_all_auths();
-    let mut rng = StdRng::seed_from_u64(0x0WN3R);
+    let mut rng = StdRng::seed_from_u64(0x0b3e4);
     let mut current_owner = owner;
 
     for _ in 0..20 {
@@ -477,7 +477,7 @@ fn fuzz_random_pause_unpause_events_no_crash() {
     let (env, owner, client) = create_ledger();
     let submitter = Address::generate(&env);
     env.mock_all_auths();
-    let mut rng = StdRng::seed_from_u64(0xPAU5E);
+    let mut rng = StdRng::seed_from_u64(0x9a5e);
 
     for _ in 0..10 {
         if rng.gen_bool(0.5) {

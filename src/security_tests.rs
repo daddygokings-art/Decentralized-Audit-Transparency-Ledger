@@ -1,6 +1,6 @@
 use super::*;
-use soroban_sdk::testutils::{Address as _, Events, Ledger};
-use soroban_sdk::{symbol_short, Bytes, BytesN, Env, Symbol, Vec};
+use soroban_sdk::testutils::{Address as _, Ledger};
+use soroban_sdk::{symbol_short, Bytes, BytesN, Env, Vec};
 
 fn create_ledger() -> (Env, Address, AuditLedgerClient<'static>) {
     let env = Env::default();

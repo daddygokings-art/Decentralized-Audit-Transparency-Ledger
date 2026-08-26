@@ -2,19 +2,39 @@
 
 A Soroban smart contract for immutably logging financial transactions on the Stellar network, providing a publicly verifiable audit trail. Built with the [Soroban SDK](https://soroban.stellar.org/).
 
-This repository also includes ongoing work for retention policies, event export workflows, schema validation, and event chaining support.
+This repository also includes ongoing work for retention policies, event export workflows, schema validation, event chaining support, and **supply chain transparency**.
 
 ## Overview
 
 `AuditLedger` acts as an append-only log for financial and operational events. Each entry is sealed with a timestamp, event type (`Symbol`), and submitter address (`Address`), producing a tamper-evident historical record that any party can independently verify. Configurable global and per-event logging limits prevent state bloat while maintaining a complete, ordered history.
 
+Additionally, the **Supply Chain Transparency Module** provides immutable tracking of products through their entire lifecycle with support for:
+- Product provenance and origin tracking
+- Third-party certifications (ISO, organic, fair trade, etc.)
+- Labor conditions and worker welfare audits
+- Environmental impact metrics (carbon, water, waste, energy)
+- Complete chain of custody
+- Consumer-facing verification and QR codes
+- Brand integrity reporting
+
 ## Core Features
 
+### Audit Ledger
 - **Immutable Event Logging** — Every event is recorded on-chain with a standardized `Event` struct, creating a permanent audit trail.
 - **Configurable Logging Limits** — Separate global and per-event-type caps (`u32`) prevent contract state spam. Caps can be set to any value (including `0` to freeze logging) or removed entirely via `remove_event_cap`.
 - **Public Verifiability** — Anyone can enumerate and verify the full log history or filter by event type — no trusted intermediary required.
 - **Metadata Standardization** — Events carry opaque `Bytes` metadata, encouraging off-chain consumers to adopt a consistent schema.
 - **Boundary-Safe Validation** — Contract logic is hardened against edge cases: zero-maximum configurations, equal min/max value ranges, empty metadata, and cap removal.
+- **Stablecoin Reserve Auditing** — New module for tracking reserve assets, collecting third-party attestations, generating transparency reports, testing redemptions, executing stress tests, and verifying zero-knowledge proofs of reserves.
+
+### Supply Chain Transparency
+- **Provenance Tracking** — Immutably record product origin, raw materials source, and batch information
+- **Certification Management** — Track ISO, organic, fair trade, and other third-party certifications with expiry tracking
+- **Labor Conditions Auditing** — Record worker welfare, wage compliance, safety standards, and freedom of association
+- **Environmental Impact** — Track carbon footprint, water usage, waste, renewable energy, and emissions reduction
+- **Chain of Custody** — Complete ownership and transfer history with locations and timestamps
+- **Consumer Verification** — QR codes and timeline views for end-consumers to verify product authenticity
+- **Brand Integrity Reports** — Aggregate compliance metrics and transparency scores for brands
 
 ## Smart Contract Architecture
 
@@ -23,6 +43,7 @@ This repository also includes ongoing work for retention policies, event export 
 | **Global Log Registry** | Sequential array of all events, capped by `global_max_logs`. |
 | **Per-Event Sub-Ledgers** | Namespaced event types (`Symbol`), each with an optional independent maximum log limit. |
 | **Cap Gates** | `event_cap_set` boolean gates per-event enforcement — caps are opt-in and can be removed via `remove_event_cap`. |
+| **Supply Chain Registry** | Brand, product, and event tracking with multi-dimensional verification |
 
 ### Event Structure
 
@@ -77,6 +98,86 @@ All governance functions publish a typed Soroban event with topic `("governance"
 For a high-level view of how the contract, SDKs, APIs, bridge, monitoring, and UI fit together, see [docs/architecture.md](docs/architecture.md).
 
 For backup, recovery, failover, and DR testing procedures, see [docs/disaster-recovery.md](docs/disaster-recovery.md).
+
+## Stablecoin Reserve Auditing
+
+The system now includes a comprehensive reserve auditing module for stablecoins with:
+
+- **Asset Verification** — Register and track reserve assets (USD cash, Treasury bills, bank deposits, cryptocurrency)
+- **Third-Party Attestations** — Record auditor attestations with digital signatures
+- **Transparency Reports** — Generate periodic public audit reports with Merkle root verification
+- **Redemption Testing** — Simulate and validate redemption workflows
+- **Stress Testing** — Execute and record stress test scenarios with recovery procedures
+- **Zero-Knowledge Proofs** — Support for range proofs, Merkle proofs, commitment proofs, and aggregated proofs
+
+### Reserve Auditing Quick Start
+
+```rust
+// Register an asset
+let asset_id = ReserveAuditingContract::register_asset(
+    env, AssetType::USDCash, 1_000_000_000, custody_address, proof_hash)?;
+
+// Record attestation
+let attestation_id = ReserveAuditingContract::record_attestation(
+    env, attestor, asset_id, 1_000_000_000, signature, public_key, expires_at)?;
+
+// Generate report
+let report_id = ReserveAuditingContract::generate_report(
+    env, period_start, period_end, breakdown_hash, attestations_hash, merkle_root)?;
+
+// Verify ZK proof
+let proof_id = ReserveAuditingContract::verify_zk_proof(
+    env, ZkProofType::RangeProof, proof_data, commitment, expires_at)?;
+```
+
+See [docs/STABLECOIN_RESERVE_AUDITING.md](docs/STABLECOIN_RESERVE_AUDITING.md) for complete API reference and [docs/STABLECOIN_RESERVE_QUICK_START.md](docs/STABLECOIN_RESERVE_QUICK_START.md) for workflow examples.
+
+## DeFi Protocol Auditing
+
+The system now includes comprehensive DeFi protocol auditing with real-time monitoring:
+
+- **TVL Tracking** — Monitor total value locked across pools and protocols
+- **Oracle Verification** — Validate oracle prices and detect price anomalies
+- **Liquidation Monitoring** — Track liquidation events and at-risk positions
+- **Governance Tracking** — Monitor governance proposals and voting activity
+- **Risk Metrics** — Calculate concentration risk, volatility, and protocol health
+- **Automated Audit Reports** — Generate periodic comprehensive audit reports with metrics and findings
+
+### DeFi Auditing Quick Start
+
+```rust
+// Register protocol
+DeFiAuditingContract::register_protocol(
+    env, protocol_address, Symbol::new(&env, "aave"), ProtocolType::Lending,
+    Symbol::new(&env, "ethereum"), None)?;
+
+// Update pool TVL
+DeFiAuditingContract::update_pool_tvl(
+    env, pool_id, protocol, Symbol::new(&env, "DAI"), tvl_usd, tvl_native, lp_count)?;
+
+// Record oracle prices
+DeFiAuditingContract::record_oracle_price(
+    env, oracle_id, asset, price_usd, Symbol::new(&env, "chainlink"),
+    confidence, update_frequency)?;
+
+// Track liquidations
+DeFiAuditingContract::record_liquidation(
+    env, protocol, position, liquidator, collateral_asset, debt_asset,
+    collateral_amount, debt_amount, liquidation_price)?;
+
+// Monitor governance
+let proposal_id = DeFiAuditingContract::create_proposal(
+    env, protocol, title, description, proposer, start_time, end_time)?;
+
+// Calculate risk metrics
+let metrics_id = DeFiAuditingContract::calculate_risk_metrics(env, protocol)?;
+
+// Generate audit report
+let report_id = DeFiAuditingContract::generate_audit_report(
+    env, protocol, period_start, period_end, findings_hash)?;
+```
+
+See [docs/DEFI_PROTOCOL_AUDITING.md](docs/DEFI_PROTOCOL_AUDITING.md) for complete API reference and [docs/DEFI_PROTOCOL_QUICK_START.md](docs/DEFI_PROTOCOL_QUICK_START.md) for detailed workflow examples.
 
 ## Quick Start
 
@@ -203,6 +304,21 @@ Copy `.env.example` to `.env` and configure the required variables:
 | `src/test.rs` | 22 | Logging, queries, governance, ownership transfers, cap management, event emission, empty metadata, access control, boundary conditions |
 
 Boundary tests include: zero global/event max logs, setting max equal to current count, removing caps after zero-lock, mixed multi-type limits, and panic-on-nonexistent access.
+
+## Supply Chain Module Documentation
+
+For detailed information about the supply chain transparency features, see [docs/SUPPLY_CHAIN.md](docs/SUPPLY_CHAIN.md).
+
+The supply chain module includes:
+- **Product Provenance Tracking** — Record origin, batch numbers, and raw material sources
+- **Certification Management** — Track ISO, organic, fair trade, and custom certifications
+- **Labor Conditions Audits** — Verify worker welfare, wages, and safety standards
+- **Environmental Impact** — Monitor carbon footprint, water usage, waste, and renewable energy
+- **Chain of Custody** — Complete transfer history from producer to consumer
+- **Consumer Verification** — QR codes and product timelines for end-consumers
+- **Brand Integrity Reporting** — Compliance scores and transparency metrics
+
+[Read the Supply Chain Implementation Guide](SUPPLY_CHAIN_IMPLEMENTATION.md) for technical details.
 
 ## Contributing & Bounty Program
 
