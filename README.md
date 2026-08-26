@@ -15,6 +15,7 @@ This repository also includes ongoing work for retention policies, event export 
 - **Public Verifiability** — Anyone can enumerate and verify the full log history or filter by event type — no trusted intermediary required.
 - **Metadata Standardization** — Events carry opaque `Bytes` metadata, encouraging off-chain consumers to adopt a consistent schema.
 - **Boundary-Safe Validation** — Contract logic is hardened against edge cases: zero-maximum configurations, equal min/max value ranges, empty metadata, and cap removal.
+- **Stablecoin Reserve Auditing** — New module for tracking reserve assets, collecting third-party attestations, generating transparency reports, testing redemptions, executing stress tests, and verifying zero-knowledge proofs of reserves.
 
 ## Smart Contract Architecture
 
@@ -77,6 +78,86 @@ All governance functions publish a typed Soroban event with topic `("governance"
 For a high-level view of how the contract, SDKs, APIs, bridge, monitoring, and UI fit together, see [docs/architecture.md](docs/architecture.md).
 
 For backup, recovery, failover, and DR testing procedures, see [docs/disaster-recovery.md](docs/disaster-recovery.md).
+
+## Stablecoin Reserve Auditing
+
+The system now includes a comprehensive reserve auditing module for stablecoins with:
+
+- **Asset Verification** — Register and track reserve assets (USD cash, Treasury bills, bank deposits, cryptocurrency)
+- **Third-Party Attestations** — Record auditor attestations with digital signatures
+- **Transparency Reports** — Generate periodic public audit reports with Merkle root verification
+- **Redemption Testing** — Simulate and validate redemption workflows
+- **Stress Testing** — Execute and record stress test scenarios with recovery procedures
+- **Zero-Knowledge Proofs** — Support for range proofs, Merkle proofs, commitment proofs, and aggregated proofs
+
+### Reserve Auditing Quick Start
+
+```rust
+// Register an asset
+let asset_id = ReserveAuditingContract::register_asset(
+    env, AssetType::USDCash, 1_000_000_000, custody_address, proof_hash)?;
+
+// Record attestation
+let attestation_id = ReserveAuditingContract::record_attestation(
+    env, attestor, asset_id, 1_000_000_000, signature, public_key, expires_at)?;
+
+// Generate report
+let report_id = ReserveAuditingContract::generate_report(
+    env, period_start, period_end, breakdown_hash, attestations_hash, merkle_root)?;
+
+// Verify ZK proof
+let proof_id = ReserveAuditingContract::verify_zk_proof(
+    env, ZkProofType::RangeProof, proof_data, commitment, expires_at)?;
+```
+
+See [docs/STABLECOIN_RESERVE_AUDITING.md](docs/STABLECOIN_RESERVE_AUDITING.md) for complete API reference and [docs/STABLECOIN_RESERVE_QUICK_START.md](docs/STABLECOIN_RESERVE_QUICK_START.md) for workflow examples.
+
+## DeFi Protocol Auditing
+
+The system now includes comprehensive DeFi protocol auditing with real-time monitoring:
+
+- **TVL Tracking** — Monitor total value locked across pools and protocols
+- **Oracle Verification** — Validate oracle prices and detect price anomalies
+- **Liquidation Monitoring** — Track liquidation events and at-risk positions
+- **Governance Tracking** — Monitor governance proposals and voting activity
+- **Risk Metrics** — Calculate concentration risk, volatility, and protocol health
+- **Automated Audit Reports** — Generate periodic comprehensive audit reports with metrics and findings
+
+### DeFi Auditing Quick Start
+
+```rust
+// Register protocol
+DeFiAuditingContract::register_protocol(
+    env, protocol_address, Symbol::new(&env, "aave"), ProtocolType::Lending,
+    Symbol::new(&env, "ethereum"), None)?;
+
+// Update pool TVL
+DeFiAuditingContract::update_pool_tvl(
+    env, pool_id, protocol, Symbol::new(&env, "DAI"), tvl_usd, tvl_native, lp_count)?;
+
+// Record oracle prices
+DeFiAuditingContract::record_oracle_price(
+    env, oracle_id, asset, price_usd, Symbol::new(&env, "chainlink"),
+    confidence, update_frequency)?;
+
+// Track liquidations
+DeFiAuditingContract::record_liquidation(
+    env, protocol, position, liquidator, collateral_asset, debt_asset,
+    collateral_amount, debt_amount, liquidation_price)?;
+
+// Monitor governance
+let proposal_id = DeFiAuditingContract::create_proposal(
+    env, protocol, title, description, proposer, start_time, end_time)?;
+
+// Calculate risk metrics
+let metrics_id = DeFiAuditingContract::calculate_risk_metrics(env, protocol)?;
+
+// Generate audit report
+let report_id = DeFiAuditingContract::generate_audit_report(
+    env, protocol, period_start, period_end, findings_hash)?;
+```
+
+See [docs/DEFI_PROTOCOL_AUDITING.md](docs/DEFI_PROTOCOL_AUDITING.md) for complete API reference and [docs/DEFI_PROTOCOL_QUICK_START.md](docs/DEFI_PROTOCOL_QUICK_START.md) for detailed workflow examples.
 
 ## Quick Start
 
