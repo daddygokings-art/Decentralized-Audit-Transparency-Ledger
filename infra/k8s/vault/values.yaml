@@ -1,0 +1,105 @@
+# Helm values for the HashiCorp Vault chart (hashicorp/vault).
+#
+# Install with:
+#   helm repo add hashicorp https://helm.releases.hashicorp.com
+#   helm install vault hashicorp/vault \
+#     --namespace audit-ledger-secrets --create-namespace \
+#     -f infra/k8s/vault/values.yaml
+#
+# This deploys Vault in HA mode with the Raft integrated storage backend
+# (no external Consul dependency) and auto-unseal via a cloud KMS. Replace
+# the `seal` stanza with your provider before installing — an unsealed,
+# manually-unsealed Vault is not acceptable for production secrets storage.
+
+server:
+  ha:
+    enabled: true
+    replicas: 3
+    raft:
+      enabled: true
+      setNodeId: true
+      config: |
+        ui = true
+
+        listener "tcp" {
+          tls_disable     = 0
+          address         = "[::]:8200"
+          cluster_address = "[::]:8201"
+          tls_cert_file   = "/vault/userconfig/vault-tls/tls.crt"
+          tls_key_file    = "/vault/userconfig/vault-tls/tls.key"
+        }
+
+        storage "raft" {
+          path = "/vault/data"
+        }
+
+        # Auto-unseal — pick ONE provider and remove the others.
+        # seal "awskms" {
+        #   region     = "us-east-1"
+        #   kms_key_id = "REPLACE_ME"
+        # }
+        # seal "gcpckms" {
+        #   project     = "REPLACE_ME"
+        #   region      = "global"
+        #   key_ring    = "vault-unseal"
+        #   crypto_key  = "vault-unseal-key"
+        # }
+
+        service_registration "kubernetes" {}
+
+  # TLS between Vault pods and clients — sourced from cert-manager (see
+  # infra/k8s/cert-manager/). Do not run Vault with tls_disable = 1 outside
+  # of a throwaway dev instance.
+  extraVolumes:
+    - type: secret
+      name: vault-tls
+
+  extraEnvironmentVars:
+    VAULT_CACERT: /vault/userconfig/vault-tls/ca.crt
+    VAULT_ADDR: https://127.0.0.1:8200
+
+  resources:
+    requests:
+      memory: 512Mi
+      cpu: 250m
+    limits:
+      memory: 1Gi
+      cpu: 1000m
+
+  auditStorage:
+    enabled: true
+    size: 10Gi
+
+  dataStorage:
+    enabled: true
+    size: 20Gi
+
+  affinity: |
+    podAntiAffinity:
+      requiredDuringSchedulingIgnoredDuringExecution:
+        - labelSelector:
+            matchLabels:
+              app.kubernetes.io/name: vault
+              component: server
+          topologyKey: kubernetes.io/hostname
+
+injector:
+  enabled: true
+  resources:
+    requests:
+      memory: 128Mi
+      cpu: 100m
+    limits:
+      memory: 256Mi
+      cpu: 250m
+
+ui:
+  enabled: true
+  serviceType: ClusterIP
+
+csi:
+  enabled: true
+  resources:
+    requests:
+      memory: 128Mi
+      cpu: 100m

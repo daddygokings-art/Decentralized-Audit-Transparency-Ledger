@@ -38,6 +38,9 @@ jobs:
       - name: Run cargo-audit for dependency vulnerabilities
         run: cargo install cargo-audit && cargo audit --deny warnings
 
+      - name: Run cargo-deny (license policy + banned/duplicate crates)
+        run: cargo install cargo-deny && cargo deny check
+
       - name: Generate SBOM with CycloneDX
         run: |
           cargo install cargo-cyclonedx
