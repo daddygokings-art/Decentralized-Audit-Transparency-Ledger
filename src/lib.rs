@@ -3676,4 +3676,7 @@ mod upgrade_tests;
 mod security_tests;
 
 #[cfg(test)]
+mod chaos_tests;
+
+#[cfg(test)]
 mod comprehensive_fuzz;

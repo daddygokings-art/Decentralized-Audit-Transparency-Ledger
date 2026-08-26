@@ -40,6 +40,12 @@ jobs:
       - name: Security audit
         run: cargo install cargo-audit && cargo audit --deny warnings
 
+      - name: Generate SBOM with CycloneDX
+        run: |
+          cargo install cargo-cyclonedx
+          mkdir -p sbom
+          cargo cyclonedx --output sbom/audit-ledger-sbom.json
+
       - name: Build WASM (release)
         run: cargo build --target wasm32v1-none --release
 
@@ -66,6 +72,13 @@ jobs:
           path: |
             target/wasm32v1-none/release/audit_ledger.wasm
             wasm-checksums.txt
+          retention-days: 30
+
+      - name: Upload SBOM artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: sbom-audit-ledger
+          path: sbom/audit-ledger-sbom.json
           retention-days: 30
 
   # ── 2. Generate changelog ──────────────────────────────────────────────────
