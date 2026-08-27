@@ -39,17 +39,8 @@ pub mod digital_passport;
 pub mod carbon_credits;
 pub mod esg_reporting;
 
-// Privacy metrics and reporting (issue #565)
-pub mod privacy_metrics;
-
-// Contract event DIDs for submitters (issue #574)
-pub mod submitter_dids;
-
-// Self-sovereign identity integration (issue #575)
-pub mod ssi_integration;
-
-// Reputation system for submitters (issue #576)
-pub mod reputation_system;
+// Data retention, legal hold, GDPR erasure, and the immutable operational audit log.
+pub mod data_retention;
 
 /// Zero/invalid Stellar address (all zeroes) used to reject `NewOwnerIsZero`.
 const NULL_ACCOUNT: &str = "GAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAWHF";
@@ -317,6 +308,30 @@ pub enum DataKey {
     WaterSnapshot(u32),
     /// Total water snapshots taken.
     WaterSnapshotCount,
+
+    // ── Data Retention, Legal Hold & GDPR Erasure ───────────────────────────
+
+    /// Per-category retention policy (in days). Absent = fall back to `DefaultRetentionDays`.
+    RetentionPolicy(Symbol),
+    /// Global default retention period in days. 0 = no automatic retention policy configured.
+    DefaultRetentionDays,
+    /// Legal hold record for an event index; while `active`, the event cannot be erased
+    /// or cleaned up by `run_retention_sweep`/TTL cleanup.
+    LegalHold(u32),
+    /// Compliance exception (e.g. a statutory record-keeping requirement) for an event index,
+    /// overriding retention-driven erasure until it expires.
+    ComplianceException(u32),
+    /// GDPR right-to-erasure request, keyed by an auto-incrementing request ID.
+    ErasureRequest(u32),
+    /// Count of erasure requests filed so far; used to allocate the next request ID.
+    ErasureRequestCount,
+    /// Finalized erasure record for an event index once a request is fulfilled or a
+    /// retention sweep redacts it.
+    ErasureRecord(u32),
+    /// Addresses authorized to append operational (deploy/config-change/access-grant/
+    /// secret-rotation) audit records via `log_operational_action`, in addition to the
+    /// contract owner(s).
+    OpsAuditRecorders,
 }
 
 #[contracterror]
@@ -575,6 +590,57 @@ pub enum ContractError {
 
     /// **Code 63**: CDP disclosure reporting year is invalid (must be > 2000).
     InvalidDisclosureYear = 63,
+
+    // ── Data Retention, Legal Hold & GDPR Erasure errors (codes 64–73) ───────
+
+    /// **Code 64**: The referenced event is under an active legal hold.
+    /// **Common cause**: `process_erasure_request` (approve) or an implicit retention
+    /// sweep attempted to redact an event while `place_legal_hold` is still active.
+    /// **Resolution**: Call `release_legal_hold` first, or deny the erasure request.
+    EventOnLegalHold = 64,
+
+    /// **Code 65**: No active legal hold exists for the given event index.
+    /// **Common cause**: `release_legal_hold` called on an index with no hold, or one
+    /// already released.
+    LegalHoldNotFound = 65,
+
+    /// **Code 66**: An active compliance exception blocks this erasure.
+    /// **Common cause**: `grant_compliance_exception` is in effect (not yet expired).
+    /// **Resolution**: Wait for the exception to expire or call `revoke_compliance_exception`.
+    ComplianceExceptionActive = 66,
+
+    /// **Code 67**: This event's metadata has already been erased.
+    /// **Common cause**: Duplicate `request_erasure` call for an already-redacted event.
+    EventAlreadyErased = 67,
+
+    /// **Code 68**: Erasure request ID does not exist.
+    /// **Common cause**: `process_erasure_request` called with a stale or invalid `request_id`.
+    ErasureRequestNotFound = 68,
+
+    /// **Code 69**: Erasure request has already been decided (fulfilled or denied).
+    /// **Common cause**: `process_erasure_request` called twice for the same request.
+    ErasureRequestAlreadyDecided = 69,
+
+    /// **Code 70**: Retention period must be greater than zero days.
+    /// **Common cause**: `set_retention_policy` called with `retention_days == 0`.
+    /// **Resolution**: Use `set_default_retention_days(0)` to disable retention instead.
+    InvalidRetentionPeriod = 70,
+
+    /// **Code 71**: A legal hold or compliance exception reason must not be empty.
+    /// **Common cause**: `place_legal_hold`/`grant_compliance_exception` called with empty `Bytes`.
+    EmptyComplianceReason = 71,
+
+    /// **Code 72**: Operational audit log entries (category `operational`) are immutable
+    /// and can never be erased, regardless of retention policy or approval.
+    /// **Common cause**: `request_erasure`/`process_erasure_request` targeting an event
+    /// logged via `log_operational_action`.
+    OperationalEventNotErasable = 72,
+
+    /// **Code 73**: Caller is not an authorized operational-audit recorder or the owner/multisig.
+    /// **Common cause**: `log_operational_action` called by an address not added via
+    /// `add_ops_recorder`.
+    /// **Resolution**: Have the owner call `add_ops_recorder` for this address first.
+    UnauthorizedOpsRecorder = 73,
 }
 
 #[contracttype]
@@ -1919,7 +1985,7 @@ impl AuditLedger {
             index,
             timestamp,
             event_type: event_type.clone(),
-            category: Symbol::new(&env, "general"),
+            category: category.unwrap_or_else(|| Symbol::new(&env, "general")),
             submitter: submitter.clone(),
             metadata: metadata.clone(),
             sub_event_type: sub_event_type.clone(),
@@ -4763,11 +4829,7 @@ pub mod sandbox_innovation;
 pub mod sandbox_graduation;
 
 #[cfg(test)]
-mod sandbox_tests;
+mod supply_chain_tests;
 
-use sandbox_types::*;
-use sandbox_mgmt::*;
-use sandbox_env::*;
-use sandbox_supervision::*;
-use sandbox_innovation::*;
-use sandbox_graduation::*;
+#[cfg(test)]
+mod data_retention_tests;
