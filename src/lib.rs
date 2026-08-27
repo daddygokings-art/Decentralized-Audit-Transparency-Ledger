@@ -2,33 +2,32 @@
 // Migration to #[contractevent] macro is deferred (issue tracked separately)
 #![allow(deprecated)]
 
-// Stablecoin reserve auditing modules
-pub mod stablecoin_reserves;
-pub mod stablecoin_reserves_impl;
+pub mod regulator;
+pub mod regulator_events;
+pub mod disclosure;
+pub mod data_sharing;
+pub mod tamper_evidence;
+pub mod compliance_validators;
+pub mod tax;
+pub mod vat_engine;
+pub mod tax_engines;
+pub mod tax_audit_trail;
+
+// ── Automated Regulatory Reporting ──────────────────────────────────────────
+pub mod regulatory_reporting;
+pub mod report_generators;
+pub mod report_validation;
+pub mod submission_tracker;
+pub mod reporting_audit_trail;
 
 #[cfg(test)]
-mod stablecoin_reserves_tests;
-
-// DeFi protocol auditing modules
-pub mod defi_auditing;
-pub mod defi_auditing_impl;
+mod tax_tests;
 
 #[cfg(test)]
-mod defi_auditing_tests;
-
-// NFT provenance tracking modules
-pub mod nft_provenance;
-pub mod nft_provenance_impl;
+mod regulator_tests;
 
 #[cfg(test)]
-mod nft_provenance_tests;
-
-// Tokenized asset lifecycle modules
-pub mod asset_lifecycle;
-pub mod asset_lifecycle_impl;
-
-#[cfg(test)]
-mod asset_lifecycle_tests;
+mod regulatory_reporting_tests;
 
 use soroban_sdk::{
     bytes, contract, contracterror, contractimpl, contracttype, panic_with_error, Address, Bytes, BytesN, Env, Symbol,
