@@ -453,6 +453,151 @@
           "refId": "A"
         }
       ]
+    },
+    {
+      "id": 21,
+      "type": "stat",
+      "title": "Privacy Snapshot",
+      "description": "Latest aggregated privacy metrics snapshot",
+      "datasource": { "type": "prometheus", "uid": "${DS_PROMETHEUS}" },
+      "gridPos": { "h": 4, "w": 6, "x": 0, "y": 53 },
+      "targets": [
+        {
+          "expr": "audit_ledger_privacy_dsrs_total",
+          "legendFormat": "DSRs",
+          "refId": "A"
+        },
+        {
+          "expr": "audit_ledger_privacy_breaches_total",
+          "legendFormat": "Breaches",
+          "refId": "B"
+        },
+        {
+          "expr": "audit_ledger_privacy_dpia_rate",
+          "legendFormat": "DPIA %",
+          "refId": "C"
+        }
+      ],
+      "options": { "reduceOptions": { "calcs": ["lastNotNull"] }, "colorMode": "background" }
+    },
+    {
+      "id": 22,
+      "type": "stat",
+      "title": "DIDs Registered",
+      "description": "Total decentralized identifiers registered for submitters",
+      "datasource": { "type": "prometheus", "uid": "${DS_PROMETHEUS}" },
+      "gridPos": { "h": 4, "w": 6, "x": 6, "y": 53 },
+      "targets": [
+        {
+          "expr": "audit_ledger_dids_total",
+          "legendFormat": "DIDs",
+          "refId": "A"
+        }
+      ],
+      "options": { "reduceOptions": { "calcs": ["lastNotNull"] }, "colorMode": "background" }
+    },
+    {
+      "id": 23,
+      "type": "stat",
+      "title": "SSI Verifications",
+      "description": "Total SSI credential verifications performed",
+      "datasource": { "type": "prometheus", "uid": "${DS_PROMETHEUS}" },
+      "gridPos": { "h": 4, "w": 6, "x": 12, "y": 53 },
+      "targets": [
+        {
+          "expr": "audit_ledger_ssi_verifications_total",
+          "legendFormat": "Verifications",
+          "refId": "A"
+        }
+      ],
+      "options": { "reduceOptions": { "calcs": ["lastNotNull"] }, "colorMode": "background" }
+    },
+    {
+      "id": 24,
+      "type": "stat",
+      "title": "Avg Reputation Score",
+      "description": "Average reputation score across all submitters",
+      "datasource": { "type": "prometheus", "uid": "${DS_PROMETHEUS}" },
+      "gridPos": { "h": 4, "w": 6, "x": 18, "y": 53 },
+      "targets": [
+        {
+          "expr": "avg(audit_ledger_reputation_score)",
+          "legendFormat": "Avg Score",
+          "refId": "A"
+        }
+      ],
+      "options": { "reduceOptions": { "calcs": ["lastNotNull"] }, "colorMode": "background" }
+    },
+    {
+      "id": 25,
+      "type": "timeseries",
+      "title": "Privacy Events",
+      "description": "DSRs and breach incidents over time",
+      "datasource": { "type": "prometheus", "uid": "${DS_PROMETHEUS}" },
+      "gridPos": { "h": 8, "w": 12, "x": 0, "y": 57 },
+      "targets": [
+        {
+          "expr": "rate(audit_ledger_privacy_dsrs_total[5m])",
+          "legendFormat": "DSRs/min",
+          "refId": "A"
+        },
+        {
+          "expr": "rate(audit_ledger_privacy_breaches_total[5m])",
+          "legendFormat": "Breaches/min",
+          "refId": "B"
+        }
+      ]
+    },
+    {
+      "id": 26,
+      "type": "timeseries",
+      "title": "Reputation Tier Distribution",
+      "description": "Submitters per reputation tier",
+      "datasource": { "type": "prometheus", "uid": "${DS_PROMETHEUS}" },
+      "gridPos": { "h": 8, "w": 12, "x": 12, "y": 57 },
+      "targets": [
+        {
+          "expr": "sum by (tier) (audit_ledger_reputation_tier)",
+          "legendFormat": "{{tier}}",
+          "refId": "A"
+        }
+      ]
+    },
+    {
+      "id": 27,
+      "type": "bargauge",
+      "title": "Top Reputation Scores",
+      "description": "Highest reputation scores among submitters",
+      "datasource": { "type": "prometheus", "uid": "${DS_PROMETHEUS}" },
+      "gridPos": { "h": 8, "w": 12, "x": 0, "y": 65 },
+      "targets": [
+        {
+          "expr": "topk(10, audit_ledger_reputation_score)",
+          "legendFormat": "{{submitter}}",
+          "refId": "A"
+        }
+      ],
+      "options": {
+        "reduceOptions": { "calcs": ["lastNotNull"] },
+        "orientation": "horizontal",
+        "displayMode": "gradient"
+      }
+    },
+    {
+      "id": 28,
+      "type": "piechart",
+      "title": "DID Methods",
+      "description": "Distribution of DID registration methods",
+      "datasource": { "type": "prometheus", "uid": "${DS_PROMETHEUS}" },
+      "gridPos": { "h": 8, "w": 12, "x": 12, "y": 65 },
+      "targets": [
+        {
+          "expr": "sum by (method) (audit_ledger_did_method_total)",
+          "legendFormat": "{{method}}",
+          "refId": "A"
+        }
+      ],
+      "options": { "pieType": "pie", "tooltip": { "mode": "multi" } }
     }
   ],
   "refresh": "30s",

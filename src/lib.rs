@@ -39,6 +39,18 @@ pub mod digital_passport;
 pub mod carbon_credits;
 pub mod esg_reporting;
 
+// Privacy metrics and reporting (issue #565)
+pub mod privacy_metrics;
+
+// Contract event DIDs for submitters (issue #574)
+pub mod submitter_dids;
+
+// Self-sovereign identity integration (issue #575)
+pub mod ssi_integration;
+
+// Reputation system for submitters (issue #576)
+pub mod reputation_system;
+
 /// Zero/invalid Stellar address (all zeroes) used to reject `NewOwnerIsZero`.
 const NULL_ACCOUNT: &str = "GAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAWHF";
 
