@@ -4,7 +4,7 @@ import fs from "fs";
 import path from "path";
 import yaml from "js-yaml";
 
-import { resolvers } from "../graphql/src/resolvers";
+import { resolvers } from "../../graphql/src/resolvers";
 import {
   export_events,
   exportCsv,
@@ -13,20 +13,123 @@ import {
   ExportOptions,
   ExportFilter,
 } from "./export";
-import { validateKey, type Role } from "./keys";
+import { validateKey, generateKey, revokeKey, listKeys, type Role } from "./keys";
+import { decodeCursor, encodeCursor, setPaginationHeaders, DEFAULT_PAGE_SIZE, MAX_PAGE_SIZE } from "./pagination";
+import {
+  securityHeaders,
+  cspMiddleware,
+  ViolationReportStore,
+  createViolationReportHandler,
+  ddosProtection,
+  wafAdminRouter,
+  createRateLimiter,
+  authenticateBearer,
+  requireScopes,
+  requireRole,
+  type Algorithm,
+} from "@audit-ledger/security";
+import { authorizationServer, OAUTH_ISSUER, wafRuleEngine, createConfiguredRateLimitStore } from "./security";
 
 const app = express();
 const port = process.env.PORT || 3002;
 
 app.use(cors());
 app.use(express.json());
-app.use(rateLimiter);
+
+// ── Security headers + CSP (nonces, report-only mode, violation reporting) ─
+
+app.use(securityHeaders());
+app.use(
+  cspMiddleware({
+    reportOnly: process.env.CSP_REPORT_ONLY === "true",
+    reportUri: "/csp-report",
+    reportToGroup: "csp-endpoint",
+  })
+);
+
+const cspViolationStore = new ViolationReportStore();
+app.post(
+  "/csp-report",
+  express.json({ type: ["application/json", "application/csp-report", "application/reports+json"] }),
+  createViolationReportHandler(cspViolationStore)
+);
+
+// ── DDoS protection / WAF (rule engine, bot detection, Cloudflare/AWS Shield) ─
+
+app.use(
+  ddosProtection({
+    ruleEngine: wafRuleEngine,
+    trustCloudflare: process.env.TRUST_CLOUDFLARE === "true",
+    trustAwsWaf: process.env.TRUST_AWS_WAF === "true",
+  })
+);
+
+// ── Distributed rate limiting (token bucket / sliding window / adaptive) ───
+
+const rateLimitStore = createConfiguredRateLimitStore();
+const rateLimitAlgorithm = (process.env.RATE_LIMIT_ALGORITHM ?? "token-bucket") as Algorithm;
+const rateLimitCapacity = parseInt(process.env.RATE_LIMIT_MAX_TOKENS ?? "100", 10);
+const rateLimitRefillRate = parseInt(process.env.RATE_LIMIT_REFILL_RATE ?? "10", 10);
+const rateLimitIntervalMs = parseInt(process.env.RATE_LIMIT_REFILL_INTERVAL_MS ?? "60000", 10);
+
+app.use(
+  createRateLimiter({
+    store: rateLimitStore,
+    algorithm: rateLimitAlgorithm,
+    tokenBucket: { capacity: rateLimitCapacity, refillTokens: rateLimitRefillRate, refillIntervalMs: rateLimitIntervalMs },
+    slidingWindow: { limit: rateLimitCapacity, windowMs: rateLimitIntervalMs },
+    adaptive: {
+      baseCapacity: rateLimitCapacity,
+      minCapacity: parseInt(process.env.RATE_LIMIT_MIN_TOKENS ?? "10", 10),
+      refillTokens: rateLimitRefillRate,
+      refillIntervalMs: rateLimitIntervalMs,
+      errorWindowMs: 30_000,
+      errorRateThreshold: 0.2,
+    },
+  })
+);
+
+// ── OAuth2 / OIDC ────────────────────────────────────────────────────────────
+// Mounts /oauth/{authorize,token,jwks.json,introspect,revoke} and the
+// discovery documents. See src/security.ts for client registration and for
+// how to point at an external IdP instead via OIDC_JWKS_URI.
+
+app.use("/oauth", authorizationServer.router());
+
+const bearerAuth = authenticateBearer({ issuer: OAUTH_ISSUER, localIssuer: authorizationServer });
+
+const v1Admin = express.Router();
+v1Admin.use(bearerAuth);
+
+v1Admin.get("/keys", requireScopes(["admin:keys"]), requireRole("admin"), (_req, res) => {
+  res.json({
+    data: listKeys().map((record) => ({ ...record, key: `${record.key.slice(0, 8)}…` })),
+  });
+});
+v1Admin.post("/keys", requireScopes(["admin:keys"]), requireRole("admin"), (req, res) => {
+  const { name, role } = req.body ?? {};
+  if (!name) return res.status(400).json({ error: "name is required" });
+  res.status(201).json({ data: generateKey(name, role) });
+});
+v1Admin.delete("/keys/:key", requireScopes(["admin:keys"]), requireRole("admin"), (req, res) => {
+  if (!revokeKey(req.params.key)) return res.status(404).json({ error: "key not found" });
+  res.status(204).end();
+});
+v1Admin.use("/waf", requireScopes(["admin:waf"]), requireRole("admin"), wafAdminRouter(wafRuleEngine));
+
+app.use("/v1/admin", v1Admin);
 
 function resolveContext(req: express.Request): { apiKey?: string; role?: Role } {
   const apiKey = (req.headers["x-api-key"] ?? req.headers["authorization"]?.replace("Bearer ", "")) as string | undefined;
   if (!apiKey) return {};
   const record = validateKey(apiKey);
   return record ? { apiKey, role: record.role } : {};
+}
+
+function parseLimit(raw: string | undefined): number {
+  const parsed = parseInt(raw ?? "", 10);
+  if (Number.isNaN(parsed) || parsed <= 0) return DEFAULT_PAGE_SIZE;
+  return Math.min(parsed, MAX_PAGE_SIZE);
 }
 
 // ── Health Check Endpoints (#268) ─────────────────────────────────────────────
@@ -113,8 +216,7 @@ const v1 = express.Router();
 
 // GET /events - List all events with pagination
 v1.get("/events", (req, res) => {
-  const limit = Math.min(parseInt(req.query.limit as string) || 50, 1000);
-  const offset = parseInt(req.query.offset as string) || 0;
+  const limit = parseLimit(req.query.limit as string);
   const filter = req.query.filter ? JSON.parse(req.query.filter as string) : null;
 
   let offset = 0;
@@ -126,7 +228,7 @@ v1.get("/events", (req, res) => {
     offset = decoded.index;
   }
 
-  const allFiltered = resolvers.Query.events(null, { limit: 100000, offset: 0, filter }, null);
+  const allFiltered = resolvers.Query.events(null, { limit: 100000, offset: 0, filter });
   const total = allFiltered.length;
   const result = allFiltered.slice(offset, offset + limit);
 
@@ -330,10 +432,16 @@ app.get("/stats", (_req, res) => {
   res.redirect(301, "/v1/stats");
 });
 
-app.listen(port, () => {
-  console.log(`REST API listening on port ${port}`);
-  console.log(`  Versioned: /v1/*`);
-  console.log(`  Legacy:    /events, /stats (301 → /v1/...)`);
-  console.log(`  Health:    /healthz, /readyz, /metrics`);
-  console.log(`  Export:    /v1/export/events.{json,csv}, /v1/export/events/stream`);
-});
+if (require.main === module) {
+  app.listen(port, () => {
+    console.log(`REST API listening on port ${port}`);
+    console.log(`  Versioned: /v1/*`);
+    console.log(`  Legacy:    /events, /stats (301 → /v1/...)`);
+    console.log(`  Health:    /healthz, /readyz, /metrics`);
+    console.log(`  Export:    /v1/export/events.{json,csv}, /v1/export/events/stream`);
+    console.log(`  OAuth2:    /oauth/{authorize,token,jwks.json}, /.well-known/openid-configuration`);
+    console.log(`  Admin:     /v1/admin/{keys,waf} (requires admin role + scope)`);
+  });
+}
+
+export { app };
