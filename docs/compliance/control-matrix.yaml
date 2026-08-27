@@ -1,0 +1,172 @@
+# Machine-readable control matrix: one control per row, mapped to every
+# framework it satisfies. This is the single source of truth for
+# compliance automation — docs/compliance/*.md are generated
+# human-readable views over this file (see
+# scripts/compliance/generate-compliance-report.py), and
+# scripts/compliance/collect-evidence.sh reads `evidence` to know what
+# to gather for each control.
+#
+# Loosely modeled on NIST OSCAL's control/implementation split, kept
+# flat/YAML rather than full OSCAL XML/JSON for readability — a control
+# here is "the thing we actually do," not a copy of framework wording.
+#
+# Field guide:
+#   id            internal control id (audit-ledger namespace)
+#   title         short human name
+#   description   what the control actually does, in our system
+#   owner         team accountable for the control operating correctly
+#   automated     true if continuously verified by CI/monitoring (vs. a
+#                 manual/periodic process)
+#   evidence      list of evidence sources collect-evidence.sh pulls from
+#   frameworks    map of framework -> control id(s) it satisfies
+controls:
+  - id: CTRL-SEC-01
+    title: Secrets rotation
+    description: >
+      Database credentials, API keys, and signing keys are rotated on a
+      fixed schedule via HashiCorp Vault, with automated post-rotation
+      validation and rollback on failure.
+    owner: security-team
+    automated: true
+    evidence:
+      - source: k8s-cronjob-history
+        detail: "audit-ledger-secrets namespace, rotate-* CronJobs, last 90 days"
+      - source: rotation-state-ledger
+        detail: "scripts/secrets-rotation state under STATE_DIR (*.jsonl)"
+    frameworks:
+      soc2: ["CC6.1", "CC6.6"]
+      iso27001: ["A.8.24", "A.5.17"]
+      pci-dss: ["3.6", "8.6"]
+      gdpr: ["Art.32"]
+      mica: ["Art.68"] # ICT/security risk management for crypto-asset service providers
+
+  - id: CTRL-SEC-02
+    title: TLS certificate management
+    description: >
+      All external and internal service endpoints use certificates
+      issued and auto-renewed by cert-manager, monitored for expiry with
+      a 14-day alert threshold against a 30-day renewal trigger.
+    owner: security-team
+    automated: true
+    evidence:
+      - source: cert-manager-status
+        detail: "kubectl get certificates -A -o json"
+      - source: prometheus-alerts
+        detail: "infra/k8s/monitoring/cert-expiry-alerts.yaml firing history"
+    frameworks:
+      soc2: ["CC6.1", "CC6.7"]
+      iso27001: ["A.8.24"]
+      pci-dss: ["4.2"]
+      gdpr: ["Art.32"]
+      mica: ["Art.68"]
+
+  - id: CTRL-SEC-03
+    title: Vulnerability scanning and remediation SLA
+    description: >
+      Dependencies (cargo-audit, cargo-deny, OSV-Scanner) and container
+      images (Trivy) are scanned continuously; findings are triaged
+      against a severity-based SLA with a documented, time-bounded
+      exception process.
+    owner: security-team
+    automated: true
+    evidence:
+      - source: ci-artifacts
+        detail: "vulnerability-management-report workflow artifacts (SBOM, scan reports, metrics)"
+      - source: exceptions-register
+        detail: "scripts/vulnerability-management/exceptions.yaml + its git history"
+    frameworks:
+      soc2: ["CC7.1", "CC7.2"]
+      iso27001: ["A.8.8", "A.8.29"]
+      pci-dss: ["6.3", "11.3"]
+      gdpr: ["Art.32"]
+      mica: ["Art.68"]
+
+  - id: CTRL-SEC-04
+    title: Dependency change review
+    description: >
+      Every PR introducing a new/updated dependency is scanned by
+      dependency-review-action, blocking merge on high-severity
+      vulnerabilities or disallowed licenses; Dependabot opens weekly
+      update PRs.
+    owner: engineering
+    automated: true
+    evidence:
+      - source: ci-artifacts
+        detail: ".github/workflows/dependency-review.yml PR check runs"
+    frameworks:
+      soc2: ["CC8.1"]
+      iso27001: ["A.8.28"]
+      pci-dss: ["6.3.2"]
+      gdpr: []
+      mica: ["Art.68"]
+
+  - id: CTRL-AUD-01
+    title: Immutable audit trail
+    description: >
+      All logged financial/operational events are recorded on-chain in
+      an append-only ledger with tamper-evident hash chaining, publicly
+      verifiable by any party.
+    owner: protocol-team
+    automated: true
+    evidence:
+      - source: on-chain-state
+        detail: "AuditLedger contract event log, verifiable via deploy-verify.sh"
+    frameworks:
+      soc2: ["CC7.2"]
+      iso27001: ["A.8.15"]
+      pci-dss: ["10.2"]
+      gdpr: []
+      mica: ["Art.66"] # record-keeping requirements
+
+  - id: CTRL-PRIV-01
+    title: Privacy by design / DPIA
+    description: >
+      New features handling personal data go through a documented Data
+      Protection Impact Assessment before shipping.
+    owner: security-team
+    automated: false
+    evidence:
+      - source: manual-doc
+        detail: "docs/security/privacy-by-design.md DPIA records"
+    frameworks:
+      soc2: ["P1.1"]
+      iso27001: ["A.5.34"]
+      pci-dss: []
+      gdpr: ["Art.25", "Art.35"]
+      mica: []
+
+  - id: CTRL-IR-01
+    title: Vulnerability disclosure and incident response
+    description: >
+      Documented external vulnerability disclosure process with defined
+      SLA and a security bug-bounty program; internal chaos-engineering
+      program exercises failure/attack scenarios including certificate
+      expiry and key compromise.
+    owner: security-team
+    automated: false
+    evidence:
+      - source: manual-doc
+        detail: "docs/security/vulnerability-reporting.md, docs/security/chaos-engineering.md run history"
+    frameworks:
+      soc2: ["CC7.3", "CC7.4"]
+      iso27001: ["A.5.24", "A.5.25"]
+      pci-dss: ["12.10"]
+      gdpr: ["Art.33", "Art.34"]
+      mica: ["Art.68"]
+
+  - id: CTRL-ACC-01
+    title: Role-based API access control
+    description: >
+      Off-chain API access is scoped via API-key based RBAC
+      (admin/reader/subscriber/metrics roles), documented in ADR-006.
+    owner: engineering
+    automated: false
+    evidence:
+      - source: manual-doc
+        detail: "docs/adr/ADR-006-rbac-implementation.md"
+    frameworks:
+      soc2: ["CC6.1", "CC6.3"]
+      iso27001: ["A.8.2", "A.8.3"]
+      pci-dss: ["7.2"]
+      gdpr: ["Art.32"]
+      mica: ["Art.68"]

@@ -1,0 +1,28 @@
+apiVersion: cert-manager.io/v1
+kind: ClusterIssuer
+metadata:
+  name: letsencrypt-staging
+spec:
+  acme:
+    server: https://acme-staging-v02.api.letsencrypt.org/directory
+    email: security@audit-ledger.example
+    privateKeySecretRef:
+      name: letsencrypt-staging-account-key
+    solvers:
+      # HTTP-01 for the public API/UI ingress hosts.
+      - http01:
+          ingress:
+            class: nginx
+        selector:
+          dnsZones:
+            - "audit-ledger.example"
+      # DNS-01 for wildcard/internal names (e.g. *.internal.audit-ledger.example)
+      # that can't serve an HTTP-01 challenge. Replace the DNS provider
+      # block with whichever DNS host actually serves the zone.
+      - dns01:
+          route53:
+            region: us-east-1
+            hostedZoneID: REPLACE_ME
+        selector:
+          dnsZones:
+            - "internal.audit-ledger.example"

@@ -1,0 +1,63 @@
+# Certificate resources for audit-ledger workloads. `issuerRef` starts
+# every new host on letsencrypt-staging (see install.md) — flip to
+# letsencrypt-prod only after a successful staging issuance for that
+# exact DNS name set.
+apiVersion: cert-manager.io/v1
+kind: Certificate
+metadata:
+  name: audit-ledger-api-tls
+  namespace: audit-ledger
+spec:
+  secretName: audit-ledger-api-tls
+  duration: 2160h # 90d, matches Let's Encrypt's own cert lifetime
+  renewBefore: 720h # renew with 30d left (cert-manager's 2/3-lifetime default would be ~30d anyway; pinned explicitly for clarity)
+  privateKey:
+    algorithm: ECDSA
+    size: 256
+    rotationPolicy: Always
+  dnsNames:
+    - api.audit-ledger.example
+  issuerRef:
+    name: letsencrypt-staging
+    kind: ClusterIssuer
+---
+apiVersion: cert-manager.io/v1
+kind: Certificate
+metadata:
+  name: audit-ledger-ui-tls
+  namespace: audit-ledger
+spec:
+  secretName: audit-ledger-ui-tls
+  duration: 2160h
+  renewBefore: 720h
+  privateKey:
+    algorithm: ECDSA
+    size: 256
+    rotationPolicy: Always
+  dnsNames:
+    - app.audit-ledger.example
+  issuerRef:
+    name: letsencrypt-staging
+    kind: ClusterIssuer
+---
+# Internal mTLS cert for Vault's own listener (referenced as the
+# `vault-tls` secret mounted in infra/k8s/vault/values.yaml).
+apiVersion: cert-manager.io/v1
+kind: Certificate
+metadata:
+  name: vault-tls
+  namespace: audit-ledger-secrets
+spec:
+  secretName: vault-tls
+  duration: 720h # 30d — short-lived internal mTLS, cheap to rotate
+  renewBefore: 240h
+  privateKey:
+    algorithm: ECDSA
+    size: 256
+    rotationPolicy: Always
+  dnsNames:
+    - vault.audit-ledger-secrets.svc
+    - vault.audit-ledger-secrets.svc.cluster.local
+  issuerRef:
+    name: internal-ca-vault
+    kind: ClusterIssuer

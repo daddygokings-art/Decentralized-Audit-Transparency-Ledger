@@ -1,0 +1,24 @@
+apiVersion: kustomize.config.k8s.io/v1beta1
+kind: Kustomization
+namespace: audit-ledger-secrets
+
+resources:
+  - rotation-cronjobs.yaml
+
+# Ships scripts/secrets-rotation/*.sh into the cluster as a ConfigMap so
+# the CronJobs in rotation-cronjobs.yaml can mount them, without
+# duplicating script content into YAML by hand. Regenerates (with a
+# content hash suffix) whenever the scripts change, so CronJobs
+# automatically pick up new script versions on the next apply.
+configMapGenerator:
+  - name: secrets-rotation-scripts
+    files:
+      - ../../../scripts/secrets-rotation/common.sh
+      - ../../../scripts/secrets-rotation/rotate-database-credentials.sh
+      - ../../../scripts/secrets-rotation/rotate-api-keys.sh
+      - ../../../scripts/secrets-rotation/rotate-signing-keys.sh
+      - ../../../scripts/secrets-rotation/validate-rotation.sh
+      - ../../../scripts/secrets-rotation/rollback-rotation.sh
+
+generatorOptions:
+  disableNameSuffixHash: false

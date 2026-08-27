@@ -1,0 +1,138 @@
+# Scheduled secrets rotation. Each CronJob authenticates to Vault via
+# Kubernetes auth (its ServiceAccount's projected token — no long-lived
+# Vault token is ever stored in the cluster) and runs the matching script
+# from scripts/secrets-rotation/. Every job runs validate first; a failed
+# validation blocks promotion and pages on-call instead of rotating.
+#
+# Schedules (UTC), staggered to avoid rotating everything at once:
+#   - DB static-role password : weekly,  Mon 02:00
+#   - API keys                : every 90 days, 1st 03:00 (cron approximates via day-of-month check in script)
+#   - Transit signing keys    : every 30 days, 1st of month 04:00
+#   - TLS certs               : handled by cert-manager (infra/k8s/cert-manager/), not here.
+apiVersion: v1
+kind: ServiceAccount
+metadata:
+  name: secrets-rotator
+  namespace: audit-ledger-secrets
+---
+apiVersion: batch/v1
+kind: CronJob
+metadata:
+  name: rotate-db-credentials
+  namespace: audit-ledger-secrets
+  labels:
+    audit-ledger.io/rotation-target: database
+spec:
+  schedule: "0 2 * * 1" # Monday 02:00 UTC
+  concurrencyPolicy: Forbid
+  successfulJobsHistoryLimit: 5
+  failedJobsHistoryLimit: 10
+  jobTemplate:
+    spec:
+      backoffLimit: 0
+      template:
+        spec:
+          serviceAccountName: secrets-rotator
+          restartPolicy: Never
+          containers:
+            - name: rotate-db-credentials
+              image: ghcr.io/audit-ledger/rotation-tools:latest
+              command: ["/scripts/rotate-database-credentials.sh"]
+              env:
+                - name: VAULT_ADDR
+                  value: "https://vault.audit-ledger-secrets.svc:8200"
+                - name: VAULT_K8S_ROLE
+                  value: "audit-ledger-db-rotator"
+                - name: ROTATION_TARGET
+                  value: "audit-ledger-static"
+              volumeMounts:
+                - name: scripts
+                  mountPath: /scripts
+                  readOnly: true
+          volumes:
+            - name: scripts
+              configMap:
+                name: secrets-rotation-scripts
+                defaultMode: 0555
+---
+apiVersion: batch/v1
+kind: CronJob
+metadata:
+  name: rotate-api-keys
+  namespace: audit-ledger-secrets
+  labels:
+    audit-ledger.io/rotation-target: api-keys
+spec:
+  schedule: "0 3 1 * *" # 1st of month 03:00 UTC — script no-ops unless >=90d since last rotation
+  concurrencyPolicy: Forbid
+  successfulJobsHistoryLimit: 5
+  failedJobsHistoryLimit: 10
+  jobTemplate:
+    spec:
+      backoffLimit: 0
+      template:
+        spec:
+          serviceAccountName: secrets-rotator
+          restartPolicy: Never
+          containers:
+            - name: rotate-api-keys
+              image: ghcr.io/audit-ledger/rotation-tools:latest
+              command: ["/scripts/rotate-api-keys.sh"]
+              env:
+                - name: VAULT_ADDR
+                  value: "https://vault.audit-ledger-secrets.svc:8200"
+                - name: VAULT_K8S_ROLE
+                  value: "audit-ledger-api-key-rotator"
+                - name: ROTATION_INTERVAL_DAYS
+                  value: "90"
+              volumeMounts:
+                - name: scripts
+                  mountPath: /scripts
+                  readOnly: true
+          volumes:
+            - name: scripts
+              configMap:
+                name: secrets-rotation-scripts
+                defaultMode: 0555
+---
+apiVersion: batch/v1
+kind: CronJob
+metadata:
+  name: rotate-signing-keys
+  namespace: audit-ledger-secrets
+  labels:
+    audit-ledger.io/rotation-target: signing-keys
+spec:
+  schedule: "0 4 1 * *" # 1st of month 04:00 UTC
+  concurrencyPolicy: Forbid
+  successfulJobsHistoryLimit: 5
+  failedJobsHistoryLimit: 10
+  jobTemplate:
+    spec:
+      backoffLimit: 0
+      template:
+        spec:
+          serviceAccountName: secrets-rotator
+          restartPolicy: Never
+          containers:
+            - name: rotate-signing-keys
+              image: ghcr.io/audit-ledger/rotation-tools:latest
+              command: ["/scripts/rotate-signing-keys.sh"]
+              env:
+                - name: VAULT_ADDR
+                  value: "https://vault.audit-ledger-secrets.svc:8200"
+                - name: VAULT_K8S_ROLE
+                  value: "audit-ledger-signing-key-rotator"
+                - name: SIGNING_KEYS
+                  value: "audit-ledger-event-signing audit-ledger-jwt-signing"
+                - name: MIN_DECRYPTION_VERSION_GRACE_ROTATIONS
+                  value: "3" # keep last 3 versions live for verification
+              volumeMounts:
+                - name: scripts
+                  mountPath: /scripts
+                  readOnly: true
+          volumes:
+            - name: scripts
+              configMap:
+                name: secrets-rotation-scripts
+                defaultMode: 0555
