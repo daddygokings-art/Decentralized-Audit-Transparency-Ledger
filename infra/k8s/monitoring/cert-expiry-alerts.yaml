@@ -1,0 +1,49 @@
+# Requires kube-prometheus-stack (or another Prometheus Operator) watching
+# PrometheusRule CRDs, and cert-manager installed with
+# --set prometheus.enabled=true (see infra/k8s/cert-manager/install.md).
+apiVersion: monitoring.coreos.com/v1
+kind: PrometheusRule
+metadata:
+  name: audit-ledger-cert-expiry
+  namespace: audit-ledger-certs
+  labels:
+    release: kube-prometheus-stack
+spec:
+  groups:
+    - name: certificate-management
+      rules:
+        - alert: CertificateExpiringSoon
+          expr: (certmanager_certificate_expiration_timestamp_seconds - time()) / 86400 < 14
+          for: 1h
+          labels:
+            severity: critical
+          annotations:
+            summary: "Certificate {{ $labels.name }}/{{ $labels.namespace }} expires in under 14 days"
+            description: "cert-manager Certificate {{ $labels.namespace }}/{{ $labels.name }} expires in {{ $value | printf \"%.1f\" }} days. Renewal should already have triggered at ~30d remaining — investigate the ACME/Vault issuer immediately."
+
+        - alert: CertificateNotReady
+          expr: certmanager_certificate_ready_status{condition="False"} == 1
+          for: 30m
+          labels:
+            severity: critical
+          annotations:
+            summary: "Certificate {{ $labels.name }}/{{ $labels.namespace }} is not Ready"
+            description: "cert-manager reports Certificate {{ $labels.namespace }}/{{ $labels.name }} as not Ready for over 30 minutes — issuance or renewal is failing."
+
+        - alert: ACMEChallengeFailing
+          expr: increase(certmanager_http_acme_client_request_errors_total[1h]) > 3
+          for: 15m
+          labels:
+            severity: warning
+          annotations:
+            summary: "cert-manager ACME requests failing"
+            description: "More than 3 ACME client request errors in the last hour — an issuer or DNS/HTTP-01 solver may be misconfigured."
+
+        - alert: CertificateRenewalStalled
+          expr: certmanager_certificate_renewal_timestamp_seconds > 0 and (time() - certmanager_certificate_renewal_timestamp_seconds) / 86400 > 95
+          for: 1h
+          labels:
+            severity: critical
+          annotations:
+            summary: "Certificate {{ $labels.name }}/{{ $labels.namespace }} has not renewed in 95+ days"
+            description: "For a 90-day-lifetime certificate this means at least one renewal cycle was silently skipped."

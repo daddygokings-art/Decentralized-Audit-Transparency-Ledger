@@ -1,0 +1,31 @@
+{
+  "name": "@audit-ledger/security",
+  "version": "0.1.0",
+  "private": true,
+  "description": "Shared security middleware for all Audit Ledger web services: security headers/CSP, OAuth2/OIDC auth, distributed rate limiting, and DDoS/WAF protection.",
+  "main": "src/index.ts",
+  "types": "src/index.ts",
+  "scripts": {
+    "build": "tsc -p tsconfig.json",
+    "test": "vitest run",
+    "test:watch": "vitest"
+  },
+  "dependencies": {
+    "consul": "^1.2.0",
+    "ioredis": "^5.4.1",
+    "jose": "^5.6.3"
+  },
+  "peerDependencies": {
+    "express": "^4.18.0"
+  },
+  "devDependencies": {
+    "@types/consul": "^0.40.3",
+    "@types/express": "^4.17.21",
+    "@types/node": "^20.12.12",
+    "@types/supertest": "^6.0.2",
+    "express": "^4.22.2",
+    "supertest": "^7.0.0",
+    "typescript": "^5.4.5",
+    "vitest": "^1.6.1"
+  }
+}

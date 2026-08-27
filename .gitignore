@@ -132,3 +132,17 @@ monitoring/grafana/data/
 
 # Docker
 *.pid
+
+# Secrets rotation / vulnerability / compliance automation — generated locally,
+# published only as CI artifacts (see docs/security/, docs/compliance/)
+sbom/
+osv-scan-report.txt
+trivy-*.sarif
+trivy-*.json
+vuln-findings-seen.jsonl
+normalized-findings.json
+vuln-metrics.json
+evidence/
+compliance-reports/
+rotation-*.log
+*.jsonl

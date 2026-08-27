@@ -1,0 +1,49 @@
+name: Compliance Evidence Collection
+
+permissions: {}
+
+on:
+  schedule:
+    - cron: "0 6 * * 1" # weekly, Monday 06:00 UTC — ahead of vulnerability-report.yml at 07:00
+  workflow_dispatch:
+
+jobs:
+  collect:
+    name: Collect evidence and generate framework reports
+    runs-on: ubuntu-latest
+    permissions:
+      contents: read
+    steps:
+      - uses: actions/checkout@v6
+        with:
+          persist-credentials: false
+
+      - name: Install dependencies
+        run: |
+          sudo apt-get update -y && sudo apt-get install -y jq python3-pip
+          sudo curl -sSfL -o /usr/local/bin/yq https://github.com/mikefarah/yq/releases/latest/download/yq_linux_amd64
+          sudo chmod +x /usr/local/bin/yq
+          pip3 install --user pyyaml
+
+      # Note: this CI runner has no kubectl/Vault access, so
+      # collect-evidence.sh gracefully degrades those two collectors to
+      # "unavailable" rather than failing — this workflow captures
+      # what's collectible from repo state (rotation-state ledger if
+      # checked out, exceptions register, vuln metrics) in CI, while
+      # collectors requiring live cluster access are expected to also
+      # run from a workflow/runner with cluster credentials (self-hosted
+      # runner inside the cluster's VPC, or a separate scheduled Job).
+      # See docs/compliance/evidence-collection.md.
+      - name: Collect evidence
+        run: ./scripts/compliance/collect-evidence.sh --out-dir evidence
+
+      - name: Generate per-framework reports
+        run: python3 scripts/compliance/generate-compliance-report.py --all --evidence-dir evidence --out-dir compliance-reports
+
+      - uses: actions/upload-artifact@v4
+        with:
+          name: compliance-evidence-${{ github.run_id }}
+          path: |
+            evidence/
+            compliance-reports/
+          retention-days: 90

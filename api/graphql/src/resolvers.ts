@@ -27,16 +27,6 @@ interface GovernanceEventRecord {
 const events: EventRecord[] = [];
 const governanceEvents: GovernanceEventRecord[] = [];
 
-interface GovernanceEventRecord {
-  action: string;
-  caller: string;
-  oldValue?: string;
-  newValue?: string;
-  timestamp: number;
-}
-
-const governanceEvents: GovernanceEventRecord[] = [];
-
 function matchesFilter(e: EventRecord, filter: any): boolean {
   if (!filter) return true;
   if (filter.type && e.event_type !== filter.type) return false;

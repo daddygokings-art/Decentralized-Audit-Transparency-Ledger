@@ -1,0 +1,23 @@
+apiVersion: v1
+kind: Namespace
+metadata:
+  name: audit-ledger-secrets
+  labels:
+    app.kubernetes.io/part-of: audit-ledger
+    audit-ledger.io/purpose: secrets-management
+---
+apiVersion: v1
+kind: Namespace
+metadata:
+  name: audit-ledger-certs
+  labels:
+    app.kubernetes.io/part-of: audit-ledger
+    audit-ledger.io/purpose: certificate-management
+---
+apiVersion: v1
+kind: Namespace
+metadata:
+  name: audit-ledger
+  labels:
+    app.kubernetes.io/part-of: audit-ledger
+    audit-ledger.io/purpose: workloads
