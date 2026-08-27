@@ -42,6 +42,10 @@ pub mod esg_reporting;
 // Data retention, legal hold, GDPR erasure, and the immutable operational audit log.
 pub mod data_retention;
 
+// Predictive capacity planning, ML forecasting, and auto-scaling.
+pub mod capacity_planning;
+
+
 /// Zero/invalid Stellar address (all zeroes) used to reject `NewOwnerIsZero`.
 const NULL_ACCOUNT: &str = "GAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAWHF";
 
