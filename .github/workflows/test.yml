@@ -38,6 +38,32 @@ jobs:
       - name: Run cargo-audit for dependency vulnerabilities
         run: cargo install cargo-audit && cargo audit --deny warnings
 
+      - name: Generate SBOM with CycloneDX
+        run: |
+          cargo install cargo-cyclonedx
+          mkdir -p sbom
+          cargo cyclonedx --output sbom/audit-ledger-sbom.json
+
+      - name: Scan SBOM for vulnerabilities with OSV
+        run: |
+          curl -sSfL https://raw.githubusercontent.com/google/osv.dev/v1.6.3/tools/osv-scanner/install.sh | bash -s -- -b /usr/local/bin
+          osv-scanner --sbom sbom/audit-ledger-sbom.json --output osv-scan-report.txt || true
+          cat osv-scan-report.txt
+
+      - name: Upload SBOM artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: sbom-audit-ledger
+          path: sbom/audit-ledger-sbom.json
+          retention-days: 30
+
+      - name: Upload OSV scan report
+        uses: actions/upload-artifact@v4
+        with:
+          name: osv-scan-report
+          path: osv-scan-report.txt
+          retention-days: 30
+
   shellcheck:
     name: Shell syntax validation
     runs-on: ubuntu-latest

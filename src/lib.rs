@@ -2,10 +2,42 @@
 // Migration to #[contractevent] macro is deferred (issue tracked separately)
 #![allow(deprecated)]
 
+pub mod regulator;
+pub mod regulator_events;
+pub mod disclosure;
+pub mod data_sharing;
+pub mod tamper_evidence;
+pub mod compliance_validators;
+pub mod tax;
+pub mod vat_engine;
+pub mod tax_engines;
+pub mod tax_audit_trail;
+
+// ── Automated Regulatory Reporting ──────────────────────────────────────────
+pub mod regulatory_reporting;
+pub mod report_generators;
+pub mod report_validation;
+pub mod submission_tracker;
+pub mod reporting_audit_trail;
+
+#[cfg(test)]
+mod tax_tests;
+
+#[cfg(test)]
+mod regulator_tests;
+
+#[cfg(test)]
+mod regulatory_reporting_tests;
+
 use soroban_sdk::{
     bytes, contract, contracterror, contractimpl, contracttype, panic_with_error, Address, Bytes, BytesN, Env, Symbol,
     Vec,
 };
+
+pub mod supply_chain;
+pub mod digital_passport;
+pub mod carbon_credits;
+pub mod esg_reporting;
 
 /// Zero/invalid Stellar address (all zeroes) used to reject `NewOwnerIsZero`.
 const NULL_ACCOUNT: &str = "GAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAWHF";
@@ -205,6 +237,74 @@ pub enum DataKey {
     TtlCleanupStats,
     /// Resume cursor for `archive_events` scans (issue #199).
     ArchiveScanCursor,
+
+    // ── Circular Economy ────────────────────────────────────────────────────
+
+    /// Material passport keyed by a 32-byte material ID.
+    MaterialPassport(BytesN<32>),
+    /// All material IDs registered (packed 32-byte chunks).
+    AllMaterialIds,
+    /// Loop events for a material, stored as a Vec<LoopEvent>.
+    MaterialLoopEvents(BytesN<32>),
+    /// Circularity snapshot keyed by ledger sequence (u32).
+    CircularitySnapshot(u32),
+    /// Total number of circularity snapshots taken.
+    CircularitySnapshotCount,
+    /// Running totals for circularity metric aggregates.
+    CircularityTotals,
+
+    // ── Lifecycle Assessment (LCA) ───────────────────────────────────────────
+
+    /// LCA profile keyed by product ID (32-byte content-addressed).
+    LcaProfile(BytesN<32>),
+    /// Phase impacts stored per (product_id, phase_discriminant).
+    LcaPhaseImpact(BytesN<32>, u32),
+    /// Finalized LCA result (aggregated across all phases).
+    LcaResult(BytesN<32>),
+    /// Normalization reference values set keyed by a short name Symbol.
+    LcaNormRef(Symbol),
+    /// Weighting scheme keyed by a short name Symbol.
+    LcaWeightingScheme(Symbol),
+    /// Uncertainty bounds (interval arithmetic) for a product's aggregated impacts.
+    LcaUncertainty(BytesN<32>),
+    /// LCA database entry keyed by a 32-byte reference ID.
+    LcaDbEntry(BytesN<32>),
+    /// Total number of LCA profiles registered.
+    LcaProfileCount,
+
+    // ── Biodiversity ─────────────────────────────────────────────────────────
+
+    /// Biodiversity impact record keyed by a 32-byte supply-chain event ID.
+    BioImpact(BytesN<32>),
+    /// Biodiversity offset record keyed by a 32-byte offset ID.
+    BioOffset(BytesN<32>),
+    /// Running global biodiversity totals (accumulator across all impact records).
+    BioTotals,
+    /// Nature-positive snapshot keyed by a 0-based ordinal.
+    BioSnapshot(u32),
+    /// Total nature-positive snapshots taken.
+    BioSnapshotCount,
+    /// Ecosystem service valuation record keyed by a 32-byte site/project ID.
+    EcoServiceRecord(BytesN<32>),
+    /// Species observation record keyed by a 32-byte observation ID.
+    SpeciesObservation(BytesN<32>),
+
+    // ── Water Footprint ───────────────────────────────────────────────────────
+
+    /// Water footprint record keyed by a 32-byte event-linked ID.
+    WaterFootprint(BytesN<32>),
+    /// Water risk assessment keyed by a 32-byte site/basin ID.
+    WaterRiskAssessment(BytesN<32>),
+    /// Water stewardship programme record keyed by a 32-byte programme ID.
+    WaterStewardship(BytesN<32>),
+    /// CDP water disclosure record keyed by a 32-byte disclosure ID.
+    WaterDisclosure(BytesN<32>),
+    /// Running global water totals (accumulator updated on every write).
+    WaterTotals,
+    /// Water snapshot keyed by a 0-based ordinal.
+    WaterSnapshot(u32),
+    /// Total water snapshots taken.
+    WaterSnapshotCount,
 }
 
 #[contracterror]
@@ -329,6 +429,140 @@ pub enum ContractError {
     /// **Common cause**: `rollback_event` called with a version number beyond the stored history length.
     /// **Resolution**: Use `get_event_history` or `get_event_version_count` to discover valid versions.
     InvalidVersion = 33,
+
+    /// **Code 34**: The material passport for this ID already exists.
+    /// **Common cause**: `register_material_passport` called twice with the same material ID.
+    /// **Resolution**: Use a unique material ID per asset.
+    MaterialPassportAlreadyExists = 34,
+
+    /// **Code 35**: No material passport found for the given material ID.
+    /// **Common cause**: Querying or recording a loop event for an unregistered material.
+    /// **Resolution**: Call `register_material_passport` first.
+    MaterialPassportNotFound = 35,
+
+    /// **Code 36**: Invalid loop event type. Must be one of: recycle, reuse, repair, remanufacture, return, dispose.
+    /// **Common cause**: Caller supplied an unrecognised loop-event-type Symbol.
+    /// **Resolution**: Use a recognised loop event type Symbol.
+    InvalidLoopEventType = 36,
+
+    /// **Code 37**: Material flow quantity must be greater than zero.
+    /// **Common cause**: A zero-weight or zero-volume quantity was submitted.
+    /// **Resolution**: Provide a positive quantity in milligrams.
+    InvalidFlowQuantity = 37,
+
+    // ── LCA errors (codes 38–46) ─────────────────────────────────────────────
+
+    /// **Code 38**: An LCA profile for this product ID already exists.
+    /// **Common cause**: `register_lca_entry` called twice with the same product ID.
+    /// **Resolution**: Use a unique product ID per functional unit.
+    LcaProfileAlreadyExists = 38,
+
+    /// **Code 39**: No LCA profile found for the given product ID.
+    /// **Common cause**: `record_phase_impact` or `finalize_lca` called before `register_lca_entry`.
+    /// **Resolution**: Call `register_lca_entry` first.
+    LcaProfileNotFound = 39,
+
+    /// **Code 40**: Invalid lifecycle phase. Must be one of the seven recognised phase Symbols.
+    /// **Common cause**: Caller supplied an unrecognised phase Symbol.
+    /// **Resolution**: Use `raw_mat`, `mfg`, `transport`, `use`, `maint`, `eol`, or `recycling`.
+    InvalidLcaPhase = 40,
+
+    /// **Code 41**: Invalid impact category index (must be 0–7).
+    /// **Common cause**: Category index out of the defined 8-category set.
+    /// **Resolution**: Use indices 0 (GWP) through 7 (LU) as defined in the LCA documentation.
+    InvalidImpactCategory = 41,
+
+    /// **Code 42**: LCA profile is already finalized; no further phase impacts may be recorded.
+    /// **Common cause**: `record_phase_impact` called after `finalize_lca`.
+    /// **Resolution**: LCA profiles are immutable once finalized.
+    LcaAlreadyFinalized = 42,
+
+    /// **Code 43**: LCA profile has not been finalized yet; result is not available.
+    /// **Common cause**: `get_lca_profile` or `get_lca_uncertainty` called before `finalize_lca`.
+    /// **Resolution**: Call `finalize_lca` to lock in the aggregated result.
+    LcaNotFinalized = 43,
+
+    /// **Code 44**: Named normalization reference set not found.
+    /// **Common cause**: `normalize_impacts` called with a name not registered via `register_norm_ref`.
+    /// **Resolution**: Register a normalization reference set first with `register_norm_ref`.
+    LcaNormRefNotFound = 44,
+
+    /// **Code 45**: Named weighting scheme not found.
+    /// **Common cause**: `apply_weighting_scheme` called with a name not registered via `register_weighting_scheme`.
+    /// **Resolution**: Register the scheme first with `register_weighting_scheme`.
+    LcaWeightingSchemeNotFound = 45,
+
+    /// **Code 46**: Named LCA database reference not found.
+    /// **Common cause**: `get_lca_db_entry` called with an ID not registered via `register_lca_db_entry`.
+    /// **Resolution**: Register the database entry first.
+    LcaDbEntryNotFound = 46,
+
+    // ── Biodiversity errors (codes 47–55) ────────────────────────────────────
+
+    /// **Code 47**: Biodiversity impact record not found for the given event ID.
+    /// **Common cause**: `get_bio_impact` called before `record_bio_impact`.
+    /// **Resolution**: Ensure the supply-chain event has been linked to a biodiversity impact record first.
+    BioImpactNotFound = 47,
+
+    /// **Code 48**: Biodiversity offset record not found.
+    /// **Common cause**: `get_bio_offset` called with an unregistered offset ID.
+    /// **Resolution**: Register the offset via `register_bio_offset`.
+    BioOffsetNotFound = 48,
+
+    /// **Code 49**: Invalid land-use type symbol.
+    /// **Common cause**: Caller supplied an unrecognised land-use-type Symbol.
+    /// **Resolution**: Use one of the recognised types: `crop`, `pasture`, `forest`,
+    ///   `urban`, `wetland`, `water`, `barren`, or `protected`.
+    InvalidLandUseType = 49,
+
+    /// **Code 50**: Invalid ecosystem service category symbol.
+    /// **Common cause**: Caller supplied an unrecognised ecosystem service category.
+    /// **Resolution**: Use one of: `provision`, `regul`, `culture`, `support`.
+    InvalidEcoServiceCat = 50,
+
+    /// **Code 51**: Land area must be greater than zero (in square metres × 10⁻⁶, i.e. m² micro-units).
+    InvalidLandArea = 51,
+
+    /// **Code 52**: Offset quantity must be greater than zero.
+    InvalidOffsetQuantity = 52,
+
+    /// **Code 53**: Offset is already fully retired; no further retirement possible.
+    OffsetAlreadyRetired = 53,
+
+    /// **Code 54**: Retirement quantity exceeds remaining available balance.
+    OffsetRetirementExceedsBalance = 54,
+
+    /// **Code 55**: Species observation record not found.
+    SpeciesObservationNotFound = 55,
+
+    // ── Water Footprint errors (codes 56–63) ─────────────────────────────────
+
+    /// **Code 56**: Water footprint record not found for the given ID.
+    /// **Common cause**: `get_water_footprint` called before `record_water_footprint`.
+    WaterFootprintNotFound = 56,
+
+    /// **Code 57**: Water risk assessment not found for the given site ID.
+    /// **Common cause**: `get_water_risk_assessment` or `record_water_footprint` with unregistered site.
+    WaterRiskNotFound = 57,
+
+    /// **Code 58**: Water stewardship programme not found.
+    WaterStewardshipNotFound = 58,
+
+    /// **Code 59**: Water disclosure record not found.
+    WaterDisclosureNotFound = 59,
+
+    /// **Code 60**: Invalid water-use sector symbol.
+    /// **Resolution**: Use one of: `agri`, `indust`, `munici`, `energy`, `mining`.
+    InvalidWaterSector = 60,
+
+    /// **Code 61**: Water volume must be greater than zero (litres × 10⁻⁶ micro-units).
+    InvalidWaterVolume = 61,
+
+    /// **Code 62**: Water scarcity factor out of range (must be 0–100_000, i.e. 0–10.000×).
+    InvalidScarcityFactor = 62,
+
+    /// **Code 63**: CDP disclosure reporting year is invalid (must be > 2000).
+    InvalidDisclosureYear = 63,
 }
 
 #[contracttype]
@@ -469,6 +703,745 @@ pub struct TtlCleanupStats {
 }
 
 // ── Additional type definitions ──────────────────────────────────────────────
+
+// ── Circular Economy types ───────────────────────────────────────────────────
+
+/// Loop event types (encoded as a u32 discriminant for compact on-chain storage).
+///
+/// | Value | Symbol      | Description                                             |
+/// |-------|-------------|----------------------------------------------------------|
+/// | 0     | `recycle`   | Material sent to recycling process                       |
+/// | 1     | `reuse`     | Item used again without transformation                   |
+/// | 2     | `repair`    | Item repaired to extend its service life                 |
+/// | 3     | `remanuf`   | Product remanufactured to original specification         |
+/// | 4     | `return`    | Item returned to manufacturer / supplier                 |
+/// | 5     | `dispose`   | Material disposed (landfill, incineration)               |
+#[contracttype]
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct LoopEvent {
+    /// Sequential position within the material's loop history.
+    pub seq: u32,
+    /// Ledger timestamp when this loop event was recorded.
+    pub timestamp: u64,
+    /// Loop type discriminant: 0=recycle, 1=reuse, 2=repair, 3=remanuf, 4=return, 5=dispose.
+    pub loop_type: u32,
+    /// Mass of material in milligrams (avoids floating-point; divide by 1_000 for grams).
+    pub quantity_mg: u64,
+    /// Address of the actor recording this event (facility, logistics provider, etc.).
+    pub actor: Address,
+    /// Optional reference to another material that this flow feeds into (e.g., recycled output).
+    pub target_material_id: Option<BytesN<32>>,
+    /// Opaque metadata (e.g., batch ID, certification reference, GPS coordinates as bytes).
+    pub metadata: Bytes,
+}
+
+/// Material passport — the on-chain identity record for a physical asset.
+///
+/// Each unique asset (product, component, batch) gets exactly one passport.
+/// The passport stores intrinsic material properties and is updated by
+/// appending `LoopEvent`s via `record_loop_event`.
+#[contracttype]
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct MaterialPassport {
+    /// Content-addressed 32-byte ID (sha256 of owner || name || initial timestamp).
+    pub id: BytesN<32>,
+    /// Human-readable material name (up to 32 ASCII bytes, encoded in Bytes).
+    pub name: Bytes,
+    /// Material category (e.g., `plastic`, `metal`, `glass`, `textile`, `organic`).
+    pub category: Symbol,
+    /// Mass of virgin material in milligrams at time of registration.
+    pub virgin_mass_mg: u64,
+    /// Recyclability score: 0–10000 basis points (100.00 % = 10000).
+    pub recyclability_bps: u32,
+    /// Address of the entity registering this passport (manufacturer / data provider).
+    pub owner: Address,
+    /// Ledger timestamp of registration.
+    pub registered_at: u64,
+    /// Total mass recycled across all loop events, in milligrams (accumulator).
+    pub total_recycled_mg: u64,
+    /// Total mass reused across all loop events, in milligrams (accumulator).
+    pub total_reused_mg: u64,
+    /// Total mass repaired (kept in service) across all loop events, in milligrams (accumulator).
+    pub total_repaired_mg: u64,
+    /// Total mass remanufactured across all loop events, in milligrams (accumulator).
+    pub total_remanufactured_mg: u64,
+    /// Total mass disposed (waste) across all loop events, in milligrams (accumulator).
+    pub total_disposed_mg: u64,
+    /// Number of loop events recorded for this material.
+    pub loop_event_count: u32,
+}
+
+/// Circularity metrics snapshot — aggregates across all registered materials.
+///
+/// Computed on demand by `compute_circularity_score` and stored on-chain
+/// indexed by ledger sequence number, giving an auditable time-series.
+#[contracttype]
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct CircularitySnapshot {
+    /// Ledger sequence number when this snapshot was taken.
+    pub ledger_seq: u32,
+    /// Ledger timestamp when this snapshot was taken.
+    pub timestamp: u64,
+    /// Total number of material passports registered.
+    pub total_materials: u32,
+    /// Total virgin mass registered across all passports, in milligrams.
+    pub total_virgin_mass_mg: u64,
+    /// Total mass that completed a circular loop (recycle + reuse + repair + remanuf), mg.
+    pub total_circular_mass_mg: u64,
+    /// Total mass disposed (linear end-of-life), mg.
+    pub total_disposed_mass_mg: u64,
+    /// Material Circularity Indicator (MCI) in basis points (0–10000).
+    ///
+    /// Formula: `mci = 10000 * total_circular_mass_mg / (total_circular_mass_mg + total_disposed_mass_mg)`
+    /// Returns 0 when no flows have been recorded yet.
+    pub mci_bps: u32,
+    /// Weighted recycling rate in basis points (recycled / total_flow).
+    pub recycling_rate_bps: u32,
+    /// Weighted reuse rate in basis points (reused / total_flow).
+    pub reuse_rate_bps: u32,
+    /// Loop closure rate: fraction of passports that have at least one non-dispose loop event.
+    pub loop_closure_rate_bps: u32,
+    /// Total number of loop events recorded across all materials.
+    pub total_loop_events: u32,
+    /// Snapshot index (0-based ordinal, matches CircularitySnapshotCount - 1 after creation).
+    pub snapshot_index: u32,
+}
+
+/// Running aggregate totals (persisted to avoid O(N) scans on every snapshot).
+#[contracttype]
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct CircularityTotals {
+    pub total_materials: u32,
+    pub total_virgin_mass_mg: u64,
+    pub total_recycled_mg: u64,
+    pub total_reused_mg: u64,
+    pub total_repaired_mg: u64,
+    pub total_remanufactured_mg: u64,
+    pub total_disposed_mg: u64,
+    pub total_loop_events: u32,
+    /// Passports that have at least one non-dispose loop event.
+    pub materials_with_closed_loop: u32,
+}
+
+// ── Lifecycle Assessment (LCA) types ────────────────────────────────────────
+
+/// Lifecycle phase discriminants.
+///
+/// | Value | Symbol      | Phase name                      |
+/// |-------|-------------|----------------------------------|
+/// | 0     | `raw_mat`   | Raw material extraction          |
+/// | 1     | `mfg`       | Manufacturing & processing       |
+/// | 2     | `transport` | Transport & distribution         |
+/// | 3     | `use`       | Use phase (operation)            |
+/// | 4     | `maint`     | Maintenance & repair             |
+/// | 5     | `eol`       | End-of-life (disposal)           |
+/// | 6     | `recycling` | Recycling / recovery             |
+///
+/// The full cradle-to-grave scope covers phases 0–5; phases 0–6 give
+/// a cradle-to-cradle (closed-loop) scope.
+pub const LCA_PHASE_COUNT: u32 = 7;
+
+/// Impact category indices (ISO 14040/14044 mid-point categories).
+///
+/// All values are stored as fixed-point integers with an implicit scale
+/// of 1 × 10⁻⁶ (micro-units), so 1 kg CO₂-eq = 1_000_000 in storage.
+///
+/// | Index | Symbol | Unit            | Description                        |
+/// |-------|--------|-----------------|------------------------------------|
+/// | 0     | GWP    | kg CO₂-eq       | Global Warming Potential           |
+/// | 1     | AP     | kg SO₂-eq       | Acidification Potential            |
+/// | 2     | EP     | kg PO₄³⁻-eq     | Eutrophication Potential           |
+/// | 3     | ODP    | kg CFC-11-eq    | Ozone Depletion Potential          |
+/// | 4     | POCP   | kg C₂H₄-eq      | Photochem. Ozone Creation Potential|
+/// | 5     | ADP    | kg Sb-eq        | Abiotic Depletion Potential        |
+/// | 6     | WU     | m³              | Water Use                          |
+/// | 7     | LU     | m² · year       | Land Use                           |
+pub const LCA_CATEGORY_COUNT: u32 = 8;
+
+/// Per-phase impact vector — one value per impact category.
+///
+/// Values are fixed-point micro-units (`i64` to allow negative credits,
+/// e.g. avoided burdens from recycling).
+#[contracttype]
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct LcaPhaseImpact {
+    /// Lifecycle phase (0–6, see `LCA_PHASE_COUNT`).
+    pub phase: u32,
+    /// Impact values indexed by category (0–7, see `LCA_CATEGORY_COUNT`).
+    /// Fixed-point: divide by 1_000_000 to get SI units.
+    /// Index 0 = GWP, 1 = AP, 2 = EP, 3 = ODP, 4 = POCP, 5 = ADP, 6 = WU, 7 = LU.
+    pub values: Vec<i64>,
+    /// Actor that submitted this phase record.
+    pub submitter: Address,
+    /// Ledger timestamp of submission.
+    pub timestamp: u64,
+    /// Optional reference to an LCA database entry ID backing this data.
+    pub db_ref: Option<BytesN<32>>,
+    /// Opaque metadata (data source, methodology version, etc.).
+    pub metadata: Bytes,
+}
+
+/// LCA profile — the on-chain header for a product's lifecycle assessment.
+///
+/// Registered once per product / functional unit. Phase impacts are added
+/// via `record_phase_impact` and locked by calling `finalize_lca`.
+#[contracttype]
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct LcaProfile {
+    /// Content-addressed 32-byte product ID.
+    pub product_id: BytesN<32>,
+    /// Human-readable product name.
+    pub name: Bytes,
+    /// Functional unit description (e.g., "1 kg of product at factory gate").
+    pub functional_unit: Bytes,
+    /// Address that registered this profile.
+    pub owner: Address,
+    /// Ledger timestamp of registration.
+    pub registered_at: u64,
+    /// Whether all phases have been submitted and the result finalized.
+    pub finalized: bool,
+    /// Bitmask of phases that have been recorded (bit i = phase i submitted).
+    pub phase_mask: u32,
+    /// Optional link to the material passport of the underlying product.
+    pub material_passport_id: Option<BytesN<32>>,
+}
+
+/// Aggregated LCA result — computed by `finalize_lca` across all recorded phases.
+///
+/// Stores both the raw totals and (optionally) normalized/weighted results
+/// after calling `normalize_impacts` and `apply_weighting_scheme`.
+#[contracttype]
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct LcaResult {
+    /// Raw aggregated impact per category (fixed-point micro-units, summed across all phases).
+    pub totals: Vec<i64>,
+    /// Normalized impact per category (totals / normalization_ref × 1_000_000), or zeros.
+    pub normalized: Vec<i64>,
+    /// Weighted single score per category (normalized × weight_bps / 10000), or zeros.
+    pub weighted: Vec<i64>,
+    /// Sum of all weighted values = single-score LCA result (micro-units).
+    pub single_score: i64,
+    /// Name of the normalization reference set used (empty = not yet normalized).
+    pub norm_ref_name: Bytes,
+    /// Name of the weighting scheme used (empty = not yet weighted).
+    pub weighting_scheme_name: Bytes,
+    /// Ledger timestamp when `finalize_lca` was called.
+    pub finalized_at: u64,
+}
+
+/// Uncertainty bounds for an LCA result, computed via interval arithmetic.
+///
+/// Each impact category carries a `[lo, hi]` interval derived from the
+/// per-phase uncertainty coefficients (see `record_phase_impact` / `finalize_lca`).
+/// The model applies a symmetric percentage uncertainty (`uncertainty_pct_bps`)
+/// from each phase, then propagates addition intervals across all phases.
+///
+/// Fixed-point: divide all values by 1_000_000 to get SI units.
+#[contracttype]
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct LcaUncertainty {
+    /// Lower bound per impact category (fixed-point micro-units).
+    pub lo: Vec<i64>,
+    /// Upper bound per impact category (fixed-point micro-units).
+    pub hi: Vec<i64>,
+    /// Coefficient of variation in basis points used globally (0 = no uncertainty).
+    pub cv_bps: u32,
+    /// Ledger timestamp when this uncertainty record was computed.
+    pub computed_at: u64,
+}
+
+/// Normalization reference set (one value per impact category).
+///
+/// Reference values represent per-person-equivalent annual burdens
+/// (e.g., CML 2016, ReCiPe H, EF 3.1). Fixed-point micro-units.
+/// A reference value of 0 for a category means "skip normalization" for that
+/// category (result stays as raw total).
+#[contracttype]
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct LcaNormRef {
+    /// Short name used as the storage key (e.g., `cml2016`).
+    pub name: Bytes,
+    /// Reference values per category, fixed-point micro-units.
+    /// Length must equal `LCA_CATEGORY_COUNT` (8).
+    pub refs: Vec<i64>,
+    /// Owner who registered this reference set.
+    pub owner: Address,
+}
+
+/// Weighting scheme (one weight in basis points per impact category).
+///
+/// Weights sum to 10000 bps (100%). Commonly used schemes:
+/// CML 2016 equal-weight, ReCiPe H, EF 3.1.
+#[contracttype]
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct LcaWeightingScheme {
+    /// Short name (e.g., `ef31`, `recipe_h`).
+    pub name: Bytes,
+    /// Weight per category in basis points. Must sum to 10000, length = 8.
+    pub weights_bps: Vec<u32>,
+    /// Owner who registered this scheme.
+    pub owner: Address,
+}
+
+/// LCA database reference entry.
+///
+/// Provides a lightweight on-chain anchor for an externally maintained LCA
+/// dataset (ecoinvent, GaBi, OpenLCA, etc.). Phase impacts recorded with a
+/// `db_ref` can be validated against this entry by off-chain consumers.
+#[contracttype]
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct LcaDbEntry {
+    /// 32-byte content-addressed ID for this database record.
+    pub id: BytesN<32>,
+    /// Database name (e.g., `ecoinvent`, `gabi`).
+    pub db_name: Bytes,
+    /// Dataset version string (e.g., `3.10`).
+    pub version: Bytes,
+    /// Activity / process name within the database.
+    pub activity: Bytes,
+    /// Geography code (e.g., `GLO`, `RER`, `US`).
+    pub geography: Bytes,
+    /// Address of the data provider who registered this entry.
+    pub provider: Address,
+    /// Ledger timestamp of registration.
+    pub registered_at: u64,
+}
+
+// ── Biodiversity types ───────────────────────────────────────────────────────
+
+/// Land-use type discriminants (IUCN / GLOBIO convention).
+///
+/// | Value | Symbol      | Description                                   |
+/// |-------|-------------|-----------------------------------------------|
+/// | 0     | `crop`      | Annual/permanent cropland                     |
+/// | 1     | `pasture`   | Managed grassland / livestock grazing         |
+/// | 2     | `forest`    | Natural or semi-natural forest                |
+/// | 3     | `urban`     | Urban / built-up area                         |
+/// | 4     | `wetland`   | Wetlands (freshwater/coastal/inland)          |
+/// | 5     | `water`     | Open water body                               |
+/// | 6     | `barren`    | Barren / rock / desert (very low biodiversity)|
+/// | 7     | `protected` | Formally protected area (IUCN PA categories)  |
+pub const BIO_LAND_USE_COUNT: u32 = 8;
+
+/// Ecosystem service category discriminants (TEEB / CICES classification).
+///
+/// | Value | Symbol     | Description                                              |
+/// |-------|------------|----------------------------------------------------------|
+/// | 0     | `provision`| Provisioning services (food, water, raw materials)       |
+/// | 1     | `regul`    | Regulating services (climate, flood, water purification) |
+/// | 2     | `culture`  | Cultural services (recreation, tourism, spiritual)       |
+/// | 3     | `support`  | Supporting services (soil formation, nutrient cycling)   |
+pub const BIO_ECO_SERVICE_COUNT: u32 = 4;
+
+/// Biodiversity impact record — linked to a supply-chain event.
+///
+/// Captures the footprint of a single operational event (site clearing,
+/// agriculture, construction, logistics) across land-use change, species
+/// richness loss, and ecosystem service degradation.
+///
+/// All area values are in **square-metre micro-units** (m² × 10⁻⁶).
+/// Species richness loss is in **MSA-hectare micro-units** (MSA·ha × 10⁻⁶),
+/// where MSA = Mean Species Abundance relative to undisturbed habitat (0–1).
+/// Ecosystem service values are in **USD-cent micro-units** (US¢ × 10⁻⁶) for
+/// the total annual loss.
+#[contracttype]
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct BioImpact {
+    /// 32-byte content-addressed ID (sha256 of event_ref || actor || timestamp).
+    pub id: BytesN<32>,
+    /// Reference to the supply-chain event driving this impact (e.g., an audit event ID).
+    pub event_ref: BytesN<32>,
+    /// Actor recording this impact (supplier, auditor, third-party assessor).
+    pub actor: Address,
+    /// Ledger timestamp of recording.
+    pub timestamp: u64,
+    /// Land-use type at the impacted site (discriminant 0–7).
+    pub land_use_type: u32,
+    /// Total land area affected in m² micro-units (> 0).
+    pub area_m2_micro: u64,
+    /// Species richness loss in MSA·ha micro-units (0 = no loss).
+    /// MSA·ha = area_ha × (1 − MSA_after / MSA_before)
+    pub msa_loss_micro: u64,
+    /// Per-ecosystem-service annual value loss in USD-cent micro-units (4 values).
+    /// Index: 0=provisioning, 1=regulating, 2=cultural, 3=supporting.
+    pub eco_service_loss: Vec<i64>,
+    /// Optional geographic coordinates encoded as UTF-8 bytes (e.g., "lat,lon" decimal string).
+    pub location: Bytes,
+    /// Optional IUCN threat category for the primary affected species/habitat.
+    /// Encoded as bytes (e.g., b"CR", b"EN", b"VU", b"NT", b"LC").
+    pub iucn_threat: Bytes,
+    /// Opaque metadata (certification reference, assessment methodology, etc.).
+    pub metadata: Bytes,
+}
+
+/// Biodiversity offset record — tracks nature-based compensation credits.
+///
+/// Supports voluntary biodiversity credits (VBCs), biodiversity net gain (BNG)
+/// units, mitigation banking credits, and any other credit scheme.
+/// All quantities are in **MSA·ha micro-units** (same scale as `BioImpact.msa_loss_micro`).
+#[contracttype]
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct BioOffset {
+    /// 32-byte content-addressed offset ID.
+    pub id: BytesN<32>,
+    /// Short name of the offset scheme (e.g., `vbc`, `bng`, `mitbank`).
+    pub scheme: Bytes,
+    /// Address of the entity that issued or registered this offset.
+    pub issuer: Address,
+    /// Total credit quantity in MSA·ha micro-units.
+    pub total_micro: u64,
+    /// Quantity retired (applied to offset actual impacts) in MSA·ha micro-units.
+    pub retired_micro: u64,
+    /// Ledger timestamp of registration.
+    pub registered_at: u64,
+    /// Expiry timestamp (0 = no expiry).
+    pub expires_at: u64,
+    /// Optional reference to a site/project whose ecosystem services back this offset.
+    pub eco_service_ref: Option<BytesN<32>>,
+    /// Opaque metadata (project location, registry URL, certificate hash, etc.).
+    pub metadata: Bytes,
+}
+
+/// Ecosystem service valuation record for a project or geographic site.
+///
+/// Provides an annual monetary valuation of the site's four service categories,
+/// enabling offset verification and nature-positive accounting.
+#[contracttype]
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct EcoServiceRecord {
+    /// 32-byte content-addressed site/project ID.
+    pub id: BytesN<32>,
+    /// Human-readable project name.
+    pub name: Bytes,
+    /// Address of the party registering this valuation.
+    pub owner: Address,
+    /// Ledger timestamp of registration.
+    pub registered_at: u64,
+    /// Total site area in m² micro-units.
+    pub area_m2_micro: u64,
+    /// Annual value per ecosystem service in USD-cent micro-units (4 values, CICES order).
+    /// Index: 0=provisioning, 1=regulating, 2=cultural, 3=supporting.
+    pub annual_values: Vec<i64>,
+    /// Land-use type at this site (discriminant 0–7).
+    pub land_use_type: u32,
+    /// Opaque metadata (SEEA reference, assessor, methodology version).
+    pub metadata: Bytes,
+}
+
+/// Species observation record — links a supply-chain event to a direct
+/// species sighting or survey result.
+#[contracttype]
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct SpeciesObservation {
+    /// 32-byte content-addressed observation ID.
+    pub id: BytesN<32>,
+    /// Reference event ID (audit log event this observation relates to).
+    pub event_ref: BytesN<32>,
+    /// Species common name (UTF-8 bytes).
+    pub species_name: Bytes,
+    /// IUCN taxonomic code or identifier (UTF-8 bytes, e.g., b"Panthera tigris").
+    pub species_code: Bytes,
+    /// IUCN Red List category bytes (e.g., b"EN").
+    pub iucn_category: Bytes,
+    /// Individual count observed (0 = presence-only record).
+    pub count: u32,
+    /// Impact type: 0=positive (sighted), 1=negative (mortality/displacement), 2=neutral.
+    pub impact_direction: u32,
+    /// Actor recording the observation.
+    pub observer: Address,
+    /// Ledger timestamp.
+    pub timestamp: u64,
+    /// Opaque metadata (survey method, GPS, photo hash, etc.).
+    pub metadata: Bytes,
+}
+
+/// Running global biodiversity totals — updated atomically on every write.
+#[contracttype]
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct BioTotals {
+    /// Total number of biodiversity impact records registered.
+    pub total_impacts: u32,
+    /// Total land area affected across all impacts, m² micro-units.
+    pub total_area_m2_micro: u64,
+    /// Total MSA·ha lost across all impacts.
+    pub total_msa_loss_micro: u64,
+    /// Total ecosystem service value lost, USD-cent micro-units (sum across all categories).
+    pub total_eco_loss_micro: i64,
+    /// Total biodiversity offset credits registered, MSA·ha micro-units.
+    pub total_offset_micro: u64,
+    /// Total offset credits retired, MSA·ha micro-units.
+    pub total_retired_micro: u64,
+    /// Total species observations recorded.
+    pub total_observations: u32,
+    /// Total ecosystem service records registered.
+    pub total_eco_records: u32,
+}
+
+/// Nature-positive snapshot — point-in-time biodiversity accounting.
+///
+/// Records the net biodiversity position (impact − offset balance) and
+/// key performance indicators for nature-positive reporting frameworks
+/// (TNFD, GBF Target 15, EU CSRD).
+#[contracttype]
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct BioSnapshot {
+    /// 0-based snapshot ordinal.
+    pub index: u32,
+    /// Ledger sequence when this snapshot was taken.
+    pub ledger_seq: u32,
+    /// Ledger timestamp.
+    pub timestamp: u64,
+    /// Total impacts recorded at snapshot time.
+    pub total_impacts: u32,
+    /// Total MSA·ha lost across all recorded impacts (micro-units).
+    pub total_msa_loss_micro: u64,
+    /// Total MSA·ha offset credits registered (micro-units).
+    pub total_offset_micro: u64,
+    /// Total MSA·ha offset credits retired (micro-units).
+    pub total_retired_micro: u64,
+    /// Net MSA position: retired_micro − total_msa_loss_micro (signed).
+    /// Positive = nature-positive; negative = net biodiversity debt.
+    pub net_msa_micro: i64,
+    /// Nature-positive indicator in basis points.
+    /// `nature_positive_bps = (retired_micro × 10_000) / total_msa_loss_micro`
+    /// Returns 10_000 (100%) when losses = 0 (no impact recorded).
+    pub nature_positive_bps: u32,
+    /// Offset coverage ratio: retired / total_msa_loss (bps, capped at 10000).
+    pub offset_coverage_bps: u32,
+    /// Total ecosystem service loss at snapshot (USD-cent micro-units).
+    pub total_eco_loss_micro: i64,
+    /// Total species observations at snapshot.
+    pub total_observations: u32,
+}
+
+// ── Water Footprint types ────────────────────────────────────────────────────
+
+/// Water-use sector discriminants (aligned with AQUASTAT / WRI Aqueduct categories).
+///
+/// | Value | Symbol   | Description                                      |
+/// |-------|----------|--------------------------------------------------|
+/// | 0     | `agri`   | Agriculture (irrigation, livestock)              |
+/// | 1     | `indust` | Industrial processes (manufacturing, chemicals)  |
+/// | 2     | `munici` | Municipal / domestic supply                      |
+/// | 3     | `energy` | Thermoelectric cooling and hydropower            |
+/// | 4     | `mining` | Mining and quarrying                             |
+pub const WATER_SECTOR_COUNT: u32 = 5;
+
+/// Water footprint record linked to a supply-chain event.
+///
+/// Tracks four complementary water accounting measures per ISO 14046 /
+/// Water Footprint Network (WFN) standard:
+///
+/// * **Blue water** — surface/groundwater consumed (irrigation, cooling, process).
+/// * **Green water** — rainwater consumed by crops or vegetation (evapotranspiration).
+/// * **Grey water** — freshwater required to dilute pollution to acceptable quality.
+/// * **Scarcity-weighted blue water** — blue water × local scarcity factor (WSI).
+///
+/// All volumes are in **litre micro-units** (L × 10⁻⁶). Divide by 1 000 000 for litres,
+/// by 1 000 000 000 for cubic metres.
+///
+/// The scarcity factor (`scarcity_factor_ppb`) is the Water Stress Index (WSI) in
+/// parts-per-billion (0 = no stress, 100 000 = maximum, i.e. 0.000–0.100 dimensionless).
+/// Scarcity-weighted volume: `blue_L_micro × scarcity_factor_ppb / 1 000 000`.
+#[contracttype]
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct WaterFootprint {
+    /// Content-addressed 32-byte ID: sha256(event_ref || actor_strkey || timestamp_le64).
+    pub id: BytesN<32>,
+    /// Reference to the originating supply-chain audit event.
+    pub event_ref: BytesN<32>,
+    /// Actor recording this footprint.
+    pub actor: Address,
+    /// Ledger timestamp.
+    pub timestamp: u64,
+    /// Water-use sector discriminant (0–4).
+    pub sector: u32,
+    /// Blue water consumed, L × 10⁻⁶.
+    pub blue_L_micro: u64,
+    /// Green water consumed, L × 10⁻⁶.
+    pub green_L_micro: u64,
+    /// Grey water footprint, L × 10⁻⁶.
+    pub grey_L_micro: u64,
+    /// Water Stress Index at source basin (0–100 000 ppb; 0 = no stress).
+    pub scarcity_factor_ppb: u32,
+    /// Scarcity-weighted blue water: blue_L_micro × scarcity_factor_ppb / 1 000 000.
+    pub scarcity_weighted_L_micro: u64,
+    /// Optional reference to the water risk assessment for the source basin.
+    pub risk_assessment_ref: Option<BytesN<32>>,
+    /// Optional reference to an active stewardship programme at this site.
+    pub stewardship_ref: Option<BytesN<32>>,
+    /// ISO 3166-1 alpha-2 country code bytes (e.g., b"IN").
+    pub country: Bytes,
+    /// HydroSHEDS / HydroBASINS basin identifier (UTF-8, e.g., b"4050017220").
+    pub basin_id: Bytes,
+    /// Opaque metadata (measurement method, data quality, etc.).
+    pub metadata: Bytes,
+}
+
+/// Water risk assessment for a geographic basin or operational site.
+///
+/// Aligned with WRI Aqueduct (overall water risk, quantity, quality, regulatory/reputational)
+/// and WWF Water Risk Filter. All scores are in basis points (0–10 000).
+#[contracttype]
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct WaterRiskAssessment {
+    /// 32-byte content-addressed site/basin ID.
+    pub id: BytesN<32>,
+    /// Human-readable site or basin name.
+    pub name: Bytes,
+    /// Address of the entity registering this assessment.
+    pub assessor: Address,
+    /// Ledger timestamp of registration.
+    pub registered_at: u64,
+    /// Overall water risk score (WRI Aqueduct composite), 0–10 000 bps.
+    pub overall_risk_bps: u32,
+    /// Quantity risk sub-score (drought, depletion, variability), 0–10 000 bps.
+    pub quantity_risk_bps: u32,
+    /// Quality risk sub-score (pollution, untreated wastewater), 0–10 000 bps.
+    pub quality_risk_bps: u32,
+    /// Regulatory & reputational risk, 0–10 000 bps.
+    pub regulatory_risk_bps: u32,
+    /// Water Stress Index (WSI) at this location (0–100 000 ppb).
+    pub wsi_ppb: u32,
+    /// Country code bytes (ISO 3166-1 alpha-2).
+    pub country: Bytes,
+    /// HydroBASINS basin ID bytes.
+    pub basin_id: Bytes,
+    /// Assessment tool/methodology reference (e.g., b"aqueduct4", b"wwf_wrf").
+    pub methodology: Bytes,
+    /// Opaque metadata.
+    pub metadata: Bytes,
+}
+
+/// Water stewardship programme record.
+///
+/// Captures participation in site-level or basin-level stewardship
+/// schemes (Alliance for Water Stewardship AWS, CEO Water Mandate, etc.).
+#[contracttype]
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct WaterStewardship {
+    /// 32-byte content-addressed programme ID.
+    pub id: BytesN<32>,
+    /// Programme name (e.g., b"aws_core", b"ceo_mandate").
+    pub programme: Bytes,
+    /// Address of the participating entity.
+    pub participant: Address,
+    /// Ledger timestamp of registration.
+    pub registered_at: u64,
+    /// Programme start date as a Unix timestamp (0 = not specified).
+    pub start_ts: u64,
+    /// Programme end / target date (0 = ongoing).
+    pub end_ts: u64,
+    /// Water reduction target in L × 10⁻⁶ (absolute target; 0 = no explicit target).
+    pub target_reduction_L_micro: u64,
+    /// Water reduction achieved to date in L × 10⁻⁶.
+    pub achieved_reduction_L_micro: u64,
+    /// Optional reference to the basin risk assessment backing this programme.
+    pub risk_assessment_ref: Option<BytesN<32>>,
+    /// Opaque metadata (certifier, audit date, certificate hash).
+    pub metadata: Bytes,
+}
+
+/// CDP Water Disclosure record.
+///
+/// Covers the key quantitative fields from CDP Water Security questionnaire
+/// (W1–W8 sections). All volumes in L × 10⁻⁶.
+#[contracttype]
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct WaterDisclosure {
+    /// 32-byte content-addressed disclosure ID.
+    pub id: BytesN<32>,
+    /// Reporting organisation address.
+    pub organisation: Address,
+    /// Calendar year of this disclosure (e.g., 2025).
+    pub reporting_year: u32,
+    /// Ledger timestamp when the disclosure was recorded.
+    pub recorded_at: u64,
+    // ── W1: Water withdrawal ──
+    /// Total freshwater withdrawal, L × 10⁻⁶ (CDP W1.2a).
+    pub total_withdrawal_L_micro: u64,
+    // ── W2: Water consumption ──
+    /// Total water consumed (not returned), L × 10⁻⁶ (CDP W2.1).
+    pub total_consumption_L_micro: u64,
+    // ── W3: Water discharge ──
+    /// Total water discharged, L × 10⁻⁶ (CDP W3.1).
+    pub total_discharge_L_micro: u64,
+    // ── W4: Water data quality ──
+    /// Percentage of water data estimated vs. metered, 0–10 000 bps (CDP W4).
+    pub estimated_data_pct_bps: u32,
+    // ── W5: Water targets ──
+    /// Absolute reduction target relative to base year, L × 10⁻⁶ (CDP W5.1).
+    pub reduction_target_L_micro: u64,
+    // ── W6: Water risks ──
+    /// Number of sites in water-stressed areas (CDP W6.2).
+    pub sites_in_stressed_areas: u32,
+    // ── W7: Accounting ──
+    /// Scarcity-weighted total water use across all recorded footprints, L × 10⁻⁶.
+    pub scarcity_weighted_total_L_micro: u64,
+    // ── W8: Targets achieved ──
+    /// Reduction achieved since base year, L × 10⁻⁶ (CDP W8.1).
+    pub reduction_achieved_L_micro: u64,
+    /// Opaque metadata (CDP submission ID, base year, etc.).
+    pub metadata: Bytes,
+}
+
+/// Running global water totals — updated atomically on every write.
+#[contracttype]
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct WaterTotals {
+    /// Total water footprint records registered.
+    pub total_footprints: u32,
+    /// Cumulative blue water consumed, L × 10⁻⁶.
+    pub total_blue_L_micro: u64,
+    /// Cumulative green water consumed, L × 10⁻⁶.
+    pub total_green_L_micro: u64,
+    /// Cumulative grey water footprint, L × 10⁻⁶.
+    pub total_grey_L_micro: u64,
+    /// Cumulative scarcity-weighted blue water, L × 10⁻⁶.
+    pub total_scarcity_weighted_L_micro: u64,
+    /// Total water risk assessments registered.
+    pub total_risk_assessments: u32,
+    /// Total stewardship programmes registered.
+    pub total_stewardship_programmes: u32,
+    /// Total CDP disclosures recorded.
+    pub total_disclosures: u32,
+}
+
+/// Water snapshot — point-in-time aggregation of water accounting metrics.
+///
+/// Created by `compute_water_snapshot`; stored on-chain for an auditable time-series.
+/// Aligns with TNFD freshwater metrics, GRI 303 (Water and Effluents),
+/// and CDP Water Security W1–W8.
+#[contracttype]
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct WaterSnapshot {
+    /// 0-based ordinal.
+    pub index: u32,
+    /// Ledger sequence at snapshot time.
+    pub ledger_seq: u32,
+    /// Ledger timestamp.
+    pub timestamp: u64,
+    /// Total footprint records at snapshot time.
+    pub total_footprints: u32,
+    /// Total blue water (L × 10⁻⁶).
+    pub total_blue_L_micro: u64,
+    /// Total green water (L × 10⁻⁶).
+    pub total_green_L_micro: u64,
+    /// Total grey water (L × 10⁻⁶).
+    pub total_grey_L_micro: u64,
+    /// Total scarcity-weighted blue water (L × 10⁻⁶).
+    pub total_scarcity_weighted_L_micro: u64,
+    /// Total water footprint (blue + green + grey), L × 10⁻⁶.
+    pub total_water_footprint_L_micro: u64,
+    /// Scarcity ratio: scarcity_weighted / blue × 10 000 (bps). 0 when no blue water.
+    pub scarcity_ratio_bps: u32,
+    /// Blue-water fraction of total footprint, bps.
+    pub blue_fraction_bps: u32,
+    /// Total risk assessments at snapshot.
+    pub total_risk_assessments: u32,
+    /// Total stewardship programmes at snapshot.
+    pub total_stewardship_programmes: u32,
+}
 
 #[contract]
 pub struct AuditLedger;
@@ -3642,38 +4615,95 @@ impl AuditLedger {
             .unwrap_or(1000)
     }
 
-    /// Default nonce max value (issue #214). u32::MAX = effectively no exhaustion.
-    fn default_nonce_max_value(env: &Env) -> u32 {
+    // ── Conflict minerals reporting (Dodd-Frank §1502) ──────────────────
+
+    /// Record a mineral allocation to product and smelter(s). Owner-only.
+    ///
+    /// Emits a `("cm", "alloc")` event with payload `(submitter, allocation_id, mineral)`.
+    pub fn record_mineral_allocation(
+        env: Env,
+        caller: Address,
+        allocation: MineralAllocation,
+    ) -> u32 {
+        caller.require_auth();
+        Self::require_owner(&env, &caller);
+
+        let key = DataKey::CMAllocation(allocation.allocation_id.clone());
+        if env.storage().instance().has(&key) {
+            panic_with_error!(&env, ContractError::CMAllocationExists);
+        }
+
+        let count: u32 = env
+            .storage()
+            .instance()
+            .get(&DataKey::CMAllocationCount)
+            .unwrap_or(0u32);
+
+        env.storage().instance().set(&key, &allocation);
         env.storage()
             .instance()
-            .get(&DataKey::DefaultNonceMaxValue)
-            .unwrap_or(u32::MAX)
+            .set(&DataKey::CMAllocationCount, &(count + 1));
+
+        env.events().publish(
+            (symbol_short!("cm"), symbol_short!("alloc")),
+            (caller, allocation.allocation_id.clone(), allocation.mineral.clone()),
+        );
+
+        count
     }
-}
 
-#[cfg(test)]
-mod test;
+    /// Retrieve a mineral allocation by allocation_id.
+    pub fn get_mineral_allocation(env: Env, allocation_id: Symbol) -> MineralAllocation {
+        env.storage()
+            .instance()
+            .get(&DataKey::CMAllocation(allocation_id.clone()))
+            .unwrap_or_else(|| panic_with_error!(&env, ContractError::CMAllocationNotFound))
+    }
 
-#[cfg(test)]
-mod fuzz;
+    /// Return total mineral allocations recorded.
+    pub fn cm_allocation_count(env: Env) -> u32 {
+        env.storage()
+            .instance()
+            .get(&DataKey::CMAllocationCount)
+            .unwrap_or(0u32)
+    }
 
-#[cfg(test)]
-mod regression_tests;
+    /// Register a smelter in the conflict minerals registry. Owner-only.
+    pub fn record_smelter(env: Env, caller: Address, smelter: Smelter) -> u32 {
+        caller.require_auth();
+        Self::require_owner(&env, &caller);
 
-#[cfg(test)]
-mod boundary_tests;
+        let key = DataKey::CMSmelter(smelter.smelter_id.clone());
+        if env.storage().instance().has(&key) {
+            panic_with_error!(&env, ContractError::CMSmelterExists);
+        }
 
-#[cfg(test)]
-mod cross_contract_tests;
+        let count: u32 = env
+            .storage()
+            .instance()
+            .get(&DataKey::CMSmelterCount)
+            .unwrap_or(0u32);
 
-#[cfg(test)]
-mod fee_tests;
+        env.storage().instance().set(&key, &smelter);
+        env.storage()
+            .instance()
+            .set(&DataKey::CMSmelterCount, &(count + 1));
 
-#[cfg(test)]
-mod upgrade_tests;
+        env.events().publish(
+            (symbol_short!("cm"), symbol_short!("smelter")),
+            (caller, smelter.smelter_id.clone(), smelter.mineral_type.clone()),
+        );
 
-#[cfg(test)]
-mod security_tests;
+        count
+    }
+
+    /// Retrieve a smelter by smelter_id.
+    pub fn get_smelter(env: Env, smelter_id: Symbol) -> Smelter {
+        env.storage()
+            .instance()
+            .get(&DataKey::CMSmelter(smelter_id.clone()))
+            .unwrap_or_else(|| panic_with_error!(&env, ContractError::CMSmelterNotFound))
+    }
 
 #[cfg(test)]
 mod comprehensive_fuzz;
