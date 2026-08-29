@@ -1,0 +1,35 @@
+{
+  "consumer": {
+    "name": "BridgeRelayer"
+  },
+  "provider": {
+    "name": "AuditLedgerRestAPI"
+  },
+  "interactions": [
+    {
+      "description": "a request to get bridge stats and metrics",
+      "providerState": "system is healthy and operational",
+      "request": {
+        "method": "GET",
+        "path": "/metrics"
+      },
+      "response": {
+        "status": 200,
+        "headers": {
+          "Content-Type": "application/json; charset=utf-8"
+        },
+        "body": {
+          "status": "healthy",
+          "metrics": {
+            "uptime": 3600
+          }
+        }
+      }
+    }
+  ],
+  "metadata": {
+    "pactSpecification": {
+      "version": "2.0.0"
+    }
+  }
+}
