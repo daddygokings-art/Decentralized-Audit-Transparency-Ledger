@@ -42,6 +42,12 @@ pub mod esg_reporting;
 // Data retention, legal hold, GDPR erasure, and the immutable operational audit log.
 pub mod data_retention;
 
+// On-chain inverted indexes for efficient event querying (Issue #388).
+pub mod inverted_index;
+
+#[cfg(test)]
+mod inverted_index_tests;
+
 /// Zero/invalid Stellar address (all zeroes) used to reject `NewOwnerIsZero`.
 const NULL_ACCOUNT: &str = "GAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAWHF";
 
@@ -4782,6 +4788,7 @@ impl AuditLedger {
             .get(&DataKey::CMSmelter(smelter_id.clone()))
             .unwrap_or_else(|| panic_with_error!(&env, ContractError::CMSmelterNotFound))
     }
+}  // end impl AuditLedger
 
 #[cfg(test)]
 mod comprehensive_fuzz;
