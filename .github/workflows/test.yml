@@ -1,5 +1,9 @@
 name: CI
 
+# This workflow runs fast build/lint/test checks.
+# Coverage reporting (line/branch thresholds, PR comments, trends) is handled
+# by the dedicated coverage workflow: .github/workflows/coverage.yml  (#495)
+
 permissions: {}
 
 on:
@@ -34,6 +38,32 @@ jobs:
 
       - name: Run tests
         run: cargo test
+
+      # Quick coverage gate: reuse the pre-generated summary if the coverage
+      # workflow has already run (artefact available). On PRs this is a
+      # lightweight signal only — detailed threshold enforcement with per-module
+      # breakdown and PR comment is handled by .github/workflows/coverage.yml.
+      - name: Coverage summary (informational)
+        if: always()
+        run: |
+          # Extract quick summary from the JSON produced by the coverage job
+          # (if present from a previous workflow run or local run).
+          if [ -f coverage/coverage-summary.json ]; then
+            python3 -c "
+import json
+data = json.load(open('coverage/coverage-summary.json'))
+totals = data.get('data', [{}])[0].get('totals', {})
+line_pct   = totals.get('lines',    {}).get('percent', 0.0)
+branch_pct = totals.get('branches', {}).get('percent', 0.0)
+print(f'Line coverage:   {line_pct:.2f}%')
+print(f'Branch coverage: {branch_pct:.2f}%')
+print('(Full coverage report: .github/workflows/coverage.yml)')
+" || true
+          else
+            echo "Coverage summary not available in this run."
+            echo "Run scripts/coverage.sh locally or see the Coverage workflow"
+            echo "(.github/workflows/coverage.yml) for full threshold reporting."
+          fi
 
       - name: Run cargo-audit for dependency vulnerabilities
         run: cargo install cargo-audit && cargo audit --deny warnings
