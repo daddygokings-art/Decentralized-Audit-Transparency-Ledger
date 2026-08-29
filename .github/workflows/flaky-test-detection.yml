@@ -1,0 +1,199 @@
+name: Flaky Test Detection
+
+permissions:
+  contents: read
+  actions: read
+
+on:
+  schedule:
+    - cron: '0 6 * * 1'
+  workflow_dispatch:
+  push:
+    branches: [master]
+  pull_request:
+    branches: [master]
+
+jobs:
+  detect-flaky-tests:
+    name: Detect and Quarantine Flaky Tests
+    runs-on: ubuntu-latest
+    permissions:
+      contents: read
+      issues: write
+    steps:
+      - uses: actions/checkout@v6
+        with:
+          persist-credentials: false
+
+      - name: Install Rust toolchain
+        uses: dtolnay/rust-toolchain@stable
+
+      - name: Cache flaky test history
+        uses: actions/cache@v4
+        with:
+          path: .flaky-test-history
+          key: flaky-test-history-${{ github.run_id }}
+          restore-keys: |
+            flaky-test-history-
+
+      - name: Download previous quarantine file
+        uses: actions/download-artifact@v4
+        with:
+          name: quarantine-file
+          path: tests/
+        continue-on-error: true
+
+      - name: Run flaky test detection
+        id: detection
+        run: |
+          chmod +x scripts/flaky_test_detector.sh
+          MAX_RUNS=5 FLAKY_THRESHOLD=0.2 ./scripts/flaky_test_detector.sh detect 2>&1 | tee flaky-detection-output.txt
+          echo "exit_code=${PIPESTATUS[0]}" >> $GITHUB_OUTPUT
+
+      - name: Check quarantined tests
+        if: github.event_name == 'schedule'
+        run: |
+          ./scripts/flaky_test_detector.sh check 2>&1 | tee flaky-check-output.txt
+
+      - name: Generate report
+        if: always()
+        run: |
+          ./scripts/flaky_test_detector.sh report
+
+      - name: Upload flaky test history
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: flaky-test-history
+          path: .flaky-test-history/
+          retention-days: 90
+
+      - name: Upload quarantine file
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: quarantine-file
+          path: tests/quarantine.json
+          retention-days: 30
+
+      - name: Upload detection output
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: flaky-detection-output
+          path: flaky-detection-output.txt
+          retention-days: 30
+
+      - name: Create issue for newly quarantined tests
+        if: failure() || steps.detection.outputs.exit_code != '0'
+        uses: actions/github-script@v7
+        with:
+          script: |
+            const fs = require('fs');
+            let output = '';
+            try {
+              output = fs.readFileSync('flaky-detection-output.txt', 'utf8');
+            } catch (e) {
+              output = 'No output file found';
+            }
+
+            const quarantinedMatch = output.match(/QUARANTINED: (.+)/g);
+            const quarantinedTests = quarantinedMatch ? quarantinedMatch.map(m => m.replace('QUARANTINED: ', '')) : [];
+
+            if (quarantinedTests.length > 0) {
+              const body = `## Flaky Test Detection Report
+
+              The following tests have been quarantined due to flaky behavior:
+
+              ${quarantinedTests.map(t => `- \`${t}\``).join('\n')}
+
+              Please investigate and fix the underlying issues. See the [flaky test history artifact](${context.serverUrl}/${context.repo.owner}/${context.repo.repo}/actions/runs/${context.runId}) for details.
+
+              cc: @daddygokings-art`;
+
+              await github.rest.issues.create({
+                owner: context.repo.owner,
+                repo: context.repo.repo,
+                title: `[Flaky Test] ${quarantinedTests.length} test(s) quarantined on ${new Date().toISOString().split('T')[0]}`,
+                body: body,
+                labels: ['test', 'flaky-test']
+              });
+            }
+
+  historical-analysis:
+    name: Historical Flaky Test Analysis
+    runs-on: ubuntu-latest
+    needs: detect-flaky-tests
+    if: always()
+    permissions:
+      contents: read
+    steps:
+      - uses: actions/checkout@v6
+        with:
+          persist-credentials: false
+
+      - name: Download flaky test history
+        uses: actions/download-artifact@v4
+        with:
+          name: flaky-test-history
+          path: .flaky-test-history/
+        continue-on-error: true
+
+      - name: Analyze historical trends
+        run: |
+          echo "=== Historical Flaky Test Analysis ==="
+          if [[ -f .flaky-test-history/test-history.jsonl ]]; then
+            echo "Historical runs found:"
+            wc -l < .flaky-test-history/test-history.jsonl
+
+            echo ""
+            echo "Tests with highest flakiness rates:"
+            jq -r 'select(.flakiness_rate > 0) | "\(.test): \(.flakiness_rate)"' .flaky-test-history/test-history.jsonl 2>/dev/null | sort -t: -k2 -rn | head -20 || echo "No flaky tests in history"
+          else
+            echo "No historical data found yet."
+          fi
+
+      - name: Generate historical report
+        run: |
+          mkdir -p reports
+          cat > reports/flaky-test-historical-report.md << 'EOF'
+          # Flaky Test Historical Analysis Report
+
+          **Generated:** $(date -u +"%Y-%m-%dT%H:%M:%SZ")
+
+          ## Summary
+
+          This report provides historical trends for flaky test detection.
+
+          ## Methodology
+
+          - Each test is run multiple times (default: 5 runs)
+          - Tests with mixed pass/fail results are flagged as flaky
+          - Flaky tests are automatically quarantined
+          - Historical data is tracked across CI runs
+
+          ## Quarantine Policy
+
+          - Quarantined tests are excluded from the main test suite
+          - Quarantined tests are re-checked weekly
+          - Tests that pass consistently are automatically unquarantined
+          - Quarantined tests must be fixed before being removed from quarantine
+
+          EOF
+
+          if [[ -f .flaky-test-history/test-history.jsonl ]]; then
+            echo "## Historical Data" >> reports/flaky-test-historical-report.md
+            echo "" >> reports/flaky-test-historical-report.md
+            echo "| Run ID | Timestamp | Test | Pass | Fail | Flakiness Rate |" >> reports/flaky-test-historical-report.md
+            echo "|--------|-----------|------|------|------|----------------|" >> reports/flaky-test-historical-report.md
+            jq -r '| [.run_id, .timestamp, .test, .pass_count, .fail_count, .flakiness_rate] | @tsv' .flaky-test-history/test-history.jsonl 2>/dev/null | while IFS=$'\t' read -r run_id timestamp test pass fail rate; do
+              echo "| $run_id | $timestamp | $test | $pass | $fail | $rate |" >> reports/flaky-test-historical-report.md
+            done
+          fi
+
+      - name: Upload historical report
+        uses: actions/upload-artifact@v4
+        with:
+          name: flaky-test-historical-report
+          path: reports/flaky-test-historical-report.md
+          retention-days: 365

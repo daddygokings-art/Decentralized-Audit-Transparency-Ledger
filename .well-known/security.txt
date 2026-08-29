@@ -1,0 +1,7 @@
+Contact: mailto:security@auditledger.xyz
+Expires: 2027-08-29T00:00:00.000Z
+Encryption: https://auditledger.xyz/pgp-key.txt
+Preferred-Languages: en
+Canonical: https://auditledger.xyz/.well-known/security.txt
+Policy: https://github.com/daddygokings-art/Decentralized-Audit-Transparency-Ledger/blob/master/docs/SECURITY_DISCLOSURE.md
+Hiring: https://github.com/daddygokings-art/Decentralized-Audit-Transparency-Ledger/blob/master/docs/SECURITY_DISCLOSURE.md#hall-of-fame
