@@ -1,0 +1,22 @@
+{
+  "data_asset_type": "Dataset",
+  "expectation_suite_name": "contract_events_quality_suite",
+  "expectations": [
+    {
+      "expectation_type": "expect_column_values_to_not_be_null",
+      "kwargs": { "column": "index" }
+    },
+    {
+      "expectation_type": "expect_column_values_to_not_be_null",
+      "kwargs": { "column": "event_hash" }
+    },
+    {
+      "expectation_type": "expect_column_values_to_be_of_type",
+      "kwargs": { "column": "timestamp", "type_": "int" }
+    },
+    {
+      "expectation_type": "expect_column_values_to_match_regex",
+      "kwargs": { "column": "submitter", "regex": "^G[A-Z0-9]{55}$" }
+    }
+  ]
+}
