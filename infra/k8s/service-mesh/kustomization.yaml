@@ -1,0 +1,17 @@
+# infra/k8s/service-mesh/kustomization.yaml
+#
+# Apply the full Istio service mesh configuration:
+#   kubectl apply -k infra/k8s/service-mesh/
+#
+# This does NOT install Istio itself.  Run first:
+#   istioctl install -f infra/k8s/service-mesh/istio-operator.yaml --verify
+apiVersion: kustomize.config.k8s.io/v1beta1
+kind: Kustomization
+
+resources:
+  - namespace-injection.yaml
+  - gateway.yaml
+  - peer-authentication.yaml
+  - authorization-policies.yaml
+  - traffic/
+  - observability/

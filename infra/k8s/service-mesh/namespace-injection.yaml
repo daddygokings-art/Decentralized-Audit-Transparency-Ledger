@@ -1,0 +1,34 @@
+# infra/k8s/service-mesh/namespace-injection.yaml
+#
+# Patch the audit-ledger workload namespace with the Istio sidecar injection
+# label so every new pod automatically receives an Envoy proxy.
+#
+# The secrets and certs namespaces are NOT injected — Vault's TLS termination
+# is handled by the cert-manager-issued vault-tls certificate (see
+# infra/k8s/cert-manager/certificates.yaml), not by the mesh.
+#
+# Apply with:
+#   kubectl apply -f infra/k8s/service-mesh/namespace-injection.yaml
+#
+# Issue #506 — zero-trust networking
+apiVersion: v1
+kind: Namespace
+metadata:
+  name: audit-ledger
+  labels:
+    # Istio sidecar injection
+    istio-injection: enabled
+    # Retain existing labels
+    app.kubernetes.io/part-of: audit-ledger
+    audit-ledger.io/purpose: workloads
+---
+# istio-ingress namespace — the ingress gateway lives here.
+# It is part of the mesh but does not inject workload sidecars.
+apiVersion: v1
+kind: Namespace
+metadata:
+  name: istio-ingress
+  labels:
+    istio-injection: enabled
+    app.kubernetes.io/part-of: audit-ledger
+    kubernetes.io/metadata.name: istio-ingress

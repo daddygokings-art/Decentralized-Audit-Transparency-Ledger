@@ -1,0 +1,47 @@
+# infra/k8s/service-mesh/peer-authentication.yaml
+#
+# PeerAuthentication — enforces mTLS STRICT mode for all pods in the
+# audit-ledger workload namespace.  Any connection that cannot present a
+# valid SPIFFE/X.509 certificate issued by Istiod (or the configured
+# external CA) will be rejected at the Envoy sidecar level.
+#
+# This is the primary mechanism for:
+#   - Mutual authentication between services (zero-trust east-west)
+#   - Encryption of all intra-cluster service-to-service traffic
+#   - SPIFFE workload identity for every pod
+#
+# Issue #506 — zero-trust networking
+
+# ── Namespace-wide STRICT mTLS ─────────────────────────────────────────────
+apiVersion: security.istio.io/v1beta1
+kind: PeerAuthentication
+metadata:
+  name: default-mtls-strict
+  namespace: audit-ledger
+  labels:
+    app.kubernetes.io/part-of: audit-ledger
+    audit-ledger.io/policy-type: mtls
+spec:
+  # Empty selector → applies to ALL pods in audit-ledger namespace
+  mtls:
+    mode: STRICT
+---
+# ── istio-ingress gateway: PERMISSIVE to accept plain HTTPS from clients ───
+# The ingress gateway terminates external TLS (port 443) and re-encrypts
+# traffic to backends using mTLS.  It cannot itself present a workload cert
+# to external clients so PERMISSIVE is required here only for the inbound
+# listener.
+apiVersion: security.istio.io/v1beta1
+kind: PeerAuthentication
+metadata:
+  name: ingress-permissive
+  namespace: istio-ingress
+  labels:
+    app.kubernetes.io/part-of: audit-ledger
+    audit-ledger.io/policy-type: mtls
+spec:
+  selector:
+    matchLabels:
+      istio: ingressgateway
+  mtls:
+    mode: PERMISSIVE

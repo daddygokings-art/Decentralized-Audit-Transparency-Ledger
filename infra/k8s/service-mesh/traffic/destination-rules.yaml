@@ -1,0 +1,184 @@
+# infra/k8s/service-mesh/traffic/destination-rules.yaml
+#
+# Istio DestinationRule resources for the audit-ledger stack.
+#
+# Each DestinationRule:
+#   1. Enforces ISTIO_MUTUAL TLS for all traffic to that host
+#      (client-side complement to the STRICT PeerAuthentication)
+#   2. Defines "stable" and "canary" subsets keyed by
+#      `app.kubernetes.io/track` pod label
+#   3. Sets connection-pool and outlier-detection parameters
+#      appropriate for audit-ledger's traffic profile
+#
+# Issue #506 — zero-trust networking
+
+# ── REST API ─────────────────────────────────────────────────────────────────
+apiVersion: networking.istio.io/v1beta1
+kind: DestinationRule
+metadata:
+  name: api-rest
+  namespace: audit-ledger
+  labels:
+    app.kubernetes.io/part-of: audit-ledger
+    app.kubernetes.io/component: api-rest
+spec:
+  host: api-rest.audit-ledger.svc.cluster.local
+  trafficPolicy:
+    tls:
+      mode: ISTIO_MUTUAL
+    connectionPool:
+      http:
+        http2MaxRequests: 200
+        maxRequestsPerConnection: 50
+    outlierDetection:
+      consecutive5xxErrors: 5
+      interval: 30s
+      baseEjectionTime: 30s
+      maxEjectionPercent: 50
+  subsets:
+    - name: stable
+      labels:
+        app.kubernetes.io/track: stable
+    - name: canary
+      labels:
+        app.kubernetes.io/track: canary
+      trafficPolicy:
+        connectionPool:
+          http:
+            http2MaxRequests: 50   # lower cap for canary pods
+---
+# ── GraphQL API ──────────────────────────────────────────────────────────────
+apiVersion: networking.istio.io/v1beta1
+kind: DestinationRule
+metadata:
+  name: api-graphql
+  namespace: audit-ledger
+  labels:
+    app.kubernetes.io/part-of: audit-ledger
+    app.kubernetes.io/component: api-graphql
+spec:
+  host: api-graphql.audit-ledger.svc.cluster.local
+  trafficPolicy:
+    tls:
+      mode: ISTIO_MUTUAL
+    connectionPool:
+      http:
+        http2MaxRequests: 200
+        maxRequestsPerConnection: 50
+    outlierDetection:
+      consecutive5xxErrors: 5
+      interval: 30s
+      baseEjectionTime: 30s
+      maxEjectionPercent: 50
+  subsets:
+    - name: stable
+      labels:
+        app.kubernetes.io/track: stable
+    - name: canary
+      labels:
+        app.kubernetes.io/track: canary
+---
+# ── WebSocket Event Stream ───────────────────────────────────────────────────
+apiVersion: networking.istio.io/v1beta1
+kind: DestinationRule
+metadata:
+  name: api-ws
+  namespace: audit-ledger
+  labels:
+    app.kubernetes.io/part-of: audit-ledger
+    app.kubernetes.io/component: api-ws
+spec:
+  host: api-ws.audit-ledger.svc.cluster.local
+  trafficPolicy:
+    tls:
+      mode: ISTIO_MUTUAL
+    connectionPool:
+      http:
+        # WebSocket connections are long-lived; allow many concurrent ones
+        http1MaxPendingRequests: 500
+        http2MaxRequests: 500
+  subsets:
+    - name: stable
+      labels:
+        app.kubernetes.io/track: stable
+    - name: canary
+      labels:
+        app.kubernetes.io/track: canary
+---
+# ── UI ───────────────────────────────────────────────────────────────────────
+apiVersion: networking.istio.io/v1beta1
+kind: DestinationRule
+metadata:
+  name: ui
+  namespace: audit-ledger
+  labels:
+    app.kubernetes.io/part-of: audit-ledger
+    app.kubernetes.io/component: ui
+spec:
+  host: ui.audit-ledger.svc.cluster.local
+  trafficPolicy:
+    tls:
+      mode: ISTIO_MUTUAL
+    connectionPool:
+      http:
+        http2MaxRequests: 200
+    outlierDetection:
+      consecutive5xxErrors: 5
+      interval: 30s
+      baseEjectionTime: 30s
+      maxEjectionPercent: 50
+  subsets:
+    - name: stable
+      labels:
+        app.kubernetes.io/track: stable
+    - name: canary
+      labels:
+        app.kubernetes.io/track: canary
+---
+# ── Metrics Exporter ─────────────────────────────────────────────────────────
+apiVersion: networking.istio.io/v1beta1
+kind: DestinationRule
+metadata:
+  name: metrics-exporter
+  namespace: audit-ledger
+  labels:
+    app.kubernetes.io/part-of: audit-ledger
+    app.kubernetes.io/component: metrics-exporter
+spec:
+  host: metrics-exporter.audit-ledger.svc.cluster.local
+  trafficPolicy:
+    tls:
+      mode: ISTIO_MUTUAL
+  subsets:
+    - name: stable
+      labels:
+        app.kubernetes.io/track: stable
+    - name: canary
+      labels:
+        app.kubernetes.io/track: canary
+---
+# ── Bridge Relayer ────────────────────────────────────────────────────────────
+apiVersion: networking.istio.io/v1beta1
+kind: DestinationRule
+metadata:
+  name: relayer
+  namespace: audit-ledger
+  labels:
+    app.kubernetes.io/part-of: audit-ledger
+    app.kubernetes.io/component: relayer
+spec:
+  host: relayer.audit-ledger.svc.cluster.local
+  trafficPolicy:
+    tls:
+      mode: ISTIO_MUTUAL
+    outlierDetection:
+      consecutive5xxErrors: 3
+      interval: 60s
+      baseEjectionTime: 60s
+  subsets:
+    - name: stable
+      labels:
+        app.kubernetes.io/track: stable
+    - name: canary
+      labels:
+        app.kubernetes.io/track: canary

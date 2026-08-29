@@ -1,0 +1,113 @@
+# infra/k8s/service-mesh/istio-operator.yaml
+#
+# Istio IstioOperator resource — installs the Istio control plane using the
+# "minimal" profile with the additions required for the audit-ledger stack:
+#   - Ingress gateway (replaces a standalone ingress controller)
+#   - Prometheus integration for mTLS telemetry
+#   - Kiali topology UI
+#   - Tracing (Jaeger) for distributed trace collection
+#
+# Install with:
+#   istioctl install -f infra/k8s/service-mesh/istio-operator.yaml --verify
+#
+# Requires: istioctl ≥ 1.21 (matches Soroban infra roadmap)
+#
+# Issue #506 — zero-trust networking
+apiVersion: install.istio.io/v1alpha1
+kind: IstioOperator
+metadata:
+  name: audit-ledger-mesh
+  namespace: istio-system
+spec:
+  profile: minimal   # smallest footprint; add components explicitly below
+
+  # ── Component enablement ───────────────────────────────────────────────────
+  components:
+    pilot:
+      enabled: true
+      k8s:
+        resources:
+          requests:
+            cpu: 100m
+            memory: 128Mi
+          limits:
+            cpu: 500m
+            memory: 512Mi
+        hpaSpec:
+          minReplicas: 1
+          maxReplicas: 3
+
+    ingressGateways:
+      - name: istio-ingressgateway
+        enabled: true
+        namespace: istio-ingress
+        k8s:
+          service:
+            type: LoadBalancer
+            ports:
+              - name: http2
+                port: 80
+                targetPort: 8080
+              - name: https
+                port: 443
+                targetPort: 8443
+          resources:
+            requests:
+              cpu: 100m
+              memory: 64Mi
+            limits:
+              cpu: 500m
+              memory: 256Mi
+          hpaSpec:
+            minReplicas: 1
+            maxReplicas: 3
+
+  # ── Mesh-wide settings ─────────────────────────────────────────────────────
+  meshConfig:
+    # Default mTLS mode for all services in the mesh.
+    # Per-namespace PeerAuthentication (peer-authentication.yaml) overrides
+    # this to STRICT for audit-ledger namespaces.
+    defaultConfig:
+      proxyMetadata:
+        BOOTSTRAP_XDS_AGENT: "true"
+      tracing:
+        sampling: 100.0  # 100 % in dev; lower in prod (e.g. 1.0)
+        zipkin:
+          address: jaeger-collector.monitoring.svc.cluster.local:9411
+
+    # Enable access logging in JSON for structured log ingestion
+    accessLogFile: /dev/stdout
+    accessLogFormat: |
+      {
+        "start_time": "%START_TIME%",
+        "method": "%REQ(:METHOD)%",
+        "path": "%REQ(X-ENVOY-ORIGINAL-PATH?:PATH)%",
+        "protocol": "%PROTOCOL%",
+        "response_code": "%RESPONSE_CODE%",
+        "duration_ms": "%DURATION%",
+        "upstream_service": "%UPSTREAM_CLUSTER%",
+        "src_namespace": "%ENVIRONMENT(POD_NAMESPACE)%",
+        "request_id": "%REQ(X-REQUEST-ID)%",
+        "trace_id": "%REQ(X-B3-TRACEID)%"
+      }
+
+    # Enable Prometheus metrics on Envoy sidecars
+    enablePrometheusMerge: true
+
+  # ── Values overrides ───────────────────────────────────────────────────────
+  values:
+    global:
+      # Use the Istio-CA (istiod built-in CA) for workload certificate
+      # issuance; switch to cert-manager/Vault for production PKIIA.
+      pilotCertProvider: istiod
+      # Log level for istiod and sidecars (warn in prod)
+      logging:
+        level: "default:info"
+
+    pilot:
+      autoscaleEnabled: true
+      traceSampling: 100.0
+
+    gateways:
+      istio-ingressgateway:
+        autoscaleEnabled: true

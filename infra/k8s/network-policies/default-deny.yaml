@@ -1,0 +1,58 @@
+# infra/k8s/network-policies/default-deny.yaml
+#
+# Baseline zero-trust posture: deny all ingress and egress for every pod in
+# the audit-ledger family of namespaces.  Per-service allow rules in this
+# directory add back only the traffic paths that are explicitly required.
+#
+# Applied namespaces:
+#   - audit-ledger           (workloads)
+#   - audit-ledger-secrets   (Vault)
+#   - audit-ledger-certs     (cert-manager)
+#
+# Issue #506 — zero-trust networking
+
+# ── audit-ledger (workloads) ─────────────────────────────────────────────────
+apiVersion: networking.k8s.io/v1
+kind: NetworkPolicy
+metadata:
+  name: default-deny-all
+  namespace: audit-ledger
+  labels:
+    app.kubernetes.io/part-of: audit-ledger
+    audit-ledger.io/policy-type: default-deny
+spec:
+  podSelector: {}        # matches every pod in the namespace
+  policyTypes:
+    - Ingress
+    - Egress
+  # No ingress / egress rules → all traffic is denied by default.
+---
+# ── audit-ledger-secrets (Vault) ─────────────────────────────────────────────
+apiVersion: networking.k8s.io/v1
+kind: NetworkPolicy
+metadata:
+  name: default-deny-all
+  namespace: audit-ledger-secrets
+  labels:
+    app.kubernetes.io/part-of: audit-ledger
+    audit-ledger.io/policy-type: default-deny
+spec:
+  podSelector: {}
+  policyTypes:
+    - Ingress
+    - Egress
+---
+# ── audit-ledger-certs (cert-manager) ────────────────────────────────────────
+apiVersion: networking.k8s.io/v1
+kind: NetworkPolicy
+metadata:
+  name: default-deny-all
+  namespace: audit-ledger-certs
+  labels:
+    app.kubernetes.io/part-of: audit-ledger
+    audit-ledger.io/policy-type: default-deny
+spec:
+  podSelector: {}
+  policyTypes:
+    - Ingress
+    - Egress

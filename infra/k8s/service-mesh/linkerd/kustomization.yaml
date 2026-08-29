@@ -1,0 +1,14 @@
+# infra/k8s/service-mesh/linkerd/kustomization.yaml
+#
+# Linkerd alternative to the Istio service mesh configuration.
+# Apply with:
+#   kubectl apply -k infra/k8s/service-mesh/linkerd/
+#
+# Do NOT apply both Istio and Linkerd simultaneously.
+# See docs/adr/ADR-015-service-mesh.md for the decision record.
+apiVersion: kustomize.config.k8s.io/v1beta1
+kind: Kustomization
+
+resources:
+  - namespace-annotation.yaml
+  - servers.yaml

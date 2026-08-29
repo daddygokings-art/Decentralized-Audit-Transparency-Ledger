@@ -1,0 +1,85 @@
+# infra/k8s/service-mesh/observability/service-monitors.yaml
+#
+# Prometheus Operator ServiceMonitor resources — tell Prometheus to scrape
+# the Envoy sidecar metrics endpoint (:15090/stats/prometheus) on every
+# audit-ledger workload pod, plus istiod itself.
+#
+# Requires: prometheus-operator CRDs installed in the cluster.
+#
+# Issue #506 — zero-trust networking
+
+# ── Scrape audit-ledger workload sidecars ────────────────────────────────────
+apiVersion: monitoring.coreos.com/v1
+kind: ServiceMonitor
+metadata:
+  name: audit-ledger-mesh-metrics
+  namespace: monitoring
+  labels:
+    app.kubernetes.io/part-of: audit-ledger
+    audit-ledger.io/component: service-mesh
+spec:
+  # Target all Services in the audit-ledger workload namespace
+  namespaceSelector:
+    matchNames:
+      - audit-ledger
+  selector:
+    matchLabels:
+      app.kubernetes.io/part-of: audit-ledger
+  endpoints:
+    # Envoy sidecar Prometheus endpoint (injected automatically by Istio)
+    - port: http-envoy-prom
+      path: /stats/prometheus
+      interval: 15s
+      scrapeTimeout: 10s
+      relabelings:
+        - sourceLabels: [__meta_kubernetes_pod_label_app_kubernetes_io_component]
+          targetLabel: workload
+        - sourceLabels: [__meta_kubernetes_namespace]
+          targetLabel: namespace
+---
+# ── Scrape istiod (control-plane metrics) ───────────────────────────────────
+apiVersion: monitoring.coreos.com/v1
+kind: ServiceMonitor
+metadata:
+  name: istiod
+  namespace: monitoring
+  labels:
+    app.kubernetes.io/part-of: audit-ledger
+    audit-ledger.io/component: service-mesh
+spec:
+  namespaceSelector:
+    matchNames:
+      - istio-system
+  selector:
+    matchLabels:
+      app: istiod
+  endpoints:
+    - port: http-monitoring
+      interval: 15s
+      relabelings:
+        - targetLabel: component
+          replacement: istiod
+---
+# ── Scrape Istio ingress gateway ─────────────────────────────────────────────
+apiVersion: monitoring.coreos.com/v1
+kind: ServiceMonitor
+metadata:
+  name: istio-ingressgateway
+  namespace: monitoring
+  labels:
+    app.kubernetes.io/part-of: audit-ledger
+    audit-ledger.io/component: service-mesh
+spec:
+  namespaceSelector:
+    matchNames:
+      - istio-ingress
+  selector:
+    matchLabels:
+      app: istio-ingressgateway
+  endpoints:
+    - port: http-envoy-prom
+      path: /stats/prometheus
+      interval: 15s
+      relabelings:
+        - targetLabel: component
+          replacement: ingressgateway
