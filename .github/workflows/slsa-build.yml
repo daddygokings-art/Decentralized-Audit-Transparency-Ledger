@@ -86,7 +86,7 @@ jobs:
         uses: dtolnay/rust-toolchain@c758e63728211bd4cbe26fa022e60290dd5c2e3c # 1.85.0
         with:
           toolchain: "1.85.0"
-          targets: wasm32v1-none
+          targets: wasm32-unknown-unknown
 
       # ── Cargo cache ───────────────────────────────────────────────────────
       - name: Cache Cargo registry (read-only for hermeticity)
@@ -116,12 +116,12 @@ jobs:
           # --locked  : must match Cargo.lock exactly (no resolution)
           # --frozen  : prevents any network access during build
           cargo build \
-            --target wasm32v1-none \
+            --target wasm32-unknown-unknown \
             --release \
             --locked \
             --frozen
 
-          WASM="target/wasm32v1-none/release/audit_ledger.wasm"
+          WASM="target/wasm32-unknown-unknown/release/audit_ledger.wasm"
           echo "Build complete: $(stat --format='%s bytes' $WASM)"
           ls -lh "$WASM"
 
@@ -129,7 +129,7 @@ jobs:
       - name: Compute SHA-256 digest
         id: hash
         run: |
-          WASM="target/wasm32v1-none/release/audit_ledger.wasm"
+          WASM="target/wasm32-unknown-unknown/release/audit_ledger.wasm"
 
           # SHA-256 hex
           SHA256_HEX=$(sha256sum "$WASM" | cut -d' ' -f1)
@@ -148,7 +148,7 @@ jobs:
       # ── Verify WASM size ─────────────────────────────────────────────────
       - name: Assert WASM ≤ 128 KB
         run: |
-          WASM="target/wasm32v1-none/release/audit_ledger.wasm"
+          WASM="target/wasm32-unknown-unknown/release/audit_ledger.wasm"
           SIZE=$(stat --format='%s' "$WASM")
           MAX=$((128 * 1024))
           echo "WASM size: ${SIZE} bytes / max: ${MAX} bytes"
@@ -161,7 +161,7 @@ jobs:
         uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4.6.2
         with:
           name: audit_ledger.wasm
-          path: target/wasm32v1-none/release/audit_ledger.wasm
+          path: target/wasm32-unknown-unknown/release/audit_ledger.wasm
           retention-days: 30
           if-no-files-found: error
 
@@ -176,7 +176,7 @@ jobs:
       # ── Step summary ──────────────────────────────────────────────────────
       - name: Write build summary
         run: |
-          WASM="target/wasm32v1-none/release/audit_ledger.wasm"
+          WASM="target/wasm32-unknown-unknown/release/audit_ledger.wasm"
           SIZE=$(stat --format='%s' "$WASM")
           echo "## 🔨 SLSA Hermetic Build" >> "$GITHUB_STEP_SUMMARY"
           echo "" >> "$GITHUB_STEP_SUMMARY"
@@ -184,7 +184,7 @@ jobs:
           echo "|----------|-------|" >> "$GITHUB_STEP_SUMMARY"
           echo "| Artifact | \`audit_ledger.wasm\` |" >> "$GITHUB_STEP_SUMMARY"
           echo "| Rust toolchain | \`1.85.0\` (pinned) |" >> "$GITHUB_STEP_SUMMARY"
-          echo "| Target | \`wasm32v1-none\` |" >> "$GITHUB_STEP_SUMMARY"
+          echo "| Target | \`wasm32-unknown-unknown\` |" >> "$GITHUB_STEP_SUMMARY"
           echo "| Build flags | \`--locked --frozen --release\` |" >> "$GITHUB_STEP_SUMMARY"
           echo "| Size | ${SIZE} bytes |" >> "$GITHUB_STEP_SUMMARY"
           echo "| SHA-256 | \`$(cat wasm-checksums.txt | cut -d' ' -f1)\` |" >> "$GITHUB_STEP_SUMMARY"

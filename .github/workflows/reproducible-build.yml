@@ -67,13 +67,13 @@ jobs:
         uses: dtolnay/rust-toolchain@c758e63728211bd4cbe26fa022e60290dd5c2e3c # 1.85.0
         with:
           toolchain: "1.85.0"
-          targets: wasm32v1-none
+          targets: wasm32-unknown-unknown
 
       - name: Show exact toolchain versions
         run: |
           rustc --version --verbose
           cargo --version
-          echo "Target: wasm32v1-none"
+          echo "Target: wasm32-unknown-unknown"
 
       # ── Cargo cache ───────────────────────────────────────────────────────
       - name: Cache Cargo registry
@@ -100,12 +100,12 @@ jobs:
         run: |
           cargo clean
           cargo build \
-            --target wasm32v1-none \
+            --target wasm32-unknown-unknown \
             --release \
             --locked \
             --frozen
 
-          WASM="target/wasm32v1-none/release/audit_ledger.wasm"
+          WASM="target/wasm32-unknown-unknown/release/audit_ledger.wasm"
           SHA1=$(sha256sum "$WASM" | cut -d' ' -f1)
           echo "Build 1 SHA-256: ${SHA1}"
           echo "${SHA1}" > build1.sha256
@@ -120,12 +120,12 @@ jobs:
         run: |
           cargo clean
           cargo build \
-            --target wasm32v1-none \
+            --target wasm32-unknown-unknown \
             --release \
             --locked \
             --frozen
 
-          WASM="target/wasm32v1-none/release/audit_ledger.wasm"
+          WASM="target/wasm32-unknown-unknown/release/audit_ledger.wasm"
           SHA2=$(sha256sum "$WASM" | cut -d' ' -f1)
           echo "Build 2 SHA-256: ${SHA2}"
           echo "${SHA2}" > build2.sha256
@@ -201,7 +201,7 @@ jobs:
           echo "| SHA-256 | \`${SHA}\` |" >> "$GITHUB_STEP_SUMMARY"
           echo "| Size | ${SIZE} bytes |" >> "$GITHUB_STEP_SUMMARY"
           echo "| Rust toolchain | \`1.85.0\` (pinned) |" >> "$GITHUB_STEP_SUMMARY"
-          echo "| Target | \`wasm32v1-none\` |" >> "$GITHUB_STEP_SUMMARY"
+          echo "| Target | \`wasm32-unknown-unknown\` |" >> "$GITHUB_STEP_SUMMARY"
           echo "| Build flags | \`--locked --frozen --release\` |" >> "$GITHUB_STEP_SUMMARY"
           echo "| SOURCE_DATE_EPOCH | \`0\` |" >> "$GITHUB_STEP_SUMMARY"
           echo "| CARGO_INCREMENTAL | \`0\` |" >> "$GITHUB_STEP_SUMMARY"
@@ -211,8 +211,8 @@ jobs:
           echo "\`\`\`bash" >> "$GITHUB_STEP_SUMMARY"
           echo "git checkout ${{ github.sha }}" >> "$GITHUB_STEP_SUMMARY"
           echo "rustup install 1.85.0" >> "$GITHUB_STEP_SUMMARY"
-          echo "rustup target add wasm32v1-none --toolchain 1.85.0" >> "$GITHUB_STEP_SUMMARY"
+          echo "rustup target add wasm32-unknown-unknown --toolchain 1.85.0" >> "$GITHUB_STEP_SUMMARY"
           echo "SOURCE_DATE_EPOCH=0 CARGO_INCREMENTAL=0 \\" >> "$GITHUB_STEP_SUMMARY"
-          echo "  cargo +1.85.0 build --target wasm32v1-none --release --locked --frozen" >> "$GITHUB_STEP_SUMMARY"
-          echo "sha256sum target/wasm32v1-none/release/audit_ledger.wasm" >> "$GITHUB_STEP_SUMMARY"
+          echo "  cargo +1.85.0 build --target wasm32-unknown-unknown --release --locked --frozen" >> "$GITHUB_STEP_SUMMARY"
+          echo "sha256sum target/wasm32-unknown-unknown/release/audit_ledger.wasm" >> "$GITHUB_STEP_SUMMARY"
           echo "\`\`\`" >> "$GITHUB_STEP_SUMMARY"

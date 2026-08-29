@@ -14,7 +14,7 @@ jobs:
     permissions:
       contents: read
     steps:
-      - uses: actions/checkout@v6
+      - uses: actions/checkout@v4
         with:
           persist-credentials: false
 
@@ -73,7 +73,7 @@ jobs:
     permissions:
       contents: read
     steps:
-      - uses: actions/checkout@v6
+      - uses: actions/checkout@v4
         with:
           persist-credentials: false
 
@@ -88,7 +88,7 @@ jobs:
     permissions:
       contents: read
     steps:
-      - uses: actions/checkout@v6
+      - uses: actions/checkout@v4
         with:
           persist-credentials: false
 
@@ -96,14 +96,14 @@ jobs:
         uses: dtolnay/rust-toolchain@stable
 
       - name: Add WASM target
-        run: rustup target add wasm32v1-none
+        run: rustup target add wasm32-unknown-unknown
 
       - name: Build WASM
-        run: cargo build --target wasm32v1-none --release
+        run: cargo build --target wasm32-unknown-unknown --release
 
       - name: Check WASM size
         run: |
-          WASM_FILE="target/wasm32v1-none/release/audit_ledger.wasm"
+          WASM_FILE="target/wasm32-unknown-unknown/release/audit_ledger.wasm"
           if [ ! -f "$WASM_FILE" ]; then
             echo "ERROR: WASM binary not found!"
             exit 1
