@@ -236,10 +236,12 @@ pub fn issue_carbon_credit(
 ) -> BytesN<32> {
     issuer.require_auth();
 
-    let credit_id = env.crypto().sha256(&soroban_sdk::bytes!(
-        env,
-        format!("{}{}{}", carbon_tonnes, issuer.to_string(), env.ledger().timestamp()).as_bytes()
-    ));
+    let credit_id = env.crypto().sha256(
+        &Bytes::from_slice(
+            &env,
+            format!("{}{}{}", carbon_tonnes, issuer.to_string(), env.ledger().timestamp()).as_bytes(),
+        )
+    );
 
     let credit = CarbonCredit {
         credit_id: credit_id.clone(),
@@ -307,13 +309,13 @@ pub fn verify_renewable_energy(
 
     // Create verification record
     let verification = VerificationRecord {
-        verification_id: env.crypto().sha256(&soroban_sdk::bytes!(env, b"VERIFY")),
+        verification_id: env.crypto().sha256(&Bytes::from_slice(&env, b"VERIFY")),
         auditor: verifier,
         audit_date: env.ledger().timestamp(),
         verified_amount: credit.carbon_tonnes,
         issues_found: Vec::new(env),
         approved: true,
-        audit_notes: soroban_sdk::bytes!(env, b"Renewable energy verified"),
+        audit_notes: Bytes::from_slice(&env, b"Renewable energy verified"),
     };
 
     credit.verification_records.push_back(verification);
@@ -348,10 +350,12 @@ pub fn tokenize_credit(
         .get(&CarbonCreditKey::CarbonCredit(credit_id.clone()))
         .unwrap_or_else(|| panic!("Credit not found"));
 
-    let token_id = env.crypto().sha256(&soroban_sdk::bytes!(
-        env,
-        format!("TOKEN{}{}", token_owner.to_string(), env.ledger().timestamp()).as_bytes()
-    ));
+    let token_id = env.crypto().sha256(
+        &Bytes::from_slice(
+            &env,
+            format!("TOKEN{}{}", token_owner.to_string(), env.ledger().timestamp()).as_bytes(),
+        )
+    );
 
     let tokenization = Tokenization {
         token_id: token_id.clone(),
@@ -519,18 +523,18 @@ pub fn audit_renewable_usage(
         - measured_energy as i32)
         .abs() > 100
     {
-        issues.push_back(soroban_sdk::bytes!(env, b"Energy mismatch"));
+        issues.push_back(Bytes::from_slice(&env, b"Energy mismatch"));
         approved = false;
     }
 
     let record = VerificationRecord {
-        verification_id: env.crypto().sha256(&soroban_sdk::bytes!(env, b"AUDIT")),
+        verification_id: env.crypto().sha256(&Bytes::from_slice(&env, b"AUDIT")),
         auditor,
         audit_date: env.ledger().timestamp(),
         verified_amount: credit.carbon_tonnes,
         issues_found: issues,
         approved,
-        audit_notes: soroban_sdk::bytes!(env, b"Audit complete"),
+        audit_notes: Bytes::from_slice(&env, b"Audit complete"),
     };
 
     // Store verification record

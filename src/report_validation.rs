@@ -524,7 +524,7 @@ pub fn validate_report(env: &Env, report: &RegulatoryReport, now: u64) -> Valida
         push_warn(
             env,
             &mut warnings,
-            b"deadline: period_end is after the submission deadline — review urgently",
+            b"deadline: period_end is after the submission deadline - review urgently",
         );
     }
 

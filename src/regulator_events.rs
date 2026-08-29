@@ -21,8 +21,7 @@ impl ISA3000Objectives {
     pub fn cc6_1() -> ISA3000ControlObjective {
         ISA3000ControlObjective {
             code: Symbol::new(&Env::default(), "CC6.1"),
-            description: Bytes::new(&Env::default()).try_extend_from_slice(b"Segregation of duties to prevent unauthorized access and fraud")
-                .expect("Description bytes"),
+            description: Bytes::from_slice(&Env::default(), b"Segregation of duties to prevent unauthorized access and fraud"),
             evidence_types: {
                 let mut v = Vec::new(&Env::default());
                 v.push_back(Symbol::new(&Env::default(), "access_grant"));
@@ -37,8 +36,7 @@ impl ISA3000Objectives {
     pub fn cc6_2() -> ISA3000ControlObjective {
         ISA3000ControlObjective {
             code: Symbol::new(&Env::default(), "CC6.2"),
-            description: Bytes::new(&Env::default()).try_extend_from_slice(b"System generates exception reports and monitoring of approval authorities")
-                .expect("Description bytes"),
+            description: Bytes::from_slice(&Env::default(), b"System generates exception reports and monitoring of approval authorities"),
             evidence_types: {
                 let mut v = Vec::new(&Env::default());
                 v.push_back(Symbol::new(&Env::default(), "exception_report"));
@@ -53,8 +51,7 @@ impl ISA3000Objectives {
     pub fn cc7_1() -> ISA3000ControlObjective {
         ISA3000ControlObjective {
             code: Symbol::new(&Env::default(), "CC7.1"),
-            description: Bytes::new(&Env::default()).try_extend_from_slice(b"Prevention and detection of unauthorized changes to systems")
-                .expect("Description bytes"),
+            description: Bytes::from_slice(&Env::default(), b"Prevention and detection of unauthorized changes to systems"),
             evidence_types: {
                 let mut v = Vec::new(&Env::default());
                 v.push_back(Symbol::new(&Env::default(), "change_log"));
@@ -69,8 +66,7 @@ impl ISA3000Objectives {
     pub fn cc9_1() -> ISA3000ControlObjective {
         ISA3000ControlObjective {
             code: Symbol::new(&Env::default(), "CC9.1"),
-            description: Bytes::new(&Env::default()).try_extend_from_slice(b"Monitoring and reconciliation of system activity")
-                .expect("Description bytes"),
+            description: Bytes::from_slice(&Env::default(), b"Monitoring and reconciliation of system activity"),
             evidence_types: {
                 let mut v = Vec::new(&Env::default());
                 v.push_back(Symbol::new(&Env::default(), "reconciliation"));
@@ -85,8 +81,7 @@ impl ISA3000Objectives {
     pub fn a1_1() -> ISA3000ControlObjective {
         ISA3000ControlObjective {
             code: Symbol::new(&Env::default(), "A1.1"),
-            description: Bytes::new(&Env::default()).try_extend_from_slice(b"Authorization and access control policies are established and enforced")
-                .expect("Description bytes"),
+            description: Bytes::from_slice(&Env::default(), b"Authorization and access control policies are established and enforced"),
             evidence_types: {
                 let mut v = Vec::new(&Env::default());
                 v.push_back(Symbol::new(&Env::default(), "policy_document"));
@@ -111,10 +106,8 @@ impl SOC2Criteria {
     pub fn cc6_1() -> SOC2Criterion {
         SOC2Criterion {
             code: Symbol::new(&Env::default(), "CC6.1"),
-            principle: Bytes::new(&Env::default()).try_extend_from_slice(b"Security")
-                .expect("Principle bytes"),
-            description: Bytes::new(&Env::default()).try_extend_from_slice(b"Logical and physical access controls protect system resources")
-                .expect("Description bytes"),
+            principle: Bytes::from_slice(&Env::default(), b"Security"),
+            description: Bytes::from_slice(&Env::default(), b"Logical and physical access controls protect system resources"),
             evidence_types: {
                 let mut v = Vec::new(&Env::default());
                 v.push_back(Symbol::new(&Env::default(), "access_control"));
@@ -128,10 +121,8 @@ impl SOC2Criteria {
     pub fn cc6_2() -> SOC2Criterion {
         SOC2Criterion {
             code: Symbol::new(&Env::default(), "CC6.2"),
-            principle: Bytes::new(&Env::default()).try_extend_from_slice(b"Security")
-                .expect("Principle bytes"),
-            description: Bytes::new(&Env::default()).try_extend_from_slice(b"Prior to issuing system credentials, identity and access rights are verified")
-                .expect("Description bytes"),
+            principle: Bytes::from_slice(&Env::default(), b"Security"),
+            description: Bytes::from_slice(&Env::default(), b"Prior to issuing system credentials, identity and access rights are verified"),
             evidence_types: {
                 let mut v = Vec::new(&Env::default());
                 v.push_back(Symbol::new(&Env::default(), "identity_verification"));
@@ -145,10 +136,8 @@ impl SOC2Criteria {
     pub fn cc7_1() -> SOC2Criterion {
         SOC2Criterion {
             code: Symbol::new(&Env::default(), "CC7.1"),
-            principle: Bytes::new(&Env::default()).try_extend_from_slice(b"Security")
-                .expect("Principle bytes"),
-            description: Bytes::new(&Env::default()).try_extend_from_slice(b"Changes to the objectives and responsibilities for IT and related processes are managed")
-                .expect("Description bytes"),
+            principle: Bytes::from_slice(&Env::default(), b"Security"),
+            description: Bytes::from_slice(&Env::default(), b"Changes to the objectives and responsibilities for IT and related processes are managed"),
             evidence_types: {
                 let mut v = Vec::new(&Env::default());
                 v.push_back(Symbol::new(&Env::default(), "change_request"));
@@ -162,10 +151,8 @@ impl SOC2Criteria {
     pub fn a1_1() -> SOC2Criterion {
         SOC2Criterion {
             code: Symbol::new(&Env::default(), "A1.1"),
-            principle: Bytes::new(&Env::default()).try_extend_from_slice(b"Availability")
-                .expect("Principle bytes"),
-            description: Bytes::new(&Env::default()).try_extend_from_slice(b"The entity maintains and monitors commitments and responsibilities for availability")
-                .expect("Description bytes"),
+            principle: Bytes::from_slice(&Env::default(), b"Availability"),
+            description: Bytes::from_slice(&Env::default(), b"The entity maintains and monitors commitments and responsibilities for availability"),
             evidence_types: {
                 let mut v = Vec::new(&Env::default());
                 v.push_back(Symbol::new(&Env::default(), "uptime_report"));
@@ -179,10 +166,8 @@ impl SOC2Criteria {
     pub fn pi1_1() -> SOC2Criterion {
         SOC2Criterion {
             code: Symbol::new(&Env::default(), "PI1.1"),
-            principle: Bytes::new(&Env::default()).try_extend_from_slice(b"Processing Integrity")
-                .expect("Principle bytes"),
-            description: Bytes::new(&Env::default()).try_extend_from_slice(b"The entity maintains and monitors commitments and responsibilities for processing integrity")
-                .expect("Description bytes"),
+            principle: Bytes::from_slice(&Env::default(), b"Processing Integrity"),
+            description: Bytes::from_slice(&Env::default(), b"The entity maintains and monitors commitments and responsibilities for processing integrity"),
             evidence_types: {
                 let mut v = Vec::new(&Env::default());
                 v.push_back(Symbol::new(&Env::default(), "transaction_log"));

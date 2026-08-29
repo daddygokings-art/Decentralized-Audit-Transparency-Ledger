@@ -41,7 +41,7 @@
 
 use soroban_sdk::{contracttype, panic_with_error, Address, Bytes, BytesN, Env, Symbol, Vec};
 
-use crate::{AuditLedger, ContractError, DataKey};
+use crate::{AuditLedger, AuditLedgerArgs, AuditLedgerClient, ContractError, DataKey};
 
 /// Reserved category for operational audit log entries (deployments, configuration
 /// changes, access grants, secret rotations). Events in this category are never

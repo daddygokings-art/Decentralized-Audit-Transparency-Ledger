@@ -125,8 +125,7 @@ impl OfflineManager {
         transaction: &CBDCTransaction,
         nonce: u32,
     ) -> BytesN<32> {
-        use soroban_sdk::crypto::sha256;
-
+        
         let mut input = Bytes::new(env);
 
         // Hash transaction fields
@@ -141,7 +140,7 @@ impl OfflineManager {
         input.append(&Bytes::from_slice(env, &transaction.exchange_rate.to_le_bytes()));
         input.append(&Bytes::from_slice(env, &nonce.to_le_bytes()));
 
-        sha256(&input)
+        env.crypto().sha256(&input)
     }
 
     /// Validate offline transaction before reconciliation
@@ -219,15 +218,14 @@ impl OfflineManager {
 
     /// Compute deterministic batch ID
     pub fn compute_batch_id(env: &Env, tx_ids: &Vec<BytesN<32>>) -> BytesN<32> {
-        use soroban_sdk::crypto::sha256;
-
+        
         let mut input = Bytes::new(env);
 
         for tx_id in tx_ids.iter() {
             input.append(&Bytes::from_slice(env, tx_id.as_ref()));
         }
 
-        sha256(&input)
+        env.crypto().sha256(&input)
     }
 
     /// Settle batch on-chain

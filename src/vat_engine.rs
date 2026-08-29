@@ -7,7 +7,7 @@
 //! - Reverse charge detection
 //! - B2B/B2C rules
 
-use soroban_sdk::{contracttype, Env, Symbol};
+use soroban_sdk::{contracttype, Env, Symbol, Vec};
 use crate::tax::{
     VATTransaction, VATDetermination, VATSupplyType, VATExemptionReason,
     TaxJurisdiction,

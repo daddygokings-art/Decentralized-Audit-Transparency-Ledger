@@ -739,15 +739,14 @@ pub fn generate_passport_export(
         .get(&PassportDataKey::Passport(passport_id.clone()))
         .unwrap_or_else(|| panic!("Passport not found"));
 
+    let mut verification_url = Bytes::from_slice(&env, b"https://verify-passport.eu/");
+    verification_url.append(&passport_id);
     let export = PassportExport {
         export_date: env.ledger().timestamp(),
         format,
         data: Bytes::from_slice(&env, b"PASSPORT_DATA"), // Simplified for demo
         digital_signature: Some(env.crypto().sha256(&Bytes::from_slice(&env, b"PASSPORT_DATA"))),
-        verification_url: Bytes::from_slice(
-            &env,
-            format!("https://verify-passport.eu/{}", hex::encode(passport_id.to_vec())).as_bytes(),
-        ),
+        verification_url,
     };
 
     let mut exports: Vec<PassportExport> = env

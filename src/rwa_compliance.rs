@@ -324,24 +324,22 @@ impl ComplianceEngine {
     // ── Helpers ───────────────────────────────────────────────────────────────
 
     fn compute_profile_id(env: &Env, address: &Address) -> BytesN<32> {
-        use soroban_sdk::crypto::sha256;
-        let mut input = Bytes::new(env);
+                let mut input = Bytes::new(env);
         input.append(&Bytes::from_slice(env, address.to_xdr().as_ref()));
         input.append(&Bytes::from_slice(
             env,
             &env.ledger().timestamp().to_le_bytes(),
         ));
-        sha256(&input)
+        env.crypto().sha256(&input)
     }
 
     fn compute_check_id(env: &Env, subject: &Bytes, check_type: &Symbol) -> BytesN<32> {
-        use soroban_sdk::crypto::sha256;
-        let mut input = Bytes::new(env);
+                let mut input = Bytes::new(env);
         input.append(subject);
         input.append(&Bytes::from_slice(
             env,
             &env.ledger().timestamp().to_le_bytes(),
         ));
-        sha256(&input)
+        env.crypto().sha256(&input)
     }
 }
