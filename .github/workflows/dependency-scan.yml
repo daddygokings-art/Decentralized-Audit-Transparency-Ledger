@@ -1,0 +1,264 @@
+name: Dependency Scanning
+
+# Resolves: #484 (security scanning in CI/CD)
+#
+# Scans all dependency manifests across all language ecosystems in the repo:
+#   • Rust  — cargo-audit (RustSec), cargo-deny (license + ban policy)
+#   • Node  — npm audit (api/, bridge/, sdk/js/, ui/, packages/, services/)
+#   • Python — pip-audit (sdk/python/)
+#   • GitHub Dependency Review — catches newly introduced vulnerable deps on PRs
+#
+# SARIF reports are uploaded to GitHub's Security → Code scanning dashboard.
+
+permissions: {}
+
+on:
+  push:
+    branches: [master, main]
+    paths:
+      - "Cargo.toml"
+      - "Cargo.lock"
+      - "**/package.json"
+      - "**/package-lock.json"
+      - "**/yarn.lock"
+      - "**/pyproject.toml"
+      - "**/requirements*.txt"
+      - "deny.toml"
+      - ".github/workflows/dependency-scan.yml"
+  pull_request:
+    branches: [master, main]
+  schedule:
+    # Daily at 05:00 UTC — catches newly published advisories
+    - cron: "0 5 * * *"
+  workflow_dispatch:
+
+jobs:
+  # ── Rust ──────────────────────────────────────────────────────────────────
+  rust-audit:
+    name: Rust — cargo-audit
+    runs-on: ubuntu-latest
+    permissions:
+      contents: read
+      security-events: write
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          persist-credentials: false
+
+      - name: Install Rust toolchain
+        uses: dtolnay/rust-toolchain@stable
+
+      - name: Install cargo-audit
+        run: cargo install cargo-audit --features=fix
+
+      - name: Run cargo-audit (JSON)
+        run: |
+          cargo audit --json > cargo-audit-report.json 2>&1 || true
+          cat cargo-audit-report.json
+
+      - name: Convert cargo-audit JSON to SARIF
+        run: |
+          python3 - <<'PYEOF'
+          import json, sys, pathlib
+
+          report = {}
+          try:
+              report = json.loads(pathlib.Path("cargo-audit-report.json").read_text())
+          except Exception:
+              pass
+
+          vulns = report.get("vulnerabilities", {}).get("list", [])
+          results = []
+          for v in vulns:
+              adv = v.get("advisory", {})
+              pkg = v.get("package", {})
+              results.append({
+                  "ruleId": adv.get("id", "UNKNOWN"),
+                  "level": "error" if adv.get("cvss") else "warning",
+                  "message": {"text": f"{adv.get('title','Advisory')} — {adv.get('description','')[:300]}"},
+                  "locations": [{"physicalLocation": {"artifactLocation": {"uri": "Cargo.lock"}}}],
+              })
+
+          sarif = {
+              "version": "2.1.0",
+              "$schema": "https://schemastore.azurewebsites.net/schemas/json/sarif-2.1.0-rtm.5.json",
+              "runs": [{"tool": {"driver": {"name": "cargo-audit", "rules": []}}, "results": results}],
+          }
+          pathlib.Path("cargo-audit.sarif").write_text(json.dumps(sarif, indent=2))
+          print(f"Converted {len(results)} finding(s) to SARIF.")
+          PYEOF
+
+      - name: Upload SARIF
+        if: always()
+        uses: github/codeql-action/upload-sarif@v3
+        with:
+          sarif_file: cargo-audit.sarif
+          category: cargo-audit
+
+      - name: Upload raw report
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: cargo-audit-report
+          path: cargo-audit-report.json
+          retention-days: 90
+
+      - name: Fail on vulnerabilities
+        run: cargo audit --deny warnings
+
+  rust-deny:
+    name: Rust — cargo-deny
+    runs-on: ubuntu-latest
+    permissions:
+      contents: read
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          persist-credentials: false
+
+      - name: Install cargo-deny
+        run: cargo install cargo-deny
+
+      - name: Run cargo-deny
+        run: cargo deny check
+
+  # ── Node / npm ────────────────────────────────────────────────────────────
+  npm-audit:
+    name: npm audit (${{ matrix.dir }})
+    runs-on: ubuntu-latest
+    permissions:
+      contents: read
+    strategy:
+      fail-fast: false
+      matrix:
+        dir:
+          - api/rest
+          - api/graphql
+          - api/ws
+          - bridge
+          - sdk/js
+          - ui
+          - packages/security
+          - services/notifier
+          - tools/metrics-exporter
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          persist-credentials: false
+
+      - name: Setup Node.js
+        uses: actions/setup-node@v4
+        with:
+          node-version: "20"
+
+      - name: Check for package-lock.json
+        id: lockfile
+        run: |
+          if [ -f "${{ matrix.dir }}/package-lock.json" ] || [ -f "${{ matrix.dir }}/package.json" ]; then
+            echo "exists=true" >> "$GITHUB_OUTPUT"
+          else
+            echo "exists=false" >> "$GITHUB_OUTPUT"
+          fi
+
+      - name: npm audit
+        if: steps.lockfile.outputs.exists == 'true'
+        working-directory: ${{ matrix.dir }}
+        run: |
+          # Install deps first (needed for audit)
+          npm install --ignore-scripts --prefer-offline 2>/dev/null || npm install --ignore-scripts
+          # Run audit, exit-code 1 means critical vulnerabilities
+          npm audit --audit-level=high --json > npm-audit-report.json 2>&1 || true
+          cat npm-audit-report.json
+          # Fail if critical vulnerabilities exist
+          npm audit --audit-level=critical
+
+      - name: Upload npm audit report
+        if: always() && steps.lockfile.outputs.exists == 'true'
+        uses: actions/upload-artifact@v4
+        with:
+          name: npm-audit-${{ matrix.dir == 'api/rest' && 'api-rest' || matrix.dir == 'api/graphql' && 'api-graphql' || matrix.dir == 'api/ws' && 'api-ws' || matrix.dir }}
+          path: ${{ matrix.dir }}/npm-audit-report.json
+          retention-days: 90
+
+  # ── Python ────────────────────────────────────────────────────────────────
+  python-pip-audit:
+    name: Python — pip-audit
+    runs-on: ubuntu-latest
+    permissions:
+      contents: read
+      security-events: write
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          persist-credentials: false
+
+      - name: Setup Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+
+      - name: Install pip-audit
+        run: pip install pip-audit
+
+      - name: Run pip-audit (SARIF)
+        working-directory: sdk/python
+        run: |
+          pip-audit \
+            --requirement <(pip show pip-audit 2>/dev/null; grep -h "^[^#]" requirements*.txt 2>/dev/null || true) \
+            --format sarif \
+            --output pip-audit.sarif \
+            --skip-editable \
+            || true
+          # Also run against pyproject.toml
+          pip-audit . --format sarif --output pip-audit-project.sarif || true
+
+      - name: Upload pip-audit SARIF
+        if: always()
+        uses: github/codeql-action/upload-sarif@v3
+        with:
+          sarif_file: sdk/python/pip-audit.sarif
+          category: pip-audit
+        continue-on-error: true
+
+  # ── GitHub Dependency Review (PRs only) ───────────────────────────────────
+  dependency-review:
+    name: GitHub Dependency Review
+    runs-on: ubuntu-latest
+    if: github.event_name == 'pull_request'
+    permissions:
+      contents: read
+      pull-requests: write
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          persist-credentials: false
+
+      - name: Dependency Review
+        uses: actions/dependency-review-action@v4
+        with:
+          fail-on-severity: high
+          deny-licenses: AGPL-3.0, GPL-2.0, GPL-3.0, LGPL-2.0, LGPL-2.1, LGPL-3.0
+          comment-summary-in-pr: always
+
+  # ── Policy gate ───────────────────────────────────────────────────────────
+  dep-scan-gate:
+    name: Dependency scan policy gate
+    runs-on: ubuntu-latest
+    needs: [rust-audit, rust-deny, python-pip-audit]
+    if: always()
+    permissions:
+      contents: read
+    steps:
+      - name: Evaluate gate
+        run: |
+          RUST_AUDIT="${{ needs.rust-audit.result }}"
+          RUST_DENY="${{ needs.rust-deny.result }}"
+          PY_AUDIT="${{ needs.python-pip-audit.result }}"
+          echo "cargo-audit: $RUST_AUDIT"
+          echo "cargo-deny:  $RUST_DENY"
+          echo "pip-audit:   $PY_AUDIT"
+          if [[ "$RUST_AUDIT" == "failure" || "$RUST_DENY" == "failure" ]]; then
+            echo "❌ Dependency scan policy gate failed — critical/high vulnerabilities or license violations detected."
+            exit 1
+          fi
+          echo "✅ Dependency scan gate passed."
