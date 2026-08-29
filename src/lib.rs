@@ -4828,6 +4828,12 @@ pub mod sandbox_supervision;
 pub mod sandbox_innovation;
 pub mod sandbox_graduation;
 
+// FinOps Module
+pub mod finops;
+
+#[cfg(test)]
+mod finops_tests;
+
 #[cfg(test)]
 mod supply_chain_tests;
 
