@@ -1,0 +1,248 @@
+name: Artifact Signing (Sigstore)
+
+# Signs the WASM binary and SBOM using Sigstore cosign with keyless OIDC
+# signing. No long-lived private keys are stored anywhere.
+#
+# Keyless signing flow:
+#   1. GitHub Actions generates a short-lived OIDC token identifying the
+#      workflow run (audience: sigstore).
+#   2. cosign exchanges this token for a short-lived X.509 certificate from
+#      Fulcio (Sigstore's certificate authority).
+#   3. cosign signs the artifact digest with the ephemeral key and submits
+#      the signed certificate to Rekor (Sigstore's append-only transparency log).
+#   4. The .sig and .bundle files are uploaded as release assets.
+#
+# Verification (auditors):
+#   cosign verify-blob \
+#     --bundle audit_ledger.wasm.bundle \
+#     --certificate-identity-regexp 'https://github.com/.*' \
+#     --certificate-oidc-issuer https://token.actions.githubusercontent.com \
+#     audit_ledger.wasm
+#
+# Issue #504 — SLSA Level 3 supply chain security
+
+on:
+  push:
+    tags:
+      - "v[0-9]+.[0-9]+.[0-9]+"
+      - "v[0-9]+.[0-9]+.[0-9]+-*"
+  workflow_dispatch:
+    inputs:
+      artifact-run-id:
+        description: 'GitHub Actions run ID to download WASM artifact from (blank = build fresh)'
+        required: false
+        default: ''
+
+permissions: {}
+
+jobs:
+  sign:
+    name: Sign WASM + SBOM with Sigstore cosign
+    runs-on: ubuntu-24.04
+    permissions:
+      contents: read
+      id-token: write   # Required for OIDC token used in keyless signing
+      packages: write   # Required for OCI registry uploads (optional)
+
+    outputs:
+      wasm-digest:   ${{ steps.digests.outputs.wasm-digest }}
+      sbom-digest:   ${{ steps.digests.outputs.sbom-digest }}
+      rekor-log-id:  ${{ steps.sign-wasm.outputs.rekor-log-id }}
+
+    steps:
+      # ── Checkout ─────────────────────────────────────────────────────────
+      - name: Checkout source
+        # actions/checkout v4.2.2
+        uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683 # v4.2.2
+        with:
+          persist-credentials: false
+          ref: ${{ github.sha }}
+
+      # ── Harden runner ────────────────────────────────────────────────────
+      - name: Harden runner
+        # step-security/harden-runner v2.10.4
+        uses: step-security/harden-runner@4d991eb9b905ef189e4c376166672c3f2f230481 # v2.10.4
+        with:
+          egress-policy: audit
+          disable-sudo: true
+          allowed-endpoints: >
+            github.com:443
+            objects.githubusercontent.com:443
+            static.rust-lang.org:443
+            crates.io:443
+            index.crates.io:443
+            static.crates.io:443
+            fulcio.sigstore.dev:443
+            rekor.sigstore.dev:443
+            tuf-repo-cdn.sigstore.dev:443
+
+      # ── Install Rust toolchain ─────────────────────────────────────────────
+      - name: Install Rust 1.85.0 (pinned)
+        uses: dtolnay/rust-toolchain@c758e63728211bd4cbe26fa022e60290dd5c2e3c # 1.85.0
+        with:
+          toolchain: "1.85.0"
+          targets: wasm32v1-none
+
+      # ── Cargo cache ───────────────────────────────────────────────────────
+      - name: Cache Cargo registry
+        uses: actions/cache@5a3ec84eff668545956fd18022155c47e93e2684 # v4.2.3
+        with:
+          path: |
+            ~/.cargo/registry/index/
+            ~/.cargo/registry/cache/
+            ~/.cargo/git/db/
+          key: sign-cargo-${{ runner.os }}-1.85.0-${{ hashFiles('Cargo.lock') }}
+
+      # ── Build WASM artifact ───────────────────────────────────────────────
+      - name: Build WASM (hermetic)
+        env:
+          SOURCE_DATE_EPOCH: "0"
+          CARGO_INCREMENTAL: "0"
+          RUSTFLAGS: ""
+        run: |
+          cargo clean
+          cargo build \
+            --target wasm32v1-none \
+            --release \
+            --locked \
+            --frozen
+          cp target/wasm32v1-none/release/audit_ledger.wasm ./audit_ledger.wasm
+          echo "WASM size: $(stat --format='%s' audit_ledger.wasm) bytes"
+
+      # ── Generate SBOM ────────────────────────────────────────────────────
+      - name: Generate SBOM with cargo-cyclonedx
+        run: |
+          cargo install cargo-cyclonedx --locked
+          mkdir -p sbom
+          cargo cyclonedx --output sbom/audit-ledger-sbom.json
+          echo "SBOM generated: $(wc -l < sbom/audit-ledger-sbom.json) lines"
+
+      # ── Compute digests ───────────────────────────────────────────────────
+      - name: Compute artifact digests
+        id: digests
+        run: |
+          WASM_SHA=$(sha256sum audit_ledger.wasm | cut -d' ' -f1)
+          SBOM_SHA=$(sha256sum sbom/audit-ledger-sbom.json | cut -d' ' -f1)
+
+          echo "wasm-digest=sha256:${WASM_SHA}" >> "$GITHUB_OUTPUT"
+          echo "sbom-digest=sha256:${SBOM_SHA}" >> "$GITHUB_OUTPUT"
+
+          echo "WASM SHA-256: ${WASM_SHA}"
+          echo "SBOM SHA-256: ${SBOM_SHA}"
+
+          # Write combined checksums file
+          echo "${WASM_SHA}  audit_ledger.wasm" > checksums.txt
+          echo "${SBOM_SHA}  audit-ledger-sbom.json" >> checksums.txt
+          cat checksums.txt
+
+      # ── Install cosign ────────────────────────────────────────────────────
+      - name: Install cosign
+        # sigstore/cosign-installer v3.8.1
+        uses: sigstore/cosign-installer@d7d6bc7722e3daa8354c50bcb52f4837da5e9b6a # v3.8.1
+        with:
+          cosign-release: "v2.4.3"
+
+      - name: Verify cosign version
+        run: cosign version
+
+      # ── Sign WASM artifact ────────────────────────────────────────────────
+      - name: Sign WASM with cosign (keyless OIDC)
+        id: sign-wasm
+        env:
+          COSIGN_YES: "true"   # suppress interactive confirmation
+        run: |
+          # Sign and produce a Sigstore bundle (contains sig + cert + Rekor entry)
+          cosign sign-blob \
+            --bundle audit_ledger.wasm.bundle \
+            audit_ledger.wasm
+
+          echo "✓ WASM signed"
+          ls -lh audit_ledger.wasm.bundle
+
+          # Extract the Rekor log ID from the bundle for the step summary
+          REKOR_LOG_ID=$(jq -r '.rekorBundle.Payload.logIndex // "n/a"' audit_ledger.wasm.bundle 2>/dev/null || echo "n/a")
+          echo "rekor-log-id=${REKOR_LOG_ID}" >> "$GITHUB_OUTPUT"
+
+      # ── Sign SBOM ─────────────────────────────────────────────────────────
+      - name: Sign SBOM with cosign (keyless OIDC)
+        env:
+          COSIGN_YES: "true"
+        run: |
+          cosign sign-blob \
+            --bundle sbom/audit-ledger-sbom.json.bundle \
+            sbom/audit-ledger-sbom.json
+
+          echo "✓ SBOM signed"
+          ls -lh sbom/audit-ledger-sbom.json.bundle
+
+      # ── Sign checksums file ───────────────────────────────────────────────
+      - name: Sign checksums file
+        env:
+          COSIGN_YES: "true"
+        run: |
+          cosign sign-blob \
+            --bundle checksums.txt.bundle \
+            checksums.txt
+          echo "✓ checksums.txt signed"
+
+      # ── Verify signatures (self-check) ────────────────────────────────────
+      - name: Self-verify WASM signature
+        run: |
+          cosign verify-blob \
+            --bundle audit_ledger.wasm.bundle \
+            --certificate-identity-regexp "https://github.com/${{ github.repository }}/" \
+            --certificate-oidc-issuer "https://token.actions.githubusercontent.com" \
+            audit_ledger.wasm
+          echo "✓ WASM self-verification passed"
+
+      - name: Self-verify SBOM signature
+        run: |
+          cosign verify-blob \
+            --bundle sbom/audit-ledger-sbom.json.bundle \
+            --certificate-identity-regexp "https://github.com/${{ github.repository }}/" \
+            --certificate-oidc-issuer "https://token.actions.githubusercontent.com" \
+            sbom/audit-ledger-sbom.json
+          echo "✓ SBOM self-verification passed"
+
+      # ── Upload signing artifacts ──────────────────────────────────────────
+      - name: Upload signed artifacts
+        # actions/upload-artifact v4.6.2
+        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4.6.2
+        with:
+          name: signed-artifacts-${{ github.run_id }}
+          path: |
+            audit_ledger.wasm
+            audit_ledger.wasm.bundle
+            sbom/audit-ledger-sbom.json
+            sbom/audit-ledger-sbom.json.bundle
+            checksums.txt
+            checksums.txt.bundle
+          retention-days: 30
+          if-no-files-found: error
+
+      # ── Step summary ──────────────────────────────────────────────────────
+      - name: Write signing summary
+        run: |
+          WASM_SHA=$(sha256sum audit_ledger.wasm | cut -d' ' -f1)
+          REKOR_ID="${{ steps.sign-wasm.outputs.rekor-log-id }}"
+
+          echo "## 🔏 Artifact Signing Complete (Sigstore)" >> "$GITHUB_STEP_SUMMARY"
+          echo "" >> "$GITHUB_STEP_SUMMARY"
+          echo "Artifacts signed with **keyless OIDC signing** via Sigstore cosign." >> "$GITHUB_STEP_SUMMARY"
+          echo "No long-lived private keys were used." >> "$GITHUB_STEP_SUMMARY"
+          echo "" >> "$GITHUB_STEP_SUMMARY"
+          echo "| Artifact | SHA-256 | Rekor log entry |" >> "$GITHUB_STEP_SUMMARY"
+          echo "|----------|---------|-----------------|" >> "$GITHUB_STEP_SUMMARY"
+          echo "| \`audit_ledger.wasm\` | \`${WASM_SHA}\` | ${REKOR_ID} |" >> "$GITHUB_STEP_SUMMARY"
+          echo "" >> "$GITHUB_STEP_SUMMARY"
+          echo "### Verify the signature" >> "$GITHUB_STEP_SUMMARY"
+          echo "\`\`\`bash" >> "$GITHUB_STEP_SUMMARY"
+          echo "# Download audit_ledger.wasm and audit_ledger.wasm.bundle from the release" >> "$GITHUB_STEP_SUMMARY"
+          echo "cosign verify-blob \\" >> "$GITHUB_STEP_SUMMARY"
+          echo "  --bundle audit_ledger.wasm.bundle \\" >> "$GITHUB_STEP_SUMMARY"
+          echo "  --certificate-identity-regexp 'https://github.com/${{ github.repository }}/' \\" >> "$GITHUB_STEP_SUMMARY"
+          echo "  --certificate-oidc-issuer 'https://token.actions.githubusercontent.com' \\" >> "$GITHUB_STEP_SUMMARY"
+          echo "  audit_ledger.wasm" >> "$GITHUB_STEP_SUMMARY"
+          echo "\`\`\`" >> "$GITHUB_STEP_SUMMARY"
+          echo "" >> "$GITHUB_STEP_SUMMARY"
+          echo "See [scripts/verify-artifact.sh](../../scripts/verify-artifact.sh) for the full auditor verification script." >> "$GITHUB_STEP_SUMMARY"
