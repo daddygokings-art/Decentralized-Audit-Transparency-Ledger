@@ -1,0 +1,23 @@
+{
+  "name": "@audit-ledger/observability",
+  "version": "1.0.0",
+  "description": "Standardized observability stack with OpenTelemetry, Prometheus, Grafana, Loki, and Tempo",
+  "main": "dist/index.js",
+  "types": "dist/index.d.ts",
+  "scripts": {
+    "build": "tsc",
+    "test": "node --test test/*.test.js"
+  },
+  "keywords": [
+    "opentelemetry",
+    "prometheus",
+    "loki",
+    "tempo",
+    "grafana",
+    "tracing",
+    "metrics",
+    "logging"
+  ],
+  "author": "Audit Ledger Contributors",
+  "license": "Apache-2.0"
+}
