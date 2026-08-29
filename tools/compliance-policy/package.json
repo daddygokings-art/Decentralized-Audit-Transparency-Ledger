@@ -1,0 +1,37 @@
+{
+  "name": "@audit-ledger/compliance-policy",
+  "version": "1.0.0",
+  "description": "Continuous contract event compliance automation, OPA/Rego policy evaluation, drift detection, and regulatory audit reporting",
+  "main": "dist/index.js",
+  "types": "dist/index.d.ts",
+  "bin": {
+    "compliance-policy": "./dist/cli.js"
+  },
+  "scripts": {
+    "build": "tsc",
+    "check": "ts-node src/cli.ts check",
+    "drift": "ts-node src/cli.ts drift",
+    "report": "ts-node src/cli.ts report",
+    "test": "ts-node src/cli.ts test-policies"
+  },
+  "dependencies": {
+    "commander": "^12.0.0",
+    "js-yaml": "^4.1.0"
+  },
+  "devDependencies": {
+    "@types/js-yaml": "^4.0.9",
+    "@types/node": "^20.11.0",
+    "ts-node": "^10.9.2",
+    "typescript": "^5.3.3"
+  },
+  "keywords": [
+    "compliance",
+    "policy-as-code",
+    "opa",
+    "rego",
+    "audit-ledger",
+    "regulatory",
+    "drift-detection"
+  ],
+  "license": "Apache-2.0"
+}
