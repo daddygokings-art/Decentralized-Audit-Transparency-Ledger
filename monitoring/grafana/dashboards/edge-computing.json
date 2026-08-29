@@ -1,0 +1,61 @@
+{
+  "annotations": { "list": [] },
+  "editable": true,
+  "fiscalYearStartMonth": 0,
+  "graphTooltip": 1,
+  "id": null,
+  "links": [],
+  "liveNow": false,
+  "panels": [
+    {
+      "collapsed": false,
+      "gridPos": { "h": 8, "w": 12, "x": 0, "y": 0 },
+      "id": 1,
+      "title": "Edge Ingestion Latency (p50, p95, p99)",
+      "type": "timeseries",
+      "targets": [
+        {
+          "expr": "histogram_quantile(0.99, sum(rate(audit_ledger_edge_ingest_duration_seconds_bucket[5m])) by (le))",
+          "legendFormat": "p99 Latency"
+        },
+        {
+          "expr": "histogram_quantile(0.95, sum(rate(audit_ledger_edge_ingest_duration_seconds_bucket[5m])) by (le))",
+          "legendFormat": "p95 Latency"
+        },
+        {
+          "expr": "histogram_quantile(0.50, sum(rate(audit_ledger_edge_ingest_duration_seconds_bucket[5m])) by (le))",
+          "legendFormat": "p50 Latency"
+        }
+      ]
+    },
+    {
+      "collapsed": false,
+      "gridPos": { "h": 8, "w": 12, "x": 12, "y": 0 },
+      "id": 2,
+      "title": "Edge Query Cache Hit Ratio",
+      "type": "gauge",
+      "targets": [
+        {
+          "expr": "sum(rate(audit_ledger_edge_cache_hits_total[5m])) / sum(rate(audit_ledger_edge_cache_requests_total[5m])) * 100",
+          "legendFormat": "Cache Hit %"
+        }
+      ]
+    },
+    {
+      "collapsed": false,
+      "gridPos": { "h": 8, "w": 24, "x": 0, "y": 8 },
+      "id": 3,
+      "title": "Edge Traffic Throughput by Platform (Cloudflare, AWS, Fastly)",
+      "type": "timeseries",
+      "targets": [
+        {
+          "expr": "sum(rate(audit_ledger_edge_requests_total[1m])) by (platform)",
+          "legendFormat": "{{platform}}"
+        }
+      ]
+    }
+  ],
+  "schemaVersion": 38,
+  "title": "Contract Event Edge Computing & Query Caching",
+  "uid": "audit-ledger-edge-computing"
+}
