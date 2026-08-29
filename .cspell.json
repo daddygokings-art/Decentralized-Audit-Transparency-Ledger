@@ -1,0 +1,50 @@
+{
+  "version": "0.2",
+  "language": "en",
+  "words": [
+    "Soroban",
+    "Stellar",
+    "Rego",
+    "MiCA",
+    "FinCEN",
+    "FATF",
+    "Merkle",
+    "RBAC",
+    "OIDC",
+    "PKCE",
+    "JWKS",
+    "ITAR",
+    "OFAC",
+    "WCO",
+    "GATT",
+    "CBDC",
+    "DID",
+    "DIDs",
+    "Pact",
+    "Pacts",
+    "PactFlow",
+    "pacticipant",
+    "pacticipants",
+    "DevSecOps",
+    "Trivy",
+    "VitePress",
+    "MkDocs",
+    "Docusaurus",
+    "multiversion",
+    "subagents",
+    "Codespace",
+    "Chizzy"
+  ],
+  "customDictionaryPaths": [
+    "docs/.cspell/project-words.txt"
+  ],
+  "ignorePaths": [
+    "node_modules/**",
+    "dist/**",
+    "target/**",
+    ".git/**",
+    "pacts/**",
+    "**/*.json",
+    "**/*.lock"
+  ]
+}

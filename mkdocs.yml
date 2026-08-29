@@ -1,0 +1,78 @@
+site_name: Decentralized Audit Transparency Ledger
+site_description: Documentation for Soroban-based Decentralized Audit Transparency Ledger
+site_url: https://daddygokings-art.github.io/Decentralized-Audit-Transparency-Ledger/
+repo_url: https://github.com/daddygokings-art/Decentralized-Audit-Transparency-Ledger
+repo_name: daddygokings-art/Decentralized-Audit-Transparency-Ledger
+
+theme:
+  name: material
+  features:
+    - navigation.instant
+    - navigation.tracking
+    - navigation.tabs
+    - navigation.sections
+    - navigation.expand
+    - navigation.top
+    - search.suggest
+    - search.highlight
+    - content.code.copy
+    - content.tabs.link
+  palette:
+    - scheme: default
+      primary: indigo
+      accent: deep purple
+      toggle:
+        icon: material/brightness-7
+        name: Switch to dark mode
+    - scheme: slate
+      primary: indigo
+      accent: deep purple
+      toggle:
+        icon: material/brightness-4
+        name: Switch to light mode
+
+extra:
+  version:
+    provider: mike
+    default: latest
+
+markdown_extensions:
+  - admonition
+  - pymdownx.details
+  - pymdownx.superfences
+  - pymdownx.highlight:
+      anchor_linenums: true
+  - pymdownx.inlinehilite
+  - pymdownx.snippets
+  - pymdownx.tabbed:
+      alternate_style: true
+  - tables
+  - attr_list
+
+nav:
+  - Home: README.md
+  - Getting Started:
+      - Setup Guide: docs/onboarding/setup-guide.md
+      - Architecture Overview: docs/onboarding/architecture-overview.md
+      - Troubleshooting: docs/onboarding/troubleshooting-guide.md
+  - Contract Events:
+      - Overview: docs/contract-events/README.md
+      - Core Ledger Events: docs/contract-events/core-events.md
+      - Compliance Events: docs/contract-events/compliance-events.md
+      - Financial & RWA Events: docs/contract-events/financial-events.md
+      - Governance & Identity Events: docs/contract-events/governance-events.md
+  - Compliance:
+      - SOC 2: docs/compliance/soc2.md
+      - ISO 27001: docs/compliance/iso27001.md
+      - GDPR: docs/compliance/gdpr.md
+      - MiCA: docs/compliance/mica.md
+      - Event Policy-as-Code Guide: docs/compliance/contract-event-compliance-guide.md
+  - Architecture Decision Records:
+      - Index: docs/adr/ADR-001-append-only-log.md
+      - Compliance Policy-as-Code: docs/adr/ADR-015-contract-event-compliance-policy-as-code.md
+      - Pact Contract Testing: docs/adr/ADR-016-api-contract-testing-with-pact.md
+      - Docs-as-Code Workflow: docs/adr/ADR-017-docs-as-code-workflow.md
+  - Contributing:
+      - Contribution Guide: CONTRIBUTING.md
+      - Docs Contribution Guide: docs/onboarding/docs-contribution-guide.md
+      - Documentation Style Guide: docs/style-guide/documentation.md

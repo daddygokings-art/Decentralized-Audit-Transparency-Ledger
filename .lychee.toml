@@ -1,0 +1,18 @@
+# Lychee link checker configuration
+
+# Exclude specific patterns
+exclude = [
+  "^mailto:",
+  "^conversation://",
+  "^http://localhost",
+  "^http://127.0.0.1",
+  "https://github.com/daddygokings-art/Decentralized-Audit-Transparency-Ledger/pull/",
+  "https://github.com/daddygokings-art/Decentralized-Audit-Transparency-Ledger/issues/"
+]
+
+# Max retries and timeout
+max_retries = 3
+timeout = 10
+
+# Accept common HTTP codes
+accept = [200, 204, 301, 302, 307, 308]
