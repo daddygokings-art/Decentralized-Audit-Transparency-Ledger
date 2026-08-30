@@ -1,0 +1,91 @@
+name: Docs-as-Code Quality & Deployment
+
+on:
+  push:
+    branches: [ master, main ]
+    paths:
+      - 'docs/**'
+      - 'scripts/docs/**'
+      - '*.md'
+      - '.markdownlint.json'
+      - '.cspell.json'
+      - 'mkdocs.yml'
+  pull_request:
+    branches: [ master, main ]
+    paths:
+      - 'docs/**'
+      - 'scripts/docs/**'
+      - '*.md'
+      - '.markdownlint.json'
+      - '.cspell.json'
+      - 'mkdocs.yml'
+  workflow_dispatch:
+
+jobs:
+  validate-docs:
+    name: Markdown, Links, Spelling & Schema Validation
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v4
+
+      - name: Setup Node.js
+        uses: actions/setup-node@v4
+        with:
+          node-version: 20
+
+      - name: Setup Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: '3.11'
+
+      - name: Install Markdownlint CLI & CSpell
+        run: |
+          npm install -g markdownlint-cli cspell
+
+      - name: Markdown Linting
+        run: |
+          markdownlint "docs/**/*.md" "README.md" "CONTRIBUTING.md" --config .markdownlint.json --ignore-path .markdownlintignore || true
+
+      - name: Spell Checking
+        run: |
+          chmod +x scripts/docs/check-spelling.sh
+          ./scripts/docs/check-spelling.sh
+
+      - name: Link Validation
+        run: |
+          chmod +x scripts/docs/check-links.sh
+          ./scripts/docs/check-links.sh
+
+      - name: Contract Event Schema Validation
+        run: |
+          python3 scripts/docs/validate-event-docs.py
+
+  build-and-deploy-docs:
+    name: Multi-Version Docs Build & Deployment
+    runs-on: ubuntu-latest
+    needs: validate-docs
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v4
+
+      - name: Setup Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: '3.11'
+
+      - name: Install MkDocs Material & Mike
+        run: |
+          pip install mkdocs-material mike
+
+      - name: Build Multi-Version Docs
+        run: |
+          chmod +x scripts/docs/build-multiversion.sh
+          ./scripts/docs/build-multiversion.sh
+
+      - name: Upload Docs Site Artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: docs-site
+          path: site/
+          retention-days: 30

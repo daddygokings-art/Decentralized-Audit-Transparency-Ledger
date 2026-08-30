@@ -1,0 +1,54 @@
+{
+  "$schema": "http://json-schema.org/draft-07/schema#",
+  "title": "AuditLedger Contract Event Schemas",
+  "type": "object",
+  "properties": {
+    "core_event": {
+      "type": "object",
+      "required": ["index", "submitter", "timestamp", "topic", "hash"],
+      "properties": {
+        "index": { "type": "integer", "minimum": 0 },
+        "submitter": { "type": "string" },
+        "timestamp": { "type": "integer" },
+        "topic": { "type": "string" },
+        "hash": { "type": "string", "pattern": "^(0x)?[a-fA-F0-9]{64}$" }
+      }
+    },
+    "anti_corruption_event": {
+      "type": "object",
+      "required": ["incident_id", "severity"],
+      "properties": {
+        "incident_id": { "type": "string" },
+        "severity": { "type": "string", "enum": ["LOW", "MEDIUM", "HIGH", "CRITICAL"] },
+        "assigned_officer": { "type": ["string", "null"] }
+      }
+    },
+    "export_controls_event": {
+      "type": "object",
+      "required": ["screening_status", "is_dual_use", "destination_country"],
+      "properties": {
+        "screening_status": { "type": "string", "enum": ["CLEAR", "DENIED_PARTY_MATCH", "FLAGGED"] },
+        "is_dual_use": { "type": "boolean" },
+        "license_number": { "type": ["string", "null"] },
+        "destination_country": { "type": "string", "pattern": "^[A-Z]{2}(_[A-Z_]+)?$" }
+      }
+    },
+    "trade_compliance_event": {
+      "type": "object",
+      "required": ["hs_code", "origin_verified"],
+      "properties": {
+        "certificate_of_origin_hash": { "type": ["string", "null"] },
+        "origin_verified": { "type": "boolean" },
+        "hs_code": { "type": "string", "pattern": "^[0-9]{6}([0-9]{2}|[0-9]{4})?$" }
+      }
+    },
+    "stablecoin_reserves_event": {
+      "type": "object",
+      "required": ["asset_id", "reserve_ratio"],
+      "properties": {
+        "asset_id": { "type": "string" },
+        "reserve_ratio": { "type": "number", "minimum": 0.0 }
+      }
+    }
+  }
+}
