@@ -258,7 +258,7 @@ pub struct GraduationCriteria {
     /// All regulatory requirements met
     pub regulatory_approval_required: bool,
     /// Financial health assessment passed
-    pub financial_health_assess_req: bool,
+    pub financial_health_required: bool,
     /// Technology readiness score (0-100)
     pub min_tech_readiness_score: u32,
 }
@@ -271,7 +271,7 @@ impl GraduationCriteria {
             min_compliance_score: 85,
             min_user_satisfaction: 75,
             regulatory_approval_required: true,
-            financial_health_assessment_required: true,
+            financial_health_required: true,
             min_tech_readiness_score: 80,
         }
     }
@@ -283,7 +283,7 @@ impl GraduationCriteria {
             min_compliance_score: 95,
             min_user_satisfaction: 85,
             regulatory_approval_required: true,
-            financial_health_assessment_required: true,
+            financial_health_required: true,
             min_tech_readiness_score: 90,
         }
     }
@@ -295,7 +295,7 @@ impl GraduationCriteria {
             min_compliance_score: 75,
             min_user_satisfaction: 60,
             regulatory_approval_required: true,
-            financial_health_assessment_required: false,
+            financial_health_required: false,
             min_tech_readiness_score: 70,
         }
     }

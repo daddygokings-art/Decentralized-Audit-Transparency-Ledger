@@ -1,0 +1,34 @@
+{
+  "editable": true,
+  "panels": [
+    {
+      "datasource": "Prometheus",
+      "gridPos": { "h": 6, "w": 8, "x": 0, "y": 0 },
+      "id": 1,
+      "title": "OTel Collector Export Rate",
+      "type": "timeseries",
+      "targets": [{ "expr": "sum(rate(otelcol_exporter_sent_spans[1m])) by (exporter)", "legendFormat": "{{exporter}}" }]
+    },
+    {
+      "datasource": "Prometheus",
+      "gridPos": { "h": 6, "w": 8, "x": 8, "y": 0 },
+      "id": 2,
+      "title": "Loki Log Ingestion Bytes",
+      "type": "timeseries",
+      "targets": [{ "expr": "sum(rate(loki_distributor_bytes_received_total[1m]))", "legendFormat": "Bytes/sec" }]
+    },
+    {
+      "datasource": "Prometheus",
+      "gridPos": { "h": 6, "w": 8, "x": 16, "y": 0 },
+      "id": 3,
+      "title": "Tempo Trace Storage Compaction",
+      "type": "stat",
+      "targets": [{ "expr": "sum(tempo_compactor_blocks_retained)", "legendFormat": "Retained Blocks" }]
+    }
+  ],
+  "schemaVersion": 38,
+  "style": "dark",
+  "tags": ["observability", "health"],
+  "title": "Observability Infrastructure Health",
+  "uid": "observability-infra-health"
+}

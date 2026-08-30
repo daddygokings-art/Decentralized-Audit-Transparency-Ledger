@@ -49,14 +49,13 @@ impl SandboxManager {
         applicant: &Address,
         organization_name: &Bytes,
     ) -> BytesN<32> {
-        use soroban_sdk::crypto::sha256;
-
+        
         let mut input = Bytes::new(env);
         input.append(&Bytes::from_slice(env, applicant.to_xdr().as_ref()));
         input.append(organization_name);
         input.append(&Bytes::from_slice(env, &env.ledger().timestamp().to_le_bytes()));
 
-        sha256(&input)
+        env.crypto().sha256(&input)
     }
 
     /// Approve application and create participant
@@ -120,13 +119,12 @@ impl SandboxManager {
 
     /// Compute participant ID
     pub fn compute_participant_id(env: &Env, applicant: &Address) -> BytesN<32> {
-        use soroban_sdk::crypto::sha256;
-
+        
         let mut input = Bytes::new(env);
         input.append(&Bytes::from_slice(env, applicant.to_xdr().as_ref()));
         input.append(&Bytes::from_slice(env, b"PARTICIPANT"));
 
-        sha256(&input)
+        env.crypto().sha256(&input)
     }
 
     /// Extend participant duration

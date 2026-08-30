@@ -78,13 +78,12 @@ impl EnvironmentManager {
 
     /// Compute sandbox ID
     pub fn compute_sandbox_id(env: &Env, participant_id: &BytesN<32>) -> BytesN<32> {
-        use soroban_sdk::crypto::sha256;
-
+        
         let mut input = Bytes::new(env);
         input.append(&Bytes::from_slice(env, participant_id.as_ref()));
         input.append(&Bytes::from_slice(env, b"SANDBOX"));
 
-        sha256(&input)
+        env.crypto().sha256(&input)
     }
 
     /// Check transaction against sandbox limits
@@ -173,14 +172,13 @@ impl EnvironmentManager {
 
     /// Update sandbox state hash
     pub fn update_state_hash(env: &Env, sandbox: &mut SandboxInstance) {
-        use soroban_sdk::crypto::sha256;
-
+        
         let mut input = Bytes::new(env);
         input.append(&Bytes::from_slice(env, sandbox.sandbox_id.as_ref()));
         input.append(&Bytes::from_slice(env, &sandbox.daily_volume_used.to_le_bytes()));
         input.append(&Bytes::from_slice(env, &sandbox.transaction_count.to_le_bytes()));
 
-        sandbox.state_hash = sha256(&input);
+        sandbox.state_hash = env.crypto().sha256(&input);
     }
 }
 

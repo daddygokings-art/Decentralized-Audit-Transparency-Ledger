@@ -155,14 +155,13 @@ impl InteropManager {
         }
 
         // Generate swap ID
-        use soroban_sdk::crypto::sha256;
-        let mut input = Bytes::new(env);
+                let mut input = Bytes::new(env);
         input.append(&Bytes::from_slice(env, from.to_xdr().as_ref()));
         input.append(&Bytes::from_slice(env, to.to_xdr().as_ref()));
         input.append(&Bytes::from_slice(env, &source_amount.to_le_bytes()));
         input.append(&Bytes::from_slice(env, &dest_amount.to_le_bytes()));
 
-        Ok(sha256(&input))
+        Ok(env.crypto().sha256(&input))
     }
 
     /// Execute hub-and-spoke settlement
@@ -177,13 +176,12 @@ impl InteropManager {
         }
 
         // Generate settlement ID
-        use soroban_sdk::crypto::sha256;
-        let mut input = Bytes::new(env);
+                let mut input = Bytes::new(env);
         input.append(&Bytes::from_slice(env, hub_address.to_xdr().as_ref()));
         input.append(&Bytes::from_slice(env, &source_amount.to_le_bytes()));
         input.append(&Bytes::from_slice(env, &dest_amount.to_le_bytes()));
 
-        Ok(sha256(&input))
+        Ok(env.crypto().sha256(&input))
     }
 
     /// Validate settlement instruction

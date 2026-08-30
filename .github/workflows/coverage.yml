@@ -1,0 +1,357 @@
+name: Coverage
+
+# Runs on every push to main/master and on all pull requests.
+# Posts a coverage report comment on PRs and uploads artifacts.
+# Issue #495 — contract event test coverage reporting with thresholds
+
+on:
+  push:
+    branches: [main, master, develop]
+    paths:
+      - 'src/**'
+      - 'tests/**'
+      - 'Cargo.toml'
+      - 'Cargo.lock'
+      - 'coverage.toml'
+      - 'scripts/coverage.sh'
+      - 'scripts/check_coverage_thresholds.py'
+      - '.github/workflows/coverage.yml'
+  pull_request:
+    paths:
+      - 'src/**'
+      - 'tests/**'
+      - 'Cargo.toml'
+      - 'Cargo.lock'
+      - 'coverage.toml'
+      - 'scripts/coverage.sh'
+      - 'scripts/check_coverage_thresholds.py'
+  workflow_dispatch:
+    inputs:
+      fail_on_threshold:
+        description: 'Fail the workflow if coverage thresholds are not met'
+        type: boolean
+        default: true
+
+# Cancel any in-progress coverage run for the same ref/PR
+concurrency:
+  group: coverage-${{ github.ref }}
+  cancel-in-progress: true
+
+permissions:
+  contents: read        # checkout
+  pull-requests: write  # post PR comment
+
+jobs:
+  coverage:
+    name: Coverage report
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
+
+    steps:
+      # ── Checkout ────────────────────────────────────────────────────────────
+      - name: Checkout repository
+        uses: actions/checkout@v4
+        with:
+          persist-credentials: false
+
+      # ── Rust toolchain ───────────────────────────────────────────────────────
+      - name: Install Rust toolchain
+        uses: dtolnay/rust-toolchain@stable
+        with:
+          # llvm-tools-preview is required by cargo-llvm-cov
+          components: llvm-tools-preview
+
+      # ── Caching ──────────────────────────────────────────────────────────────
+      - name: Cache Cargo registry
+        uses: actions/cache@v4
+        with:
+          path: |
+            ~/.cargo/registry/index/
+            ~/.cargo/registry/cache/
+            ~/.cargo/git/db/
+          key: ${{ runner.os }}-cargo-registry-${{ hashFiles('Cargo.lock') }}
+          restore-keys: |
+            ${{ runner.os }}-cargo-registry-
+
+      - name: Cache build artefacts
+        uses: actions/cache@v4
+        with:
+          path: target/
+          key: ${{ runner.os }}-cargo-target-cov-${{ hashFiles('Cargo.lock') }}
+          restore-keys: |
+            ${{ runner.os }}-cargo-target-cov-
+            ${{ runner.os }}-cargo-target-
+
+      # ── Install cargo-llvm-cov ───────────────────────────────────────────────
+      - name: Install cargo-llvm-cov
+        run: |
+          if ! cargo llvm-cov --version 2>/dev/null; then
+            cargo install cargo-llvm-cov --locked
+          fi
+
+      # ── Python (for threshold checker) ──────────────────────────────────────
+      - name: Set up Python 3.11
+        uses: actions/setup-python@v5
+        with:
+          python-version: '3.11'
+
+      # ── Run coverage ────────────────────────────────────────────────────────
+      - name: Run tests with coverage
+        run: |
+          mkdir -p coverage
+          # Build exclusion regex from coverage.toml
+          EXCL_REGEX=$(python3 - <<'PYEOF'
+import re, sys
+try:
+    text = open('coverage.toml').read()
+    # Extract the files list from [exclusions] section
+    m = re.search(r'\[exclusions\](.*?)(\[|\Z)', text, re.DOTALL)
+    if not m:
+        print('src/(fuzz|bench|proptest|comprehensive_fuzz|test|.*_tests)\\.rs|tests/')
+        sys.exit(0)
+    section = m.group(1)
+    files = re.findall(r'"([^"]+)"', section)
+    if not files:
+        print('src/(fuzz|bench|proptest|comprehensive_fuzz|test|.*_tests)\\.rs|tests/')
+        sys.exit(0)
+    # Escape each path for use as a regex fragment
+    parts = [re.escape(f.rstrip('/')) for f in files]
+    print('|'.join(parts))
+except Exception as e:
+    print('src/(fuzz|bench|proptest|comprehensive_fuzz|test|.*_tests)\\.rs|tests/')
+PYEOF
+)
+          echo "Exclusion regex: ${EXCL_REGEX}"
+
+          # Run all tests under llvm-cov instrumentation (sequential to avoid
+          # LLVM profiling data races across parallel workers)
+          cargo llvm-cov \
+            --workspace \
+            --ignore-filename-regex "${EXCL_REGEX}" \
+            --no-report \
+            -- --test-threads=1 \
+          2>&1 | tee coverage/test-output.log
+        # We intentionally do not use `set -e` here so we still generate
+        # reports even when individual tests fail.
+        continue-on-error: false
+
+      # ── Generate JSON summary ────────────────────────────────────────────────
+      - name: Generate JSON coverage summary
+        run: |
+          EXCL_REGEX=$(python3 -c "
+import re, sys
+try:
+    text = open('coverage.toml').read()
+    m = re.search(r'\[exclusions\](.*?)(\[|\Z)', text, re.DOTALL)
+    section = m.group(1) if m else ''
+    files = re.findall(r'\"([^\"]+)\"', section)
+    print('|'.join(re.escape(f.rstrip('/')) for f in files) if files else 'tests/')
+except:
+    print('tests/')
+")
+          cargo llvm-cov \
+            --workspace \
+            --ignore-filename-regex "${EXCL_REGEX}" \
+            --json \
+            --summary-only \
+            --output-path coverage/coverage-summary.json
+
+      # ── Generate LCOV report ─────────────────────────────────────────────────
+      - name: Generate LCOV report
+        run: |
+          EXCL_REGEX=$(python3 -c "
+import re, sys
+try:
+    text = open('coverage.toml').read()
+    m = re.search(r'\[exclusions\](.*?)(\[|\Z)', text, re.DOTALL)
+    section = m.group(1) if m else ''
+    files = re.findall(r'\"([^\"]+)\"', section)
+    print('|'.join(re.escape(f.rstrip('/')) for f in files) if files else 'tests/')
+except:
+    print('tests/')
+")
+          cargo llvm-cov \
+            --workspace \
+            --ignore-filename-regex "${EXCL_REGEX}" \
+            --lcov \
+            --output-path coverage/lcov.info
+
+      # ── Generate HTML report ─────────────────────────────────────────────────
+      - name: Generate HTML report
+        run: |
+          EXCL_REGEX=$(python3 -c "
+import re, sys
+try:
+    text = open('coverage.toml').read()
+    m = re.search(r'\[exclusions\](.*?)(\[|\Z)', text, re.DOTALL)
+    section = m.group(1) if m else ''
+    files = re.findall(r'\"([^\"]+)\"', section)
+    print('|'.join(re.escape(f.rstrip('/')) for f in files) if files else 'tests/')
+except:
+    print('tests/')
+")
+          cargo llvm-cov \
+            --workspace \
+            --ignore-filename-regex "${EXCL_REGEX}" \
+            --html \
+            --output-dir coverage/html
+
+      # ── Threshold enforcement ────────────────────────────────────────────────
+      - name: Check coverage thresholds
+        id: threshold_check
+        run: |
+          python3 scripts/check_coverage_thresholds.py \
+            --summary coverage/coverage-summary.json \
+            --config  coverage.toml \
+            --output-markdown coverage/coverage-comment.md \
+            --github-output
+        continue-on-error: true
+        # We capture the exit code separately so we can post the PR comment
+        # before failing the job (if configured to fail).
+
+      # ── Emit step summary ────────────────────────────────────────────────────
+      - name: Write step summary
+        if: always()
+        run: |
+          if [ -f coverage/coverage-comment.md ]; then
+            cat coverage/coverage-comment.md >> "$GITHUB_STEP_SUMMARY"
+          fi
+
+      # ── Coverage trend ────────────────────────────────────────────────────────
+      - name: Update coverage trend
+        if: always() && github.event_name != 'pull_request'
+        run: |
+          TIMESTAMP=$(date -u +"%Y-%m-%dT%H:%M:%SZ")
+          GIT_SHA=$(git rev-parse --short HEAD)
+          GIT_REF="${{ github.ref_name }}"
+
+          python3 - <<PYEOF
+import json, os
+from pathlib import Path
+
+trend_file = Path('coverage-trend.json')
+if trend_file.exists():
+    try:
+        trend = json.loads(trend_file.read_text())
+    except json.JSONDecodeError:
+        trend = {"runs": []}
+else:
+    trend = {"runs": []}
+
+summary_path = Path('coverage/coverage-summary.json')
+line_pct = 0.0
+branch_pct = 0.0
+if summary_path.exists():
+    try:
+        s = json.loads(summary_path.read_text())
+        totals = s.get('data', [{}])[0].get('totals', {})
+        line_pct   = totals.get('lines',    {}).get('percent', 0.0)
+        branch_pct = totals.get('branches', {}).get('percent', 0.0)
+    except Exception:
+        pass
+
+entry = {
+    "timestamp":  "${TIMESTAMP}",
+    "git_sha":    "${GIT_SHA}",
+    "git_ref":    "${GIT_REF}",
+    "line_pct":   round(line_pct,   2),
+    "branch_pct": round(branch_pct, 2),
+    "run_id":     os.environ.get("GITHUB_RUN_ID", ""),
+    "run_number": os.environ.get("GITHUB_RUN_NUMBER", ""),
+}
+
+trend["runs"].append(entry)
+# Keep last 30 entries
+if len(trend["runs"]) > 30:
+    trend["runs"] = trend["runs"][-30:]
+
+trend_file.write_text(json.dumps(trend, indent=2))
+print(f"Trend updated: {len(trend['runs'])} runs tracked")
+print(f"Latest: line={line_pct:.2f}%  branch={branch_pct:.2f}%")
+PYEOF
+
+      # ── Upload coverage artifacts ────────────────────────────────────────────
+      - name: Upload coverage reports
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: coverage-reports-${{ github.run_id }}
+          path: |
+            coverage/coverage-summary.json
+            coverage/lcov.info
+            coverage/coverage-report.txt
+            coverage/coverage-comment.md
+            coverage-trend.json
+          retention-days: 30
+          if-no-files-found: warn
+
+      - name: Upload HTML coverage report
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: coverage-html-${{ github.run_id }}
+          path: coverage/html/
+          retention-days: 14
+          if-no-files-found: warn
+
+      # ── Post PR comment ──────────────────────────────────────────────────────
+      - name: Post coverage comment on PR
+        if: github.event_name == 'pull_request' && always()
+        uses: actions/github-script@v7
+        with:
+          github-token: ${{ secrets.GITHUB_TOKEN }}
+          script: |
+            const fs = require('fs');
+            const commentPath = 'coverage/coverage-comment.md';
+            if (!fs.existsSync(commentPath)) {
+              console.log('No coverage comment file found, skipping.');
+              return;
+            }
+
+            let body = fs.readFileSync(commentPath, 'utf8');
+
+            // Add a link to the HTML report artifact
+            const runUrl = `https://github.com/${context.repo.owner}/${context.repo.repo}/actions/runs/${context.runId}`;
+            body += `\n\n> 📊 [View full HTML report](${runUrl}) (download \`coverage-html-${context.runId}\` artifact)\n`;
+            body += `> _Workflow run: [#${context.runNumber}](${runUrl})_\n`;
+
+            // Find and update an existing bot comment if present, else create one
+            const markerText = '<!-- coverage-report-bot -->';
+            body = markerText + '\n' + body;
+
+            const { data: comments } = await github.rest.issues.listComments({
+              owner: context.repo.owner,
+              repo:  context.repo.repo,
+              issue_number: context.issue.number,
+            });
+
+            const existingComment = comments.find(c =>
+              c.user.type === 'Bot' && c.body.includes(markerText)
+            );
+
+            if (existingComment) {
+              await github.rest.issues.updateComment({
+                owner:      context.repo.owner,
+                repo:       context.repo.repo,
+                comment_id: existingComment.id,
+                body,
+              });
+              console.log(`Updated existing coverage comment #${existingComment.id}`);
+            } else {
+              await github.rest.issues.createComment({
+                owner:        context.repo.owner,
+                repo:         context.repo.repo,
+                issue_number: context.issue.number,
+                body,
+              });
+              console.log('Created new coverage comment');
+            }
+
+      # ── Fail if thresholds not met ───────────────────────────────────────────
+      - name: Fail if coverage thresholds not met
+        if: |
+          steps.threshold_check.outcome == 'failure' &&
+          (github.event.inputs.fail_on_threshold != 'false')
+        run: |
+          echo "Coverage thresholds were not met. See the report above."
+          exit 1

@@ -125,8 +125,7 @@ impl IntegrationManager {
 
     /// Compute endpoint ID
     pub fn compute_endpoint_id(env: &Env, framework: RegulatoryFramework) -> BytesN<32> {
-        use soroban_sdk::crypto::sha256;
-
+        
         let mut input = Bytes::new(env);
         input.append(&Bytes::from_slice(
             env,
@@ -134,7 +133,7 @@ impl IntegrationManager {
         ));
         input.append(&Bytes::from_slice(env, b"ENDPOINT"));
 
-        sha256(&input)
+        env.crypto().sha256(&input)
     }
 
     /// Create transmission record
@@ -169,14 +168,13 @@ impl IntegrationManager {
         source: &Address,
         destination: &Address,
     ) -> BytesN<32> {
-        use soroban_sdk::crypto::sha256;
-
+        
         let mut input = Bytes::new(env);
         input.append(&Bytes::from_slice(env, source.to_xdr().as_ref()));
         input.append(&Bytes::from_slice(env, destination.to_xdr().as_ref()));
         input.append(&Bytes::from_slice(env, &env.ledger().timestamp().to_le_bytes()));
 
-        sha256(&input)
+        env.crypto().sha256(&input)
     }
 
     /// Acknowledge transmission (regulator confirms receipt)

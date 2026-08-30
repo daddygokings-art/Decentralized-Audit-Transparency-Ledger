@@ -1,0 +1,99 @@
+{
+  "annotations": {
+    "list": []
+  },
+  "editable": true,
+  "fiscalYearStartMonth": 0,
+  "graphTooltip": 0,
+  "id": 3,
+  "links": [],
+  "liveNow": false,
+  "panels": [
+    {
+      "collapsed": false,
+      "gridPos": {
+        "h": 8,
+        "w": 12,
+        "x": 0,
+        "y": 0
+      },
+      "id": 1,
+      "title": "Progressive Canary Rollout Percentage",
+      "type": "timeseries",
+      "targets": [
+        {
+          "expr": "auditledger_canary_rollout_percentage",
+          "legendFormat": "{{flag_key}} - {{stage}}",
+          "refId": "A"
+        }
+      ]
+    },
+    {
+      "collapsed": false,
+      "gridPos": {
+        "h": 8,
+        "w": 12,
+        "x": 12,
+        "y": 0
+      },
+      "id": 2,
+      "title": "Canary Error Rate vs Baseline (bps)",
+      "type": "timeseries",
+      "targets": [
+        {
+          "expr": "rate(auditledger_canary_errors_total[5m]) / rate(auditledger_canary_requests_total[5m]) * 10000",
+          "legendFormat": "{{flag_key}} canary error rate",
+          "refId": "A"
+        }
+      ]
+    },
+    {
+      "collapsed": false,
+      "gridPos": {
+        "h": 8,
+        "w": 12,
+        "x": 0,
+        "y": 8
+      },
+      "id": 3,
+      "title": "Active Kill Switches & Trigger Events",
+      "type": "stat",
+      "targets": [
+        {
+          "expr": "sum(auditledger_kill_switch_active)",
+          "legendFormat": "Active Kill Switches",
+          "refId": "A"
+        }
+      ]
+    },
+    {
+      "collapsed": false,
+      "gridPos": {
+        "h": 8,
+        "w": 12,
+        "x": 12,
+        "y": 8
+      },
+      "id": 4,
+      "title": "Experimentation Variant Distribution",
+      "type": "piechart",
+      "targets": [
+        {
+          "expr": "sum by (variant) (rate(auditledger_experiment_evaluations_total[10m]))",
+          "legendFormat": "{{variant}}",
+          "refId": "A"
+        }
+      ]
+    }
+  ],
+  "refresh": "5s",
+  "schemaVersion": 38,
+  "style": "dark",
+  "tags": ["feature-flags", "canary", "progressive-delivery", "kill-switch"],
+  "time": {
+    "from": "now-1h",
+    "to": "now"
+  },
+  "title": "AuditLedger — Feature Flags & Progressive Delivery",
+  "uid": "auditledger-feature-flags"
+}

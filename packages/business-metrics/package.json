@@ -1,0 +1,22 @@
+{
+  "name": "@audit-ledger/business-metrics",
+  "version": "1.0.0",
+  "description": "Contract event business metrics and KPIs engine tracking submitters, growth, governance, bridge, and API adoption",
+  "main": "dist/index.js",
+  "types": "dist/index.d.ts",
+  "scripts": {
+    "build": "tsc",
+    "test": "node --test test/*.test.js"
+  },
+  "keywords": [
+    "audit-ledger",
+    "business-metrics",
+    "kpi",
+    "analytics",
+    "executive-dashboard",
+    "submitters",
+    "growth"
+  ],
+  "author": "Audit Ledger Contributors",
+  "license": "Apache-2.0"
+}

@@ -195,8 +195,7 @@ pub struct CBDCTransaction {
 impl CBDCTransaction {
     /// Computes content-hash for transaction (similar to audit log events)
     pub fn compute_hash(&self, prev_hash: &BytesN<32>) -> BytesN<32> {
-        use soroban_sdk::crypto::sha256;
-
+        
         let mut input = soroban_sdk::Bytes::new(prev_hash.env());
 
         // Append serializable fields for hashing
@@ -221,7 +220,7 @@ impl CBDCTransaction {
         input.append(&Bytes::from_slice(&self.tx_id.env(), &self.timestamp.to_le_bytes()));
         input.append(&self.metadata);
 
-        sha256(&input)
+        self.tx_id.env().crypto().sha256(&input)
     }
 }
 

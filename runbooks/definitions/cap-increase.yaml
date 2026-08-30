@@ -1,0 +1,38 @@
+apiVersion: runbooks.audit-ledger.io/v1
+kind: OperationalRunbook
+metadata:
+  id: RB-002-CAP-INCREASE
+  name: Ledger Storage & Throughput Cap Expansion
+  version: 1.0.0
+spec:
+  type: CAP_INCREASE
+  author: SRE / Performance Engineering
+  description: "Expand ledger storage capacity and throughput caps dynamically"
+  preconditions:
+    - check: requested_cap_bound
+      maxMultiplier: 3.0
+    - check: relayer_memory_headroom
+      minMb: 512
+  steps:
+    - id: 1
+      name: "Inspect Storage Headroom & Bounds Check"
+      isIdempotent: true
+      timeoutSeconds: 20
+      action: "check_storage_safety_margin"
+    - id: 2
+      name: "Submit On-Chain Cap Update Transaction"
+      isIdempotent: true
+      timeoutSeconds: 45
+      action: "soroban_set_global_max_logs"
+      rollback: "soroban_revert_max_logs"
+    - id: 3
+      name: "Scale Relayer Batching & Rate Limiter Throttles"
+      isIdempotent: true
+      timeoutSeconds: 30
+      action: "scale_relayer_batching_and_concurrency"
+      rollback: "revert_relayer_concurrency"
+    - id: 4
+      name: "Post-Expansion Health Check"
+      isIdempotent: true
+      timeoutSeconds: 25
+      action: "emit_synthetic_probe_verification"
