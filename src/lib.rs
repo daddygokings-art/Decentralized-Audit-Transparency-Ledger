@@ -43,6 +43,8 @@ pub mod esg_reporting;
 // Data retention, legal hold, GDPR erasure, and the immutable operational audit log.
 pub mod data_retention;
 
+// Privacy-preserving analytics suite: DP, FL, SMPC, and HE (issue #528)
+pub mod privacy_preserving_analytics;
 // Contract event data governance and catalog (issue #527)
 pub mod data_governance;
 
