@@ -1,0 +1,24 @@
+service: audit-ledger-lambda-edge
+
+provider:
+  name: aws
+  runtime: nodejs20.x
+  region: us-east-1 # Lambda@Edge must be deployed to us-east-1
+  stage: ${opt:stage, 'prod'}
+  memorySize: 128
+  timeout: 5
+
+functions:
+  viewerRequest:
+    handler: viewerRequest.handler
+    events:
+      - cloudFront:
+          eventType: viewer-request
+          origin: https://api.audit-ledger.network
+
+  originResponse:
+    handler: originResponse.handler
+    events:
+      - cloudFront:
+          eventType: origin-response
+          origin: https://api.audit-ledger.network

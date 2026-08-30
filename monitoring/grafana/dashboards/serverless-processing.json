@@ -1,0 +1,57 @@
+{
+  "annotations": { "list": [] },
+  "editable": true,
+  "fiscalYearStartMonth": 0,
+  "graphTooltip": 1,
+  "id": null,
+  "links": [],
+  "liveNow": false,
+  "panels": [
+    {
+      "collapsed": false,
+      "gridPos": { "h": 8, "w": 12, "x": 0, "y": 0 },
+      "id": 1,
+      "title": "Serverless Invocations by Cloud Provider",
+      "type": "timeseries",
+      "targets": [
+        {
+          "expr": "sum(rate(audit_ledger_serverless_invocations_total[1m])) by (provider)",
+          "legendFormat": "{{provider}}"
+        }
+      ]
+    },
+    {
+      "collapsed": false,
+      "gridPos": { "h": 8, "w": 12, "x": 12, "y": 0 },
+      "id": 2,
+      "title": "Execution Duration (p95 ms)",
+      "type": "timeseries",
+      "targets": [
+        {
+          "expr": "histogram_quantile(0.95, sum(rate(audit_ledger_serverless_duration_ms_bucket[5m])) by (le, provider))",
+          "legendFormat": "{{provider}} p95"
+        }
+      ]
+    },
+    {
+      "collapsed": false,
+      "gridPos": { "h": 8, "w": 24, "x": 0, "y": 8 },
+      "id": 3,
+      "title": "Filtering Drop Rate vs Routed Events",
+      "type": "timeseries",
+      "targets": [
+        {
+          "expr": "sum(rate(audit_ledger_events_routed_total[1m]))",
+          "legendFormat": "Routed Events"
+        },
+        {
+          "expr": "sum(rate(audit_ledger_events_filtered_dropped_total[1m]))",
+          "legendFormat": "Filtered / Dropped Events"
+        }
+      ]
+    }
+  ],
+  "schemaVersion": 38,
+  "title": "Contract Event Serverless Functions Processing",
+  "uid": "audit-ledger-serverless-processing"
+}

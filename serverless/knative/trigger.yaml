@@ -1,0 +1,15 @@
+apiVersion: eventing.knative.dev/v1
+kind: Trigger
+metadata:
+  name: audit-events-trigger
+  namespace: audit-ledger
+spec:
+  broker: default
+  filter:
+    attributes:
+      type: network.audit-ledger.event
+  subscriber:
+    ref:
+      apiVersion: serving.knative.dev/v1
+      kind: Service
+      name: audit-ledger-event-processor

@@ -236,12 +236,10 @@ pub fn issue_carbon_credit(
 ) -> BytesN<32> {
     issuer.require_auth();
 
-    let credit_id = env.crypto().sha256(
-        &Bytes::from_slice(
-            &env,
-            format!("{}{}{}", carbon_tonnes, issuer.to_string(), env.ledger().timestamp()).as_bytes(),
-        )
-    );
+    let credit_id = env.crypto().sha256(&Bytes::from_slice(
+        env,
+        format!("{}{}{}", carbon_tonnes, issuer.to_string(), env.ledger().timestamp()).as_bytes(),
+    ));
 
     let credit = CarbonCredit {
         credit_id: credit_id.clone(),
@@ -350,12 +348,10 @@ pub fn tokenize_credit(
         .get(&CarbonCreditKey::CarbonCredit(credit_id.clone()))
         .unwrap_or_else(|| panic!("Credit not found"));
 
-    let token_id = env.crypto().sha256(
-        &Bytes::from_slice(
-            &env,
-            format!("TOKEN{}{}", token_owner.to_string(), env.ledger().timestamp()).as_bytes(),
-        )
-    );
+    let token_id = env.crypto().sha256(&Bytes::from_slice(
+        env,
+        format!("TOKEN{}{}", token_owner.to_string(), env.ledger().timestamp()).as_bytes(),
+    ));
 
     let tokenization = Tokenization {
         token_id: token_id.clone(),
