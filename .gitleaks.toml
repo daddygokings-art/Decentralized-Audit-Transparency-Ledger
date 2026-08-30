@@ -1,0 +1,21 @@
+title = "Audit Ledger secret scanning"
+
+[extend]
+useDefault = true
+
+[[rules]]
+id = "stellar-secret-key"
+description = "Stellar secret key"
+regex = '''S[A-Z2-7]{55}'''
+tags = ["stellar", "private-key"]
+
+[[rules]]
+id = "audit-ledger-api-token"
+description = "Audit Ledger API token"
+regex = '''(?i)audit[_-]?ledger[_-]?(api[_-]?)?token["'=: ]+[A-Za-z0-9_\-]{20,}'''
+tags = ["api", "credential"]
+
+[allowlist]
+description = "Non-secret fixtures and documentation examples"
+paths = ['''(^|/)(node_modules|target|dist|coverage)/''', '''(^|/)\.env\.example$''']
+regexes = ['''dev-only-service-secret-change-me''']
