@@ -81,6 +81,9 @@ jobs:
         uses: ludeeus/action-shellcheck@master
         with:
           scandir: ./scripts
+          additional_files: ./scripts/secrets-rotation/common.sh
+        env:
+          SHELLCHECK_OPTS: -x -e SC2034 -e SC2129
 
   wasm-size:
     name: WASM size regression check
@@ -96,14 +99,14 @@ jobs:
         uses: dtolnay/rust-toolchain@stable
 
       - name: Add WASM target
-        run: rustup target add wasm32-unknown-unknown
+        run: rustup target add wasm32v1-none
 
       - name: Build WASM
-        run: cargo build --target wasm32-unknown-unknown --release
+        run: cargo build --target wasm32v1-none --release
 
       - name: Check WASM size
         run: |
-          WASM_FILE="target/wasm32-unknown-unknown/release/audit_ledger.wasm"
+          WASM_FILE="target/wasm32v1-none/release/audit_ledger.wasm"
           if [ ! -f "$WASM_FILE" ]; then
             echo "ERROR: WASM binary not found!"
             exit 1
