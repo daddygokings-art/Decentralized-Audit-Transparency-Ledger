@@ -1,0 +1,22 @@
+name = "audit-ledger-edge-worker"
+main = "worker.ts"
+compatibility_date = "2024-01-01"
+
+[vars]
+ENVIRONMENT = "production"
+DEFAULT_TTL_SECONDS = "60"
+SWR_SECONDS = "300"
+UPSTREAM_RPC = "https://soroban-rpc.mainnet.stellar.org"
+
+[[kv_namespaces]]
+binding = "EVENT_CACHE_KV"
+id = "audit_ledger_cache_kv_prod"
+preview_id = "audit_ledger_cache_kv_preview"
+
+[[kv_namespaces]]
+binding = "RATE_LIMIT_KV"
+id = "audit_ledger_rate_limit_prod"
+
+[observability]
+enabled = true
+head_sampling_rate = 1.0
