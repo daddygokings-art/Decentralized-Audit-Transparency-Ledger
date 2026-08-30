@@ -26,7 +26,7 @@ jobs:
         uses: dtolnay/rust-toolchain@stable
         with:
           components: clippy, rustfmt
-          targets: wasm32v1-none
+          targets: wasm32-unknown-unknown
 
       - name: Check formatting
         run: cargo fmt --check
@@ -47,11 +47,11 @@ jobs:
           cargo cyclonedx --output sbom/audit-ledger-sbom.json
 
       - name: Build WASM (release)
-        run: cargo build --target wasm32v1-none --release
+        run: cargo build --target wasm32-unknown-unknown --release
 
       - name: Assert WASM ≤ 128 KB
         run: |
-          WASM=target/wasm32v1-none/release/audit_ledger.wasm
+          WASM=target/wasm32-unknown-unknown/release/audit_ledger.wasm
           SIZE=$(stat --format=%s "$WASM")
           echo "WASM size: $SIZE bytes"
           if [ "$SIZE" -gt $((128 * 1024)) ]; then
@@ -61,7 +61,7 @@ jobs:
       - name: Compute WASM checksums
         run: |
           sha256sum \
-            target/wasm32v1-none/release/audit_ledger.wasm \
+            target/wasm32-unknown-unknown/release/audit_ledger.wasm \
             > wasm-checksums.txt
           cat wasm-checksums.txt
 
@@ -70,7 +70,7 @@ jobs:
         with:
           name: wasm-release
           path: |
-            target/wasm32v1-none/release/audit_ledger.wasm
+            target/wasm32-unknown-unknown/release/audit_ledger.wasm
             wasm-checksums.txt
           retention-days: 30
 

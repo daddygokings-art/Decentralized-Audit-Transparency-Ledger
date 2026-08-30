@@ -12,6 +12,7 @@ set -euo pipefail
 #   ./scripts/deploy-verify.sh --contract-id <CONTRACT_ID> [--rpc-url <URL>] [--network <testnet|mainnet>] [--expected-hash <SHA256>]
 
 SCRIPT_DIR="$(cd "$(dirname "$0")" && pwd)"
+export SCRIPT_DIR
 CONTRACT_ID=""
 RPC_URL="${RPC_URL:-https://soroban-testnet.stellar.org}"
 NETWORK="${NETWORK:-testnet}"

@@ -5494,6 +5494,7 @@ impl AuditLedger {
         });
         trail
     }
+}
 
     /// Attach a human-readable tag to a specific historical version (e.g.
     /// `approved`, `superseded`). Admin/owner-only.

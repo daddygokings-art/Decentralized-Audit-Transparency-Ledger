@@ -18,7 +18,7 @@ jobs:
     permissions:
       contents: read
     steps:
-      - uses: actions/checkout@v6
+      - uses: actions/checkout@v4
         with:
           persist-credentials: false
 
@@ -112,7 +112,7 @@ print('(Full coverage report: .github/workflows/coverage.yml)')
     permissions:
       contents: read
     steps:
-      - uses: actions/checkout@v6
+      - uses: actions/checkout@v4
         with:
           persist-credentials: false
 
@@ -120,6 +120,9 @@ print('(Full coverage report: .github/workflows/coverage.yml)')
         uses: ludeeus/action-shellcheck@master
         with:
           scandir: ./scripts
+          additional_files: ./scripts/secrets-rotation/common.sh
+        env:
+          SHELLCHECK_OPTS: -x -e SC2034 -e SC2129
 
   wasm-size:
     name: WASM size regression check
@@ -127,7 +130,7 @@ print('(Full coverage report: .github/workflows/coverage.yml)')
     permissions:
       contents: read
     steps:
-      - uses: actions/checkout@v6
+      - uses: actions/checkout@v4
         with:
           persist-credentials: false
 
