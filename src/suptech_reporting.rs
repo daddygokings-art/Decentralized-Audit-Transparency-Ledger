@@ -86,14 +86,13 @@ impl ReportingManager {
         period_start: u64,
         period_end: u64,
     ) -> BytesN<32> {
-        use soroban_sdk::crypto::sha256;
-
+        
         let mut input = Bytes::new(env);
         input.append(&Bytes::from_slice(env, submitter.to_xdr().as_ref()));
         input.append(&Bytes::from_slice(env, &period_start.to_le_bytes()));
         input.append(&Bytes::from_slice(env, &period_end.to_le_bytes()));
 
-        sha256(&input)
+        env.crypto().sha256(&input)
     }
 
     /// Validate report format against standard

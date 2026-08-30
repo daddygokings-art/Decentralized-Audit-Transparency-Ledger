@@ -75,13 +75,12 @@ impl SupervisionManager {
 
     /// Compute record ID
     pub fn compute_record_id(env: &Env, participant_id: &BytesN<32>) -> BytesN<32> {
-        use soroban_sdk::crypto::sha256;
-
+        
         let mut input = Bytes::new(env);
         input.append(&Bytes::from_slice(env, participant_id.as_ref()));
         input.append(&Bytes::from_slice(env, &env.ledger().timestamp().to_le_bytes()));
 
-        sha256(&input)
+        env.crypto().sha256(&input)
     }
 
     /// Add corrective actions

@@ -88,13 +88,12 @@ impl FeedManager {
 
     /// Compute deterministic feed ID
     pub fn compute_feed_id(env: &Env, feed_type: DataFeedType) -> BytesN<32> {
-        use soroban_sdk::crypto::sha256;
-
+        
         let mut input = Bytes::new(env);
         input.append(&Bytes::from_slice(env, feed_type.as_symbol().to_string().as_bytes()));
         input.append(&Bytes::from_slice(env, &env.ledger().timestamp().to_le_bytes()));
 
-        sha256(&input)
+        env.crypto().sha256(&input)
     }
 
     /// Publish data point to feed
@@ -128,13 +127,12 @@ impl FeedManager {
 
     /// Compute data point hash
     pub fn compute_data_hash(env: &Env, data: &Bytes, timestamp: u64) -> BytesN<32> {
-        use soroban_sdk::crypto::sha256;
-
+        
         let mut input = Bytes::new(env);
         input.append(data);
         input.append(&Bytes::from_slice(env, &timestamp.to_le_bytes()));
 
-        sha256(&input)
+        env.crypto().sha256(&input)
     }
 
     /// Verify data freshness
@@ -174,13 +172,12 @@ impl FeedManager {
         feed_id: &BytesN<32>,
         subscriber: &soroban_sdk::Address,
     ) -> BytesN<32> {
-        use soroban_sdk::crypto::sha256;
-
+        
         let mut input = Bytes::new(env);
         input.append(&Bytes::from_slice(env, feed_id.as_ref()));
         input.append(&Bytes::from_slice(env, subscriber.to_xdr().as_ref()));
 
-        sha256(&input)
+        env.crypto().sha256(&input)
     }
 
     /// Record data point receipt
@@ -274,13 +271,12 @@ impl FeedManager {
         env: &Env,
         address: &soroban_sdk::Address,
     ) -> BytesN<32> {
-        use soroban_sdk::crypto::sha256;
-
+        
         let mut input = Bytes::new(env);
         input.append(&Bytes::from_slice(env, address.to_xdr().as_ref()));
         input.append(&Bytes::from_slice(env, b"PUBLISHER"));
 
-        sha256(&input)
+        env.crypto().sha256(&input)
     }
 
     /// Deactivate feed

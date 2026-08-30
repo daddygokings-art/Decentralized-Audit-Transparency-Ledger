@@ -103,8 +103,7 @@ impl RulesEngine {
         framework: RegulatoryFramework,
         name: &Bytes,
     ) -> BytesN<32> {
-        use soroban_sdk::crypto::sha256;
-
+        
         let mut input = Bytes::new(env);
         input.append(&Bytes::from_slice(
             env,
@@ -112,7 +111,7 @@ impl RulesEngine {
         ));
         input.append(name);
 
-        sha256(&input)
+        env.crypto().sha256(&input)
     }
 
     /// Evaluate rule against context
@@ -166,14 +165,13 @@ impl RulesEngine {
         rule_id: &BytesN<32>,
         institution: &Address,
     ) -> BytesN<32> {
-        use soroban_sdk::crypto::sha256;
-
+        
         let mut input = Bytes::new(env);
         input.append(&Bytes::from_slice(env, rule_id.as_ref()));
         input.append(&Bytes::from_slice(env, institution.to_xdr().as_ref()));
         input.append(&Bytes::from_slice(env, &env.ledger().timestamp().to_le_bytes()));
 
-        sha256(&input)
+        env.crypto().sha256(&input)
     }
 
     /// Update rule condition (for dynamic rules)
@@ -222,8 +220,7 @@ impl RulesEngine {
 
     /// Compute rule set ID
     pub fn compute_ruleset_id(env: &Env, framework: RegulatoryFramework) -> BytesN<32> {
-        use soroban_sdk::crypto::sha256;
-
+        
         let mut input = Bytes::new(env);
         input.append(&Bytes::from_slice(
             env,
@@ -231,7 +228,7 @@ impl RulesEngine {
         ));
         input.append(&Bytes::from_slice(env, b"RULESET"));
 
-        sha256(&input)
+        env.crypto().sha256(&input)
     }
 
     /// Add rule to set

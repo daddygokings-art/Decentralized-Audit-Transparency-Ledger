@@ -115,13 +115,12 @@ impl PrivacyManager {
         env: &Env,
         transaction: &CBDCTransaction,
     ) -> BytesN<32> {
-        use soroban_sdk::crypto::sha256;
-
+        
         let mut input = Bytes::new(env);
         input.append(&Bytes::from_slice(env, transaction.tx_id.as_ref()));
         input.append(&Bytes::from_slice(env, &transaction.timestamp.to_le_bytes()));
 
-        sha256(&input)
+        env.crypto().sha256(&input)
     }
 
     /// Encrypt transaction data based on privacy tier
@@ -139,19 +138,17 @@ impl PrivacyManager {
                 encrypted.append(&Bytes::from_slice(env, &transaction.dest_pilot.to_le_bytes()));
 
                 // Hash sensitive amounts
-                use soroban_sdk::crypto::sha256;
-                let mut amount_input = Bytes::new(env);
+                                let mut amount_input = Bytes::new(env);
                 amount_input.append(&Bytes::from_slice(env, &transaction.amount_source.to_le_bytes()));
                 amount_input.append(&Bytes::from_slice(env, &transaction.exchange_rate.to_le_bytes()));
-                let amount_hash = sha256(&amount_input);
+                let amount_hash = env.crypto().sha256(&amount_input);
                 encrypted.append(&Bytes::from_slice(env, amount_hash.as_ref()));
 
                 Ok(encrypted)
             }
             PrivacyTier::Private => {
                 // Encrypt everything except ID and timestamp
-                use soroban_sdk::crypto::sha256;
-                let mut sensitive_input = Bytes::new(env);
+                                let mut sensitive_input = Bytes::new(env);
 
                 sensitive_input.append(&Bytes::from_slice(env, &transaction.source_pilot.to_le_bytes()));
                 sensitive_input.append(&Bytes::from_slice(env, &transaction.dest_pilot.to_le_bytes()));
@@ -160,19 +157,18 @@ impl PrivacyManager {
                 sensitive_input.append(&Bytes::from_slice(env, &transaction.amount_source.to_le_bytes()));
                 sensitive_input.append(&Bytes::from_slice(env, &transaction.amount_dest.to_le_bytes()));
 
-                let encrypted_hash = sha256(&sensitive_input);
+                let encrypted_hash = env.crypto().sha256(&sensitive_input);
                 Ok(Bytes::from_slice(env, encrypted_hash.as_ref()))
             }
             PrivacyTier::RegulatoryConfidential => {
                 // Minimal exposure, full encryption
-                use soroban_sdk::crypto::sha256;
-                let mut full_input = Bytes::new(env);
+                                let mut full_input = Bytes::new(env);
 
                 full_input.append(&Bytes::from_slice(env, transaction.tx_id.as_ref()));
                 full_input.append(&Bytes::from_slice(env, &transaction.timestamp.to_le_bytes()));
                 full_input.append(&transaction.metadata);
 
-                let encrypted_hash = sha256(&full_input);
+                let encrypted_hash = env.crypto().sha256(&full_input);
                 Ok(Bytes::from_slice(env, encrypted_hash.as_ref()))
             }
             PrivacyTier::Public => {
@@ -221,13 +217,12 @@ impl PrivacyManager {
 
     /// Compute unique ACL ID
     pub fn compute_acl_id(env: &Env, transaction_hash: &BytesN<32>) -> BytesN<32> {
-        use soroban_sdk::crypto::sha256;
-
+        
         let mut input = Bytes::new(env);
         input.append(&Bytes::from_slice(env, transaction_hash.as_ref()));
         input.append(&Bytes::from_slice(env, b"ACL_V1"));
 
-        sha256(&input)
+        env.crypto().sha256(&input)
     }
 
     /// Validate privacy configuration

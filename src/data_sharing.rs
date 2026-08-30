@@ -10,21 +10,21 @@ use crate::regulator::{
 
 /// Storage key for DSAs indexed by agreement ID
 #[contracttype]
-#[derive(Clone, Copy, Debug, Eq, PartialEq, Ord, PartialOrd)]
+#[derive(Clone, Debug, Eq, PartialEq, Ord, PartialOrd)]
 pub struct DSAKey {
     pub agreement_id: BytesN<32>,
 }
 
 /// Storage key for access requests indexed by request ID
 #[contracttype]
-#[derive(Clone, Copy, Debug, Eq, PartialEq, Ord, PartialOrd)]
+#[derive(Clone, Debug, Eq, PartialEq, Ord, PartialOrd)]
 pub struct AccessRequestKey {
     pub request_id: BytesN<32>,
 }
 
 /// Storage key for regulator role assignments
 #[contracttype]
-#[derive(Clone, Copy, Debug, Eq, PartialEq, Ord, PartialOrd)]
+#[derive(Clone, Debug, Eq, PartialEq, Ord, PartialOrd)]
 pub struct RoleAssignmentKey {
     pub regulator: Address,
 }
@@ -157,7 +157,7 @@ impl DSABuilder {
     /// Build the DSA (without signatures)
     pub fn build(self) -> DataSharingAgreement {
         DataSharingAgreement {
-            id: BytesN::<32>::from_array([0u8; 32]),
+            id: BytesN::<32>::from_array(&Env::default(), &[0u8; 32]),
             data_provider: self.data_provider,
             regulator_address: self.regulator_address,
             effective_ledger: self.effective_ledger,
@@ -167,8 +167,8 @@ impl DSABuilder {
             role: self.role,
             min_sensitivity: self.min_sensitivity,
             active: true,
-            signature_provider: BytesN::<64>::from_array([0u8; 64]),
-            signature_regulator: BytesN::<64>::from_array([0u8; 64]),
+            signature_provider: BytesN::<64>::from_array(&Env::default(), &[0u8; 64]),
+            signature_regulator: BytesN::<64>::from_array(&Env::default(), &[0u8; 64]),
         }
     }
 }
@@ -233,7 +233,7 @@ impl DSAHelper {
             result[i] = ((timestamp >> (i * 8)) & 0xFF) as u8;
         }
         
-        BytesN::<32>::from_array(result)
+        BytesN::<32>::from_array(&Env::default(), &result)
     }
 
     /// Verify if a DSA is currently active
@@ -248,7 +248,7 @@ impl DSAHelper {
         if dsa.allowed_event_types.is_empty() {
             true // Empty list means all types allowed
         } else {
-            dsa.allowed_event_types.iter().any(|t| t == event_type)
+            dsa.allowed_event_types.iter().any(|t| t == *event_type)
         }
     }
 
@@ -257,7 +257,7 @@ impl DSAHelper {
         if dsa.standards.is_empty() {
             true // Empty list means all standards allowed
         } else {
-            dsa.standards.iter().any(|s| s == standard)
+            dsa.standards.iter().any(|s| s == *standard)
         }
     }
 
@@ -331,8 +331,8 @@ impl DSAHelper {
         // 1. signature_provider is valid signature by data_provider
         // 2. signature_regulator is valid signature by regulator_address
         // For now, basic validation
-        dsa.signature_provider != BytesN::<64>::from_array([0u8; 64])
-            && dsa.signature_regulator != BytesN::<64>::from_array([0u8; 64])
+        dsa.signature_provider != BytesN::<64>::from_array(&Env::default(), &[0u8; 64])
+            && dsa.signature_regulator != BytesN::<64>::from_array(&Env::default(), &[0u8; 64])
     }
 }
 
