@@ -13,6 +13,11 @@ jobs:
     runs-on: ubuntu-latest
     permissions:
       contents: read
+    strategy:
+      fail-fast: false
+      max-parallel: 2
+      matrix:
+        shard: [0, 1, 2, 3]
     steps:
       - uses: actions/checkout@v6
         with:
@@ -32,8 +37,15 @@ jobs:
       - name: Build
         run: cargo build
 
-      - name: Run tests
-        run: cargo test
+      - name: Run sharded contract event tests
+        env:
+          TOTAL_SHARDS: 4
+          SHARD_INDEX: ${{ matrix.shard }}
+          MAX_RETRIES: 2
+          CARGO_BUILD_JOBS: 2
+          RUST_TEST_THREADS: 1
+          LOG_DIR: target/ci
+        run: bash scripts/ci_contract_event_tests.sh
 
       - name: Run cargo-audit for dependency vulnerabilities
         run: cargo install cargo-audit && cargo audit --deny warnings
