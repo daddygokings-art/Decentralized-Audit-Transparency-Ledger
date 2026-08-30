@@ -7,7 +7,7 @@ permissions:
 on:
   pull_request:
     branches:
-      - main
+      - master
 
 jobs:
   dependency-review:
@@ -33,3 +33,6 @@ jobs:
             BSD-3-Clause
             ISC
             MPL-2.0
+            Apache-2.0 WITH LLVM-exception
+            Unicode-3.0
+            Zlib

@@ -1,0 +1,23 @@
+{
+  "name": "@audit-ledger/user-analytics",
+  "version": "1.0.0",
+  "description": "Privacy-compliant contract event user analytics and product insights with funnels, feature adoption, and cohorts",
+  "main": "dist/index.js",
+  "types": "dist/index.d.ts",
+  "scripts": {
+    "build": "tsc",
+    "test": "node --test test/*.test.js"
+  },
+  "keywords": [
+    "audit-ledger",
+    "user-analytics",
+    "product-insights",
+    "funnel-analysis",
+    "feature-adoption",
+    "cohort-analysis",
+    "gdpr",
+    "privacy"
+  ],
+  "author": "Audit Ledger Contributors",
+  "license": "Apache-2.0"
+}
