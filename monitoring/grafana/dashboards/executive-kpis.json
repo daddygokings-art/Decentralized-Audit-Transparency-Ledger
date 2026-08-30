@@ -1,0 +1,139 @@
+{
+  "editable": true,
+  "fiscalYearStartMonth": 0,
+  "graphTooltip": 1,
+  "id": null,
+  "panels": [
+    {
+      "collapsed": false,
+      "gridPos": { "h": 1, "w": 24, "x": 0, "y": 0 },
+      "id": 100,
+      "title": "Executive KPI Scorecard",
+      "type": "row"
+    },
+    {
+      "datasource": "Prometheus",
+      "fieldConfig": {
+        "defaults": {
+          "color": { "mode": "thresholds" },
+          "thresholds": {
+            "mode": "absolute",
+            "steps": [
+              { "color": "red", "value": null },
+              { "color": "yellow", "value": 75 },
+              { "color": "green", "value": 90 }
+            ]
+          },
+          "unit": "none"
+        }
+      },
+      "gridPos": { "h": 5, "w": 4, "x": 0, "y": 1 },
+      "id": 1,
+      "title": "Platform Health Score",
+      "type": "stat",
+      "targets": [{ "expr": "audit_kpi_platform_health_score", "legendFormat": "Health Score" }]
+    },
+    {
+      "datasource": "Prometheus",
+      "fieldConfig": {
+        "defaults": { "color": { "mode": "palette-classic" }, "unit": "short" }
+      },
+      "gridPos": { "h": 5, "w": 5, "x": 4, "y": 1 },
+      "id": 2,
+      "title": "Daily Active Submitters (DAU)",
+      "type": "stat",
+      "targets": [{ "expr": "audit_kpi_dau_submitters", "legendFormat": "DAU" }]
+    },
+    {
+      "datasource": "Prometheus",
+      "fieldConfig": {
+        "defaults": { "color": { "mode": "palette-classic" }, "unit": "percent" }
+      },
+      "gridPos": { "h": 5, "w": 5, "x": 9, "y": 1 },
+      "id": 3,
+      "title": "DoD Event Growth Rate",
+      "type": "stat",
+      "targets": [{ "expr": "audit_kpi_event_growth_rate_dod_pct", "legendFormat": "DoD Growth %" }]
+    },
+    {
+      "datasource": "Prometheus",
+      "fieldConfig": {
+        "defaults": { "color": { "mode": "palette-classic" }, "unit": "currencyUSD" }
+      },
+      "gridPos": { "h": 5, "w": 5, "x": 14, "y": 1 },
+      "id": 4,
+      "title": "Bridged Volume (USD)",
+      "type": "stat",
+      "targets": [{ "expr": "audit_kpi_bridge_volume_usd_total", "legendFormat": "Bridge USD" }]
+    },
+    {
+      "datasource": "Prometheus",
+      "fieldConfig": {
+        "defaults": { "color": { "mode": "palette-classic" }, "unit": "percent" }
+      },
+      "gridPos": { "h": 5, "w": 5, "x": 19, "y": 1 },
+      "id": 5,
+      "title": "API SLA Compliance (<200ms)",
+      "type": "stat",
+      "targets": [{ "expr": "audit_kpi_api_sla_compliance_pct", "legendFormat": "SLA %" }]
+    },
+    {
+      "collapsed": false,
+      "gridPos": { "h": 1, "w": 24, "x": 0, "y": 6 },
+      "id": 101,
+      "title": "Decentralization & Growth Dynamics",
+      "type": "row"
+    },
+    {
+      "datasource": "Prometheus",
+      "fieldConfig": {
+        "defaults": {
+          "color": { "mode": "thresholds" },
+          "max": 1,
+          "min": 0,
+          "thresholds": {
+            "mode": "absolute",
+            "steps": [
+              { "color": "green", "value": null },
+              { "color": "yellow", "value": 0.5 },
+              { "color": "red", "value": 0.8 }
+            ]
+          }
+        }
+      },
+      "gridPos": { "h": 7, "w": 8, "x": 0, "y": 7 },
+      "id": 6,
+      "title": "Submitter Centralization (Gini Index)",
+      "type": "gauge",
+      "targets": [{ "expr": "audit_kpi_submitter_gini", "legendFormat": "Gini Index" }]
+    },
+    {
+      "datasource": "Prometheus",
+      "fieldConfig": {
+        "defaults": { "color": { "mode": "palette-classic" }, "unit": "short" }
+      },
+      "gridPos": { "h": 7, "w": 8, "x": 8, "y": 7 },
+      "id": 7,
+      "title": "Active API Developers",
+      "type": "timeseries",
+      "targets": [{ "expr": "audit_kpi_api_active_developers", "legendFormat": "Active Developers" }]
+    },
+    {
+      "datasource": "Prometheus",
+      "fieldConfig": {
+        "defaults": { "color": { "mode": "palette-classic" }, "unit": "percent" }
+      },
+      "gridPos": { "h": 7, "w": 8, "x": 16, "y": 7 },
+      "id": 8,
+      "title": "Bridge Verification Success Rate",
+      "type": "timeseries",
+      "targets": [{ "expr": "audit_kpi_bridge_success_rate_pct", "legendFormat": "Success Rate %" }]
+    }
+  ],
+  "schemaVersion": 38,
+  "style": "dark",
+  "tags": ["executive", "kpi", "business-metrics", "growth", "submitters"],
+  "time": { "from": "now-30d", "to": "now" },
+  "title": "Executive Business KPIs & Growth Overview",
+  "uid": "audit-ledger-executive-kpis"
+}

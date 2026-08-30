@@ -1,0 +1,53 @@
+{
+  "annotations": { "list": [] },
+  "editable": true,
+  "fiscalYearStartMonth": 0,
+  "graphTooltip": 1,
+  "id": null,
+  "links": [],
+  "liveNow": false,
+  "panels": [
+    {
+      "collapsed": false,
+      "gridPos": { "h": 8, "w": 12, "x": 0, "y": 0 },
+      "id": 1,
+      "title": "DAG Run Duration & SLA Tracking",
+      "type": "timeseries",
+      "targets": [
+        {
+          "expr": "sum(audit_ledger_dag_duration_seconds) by (dag_id)",
+          "legendFormat": "{{dag_id}} Duration"
+        }
+      ]
+    },
+    {
+      "collapsed": false,
+      "gridPos": { "h": 8, "w": 12, "x": 12, "y": 0 },
+      "id": 2,
+      "title": "Data Quality Checks Pass Rate (%)",
+      "type": "gauge",
+      "targets": [
+        {
+          "expr": "sum(audit_ledger_dq_checks_passed_total) / (sum(audit_ledger_dq_checks_passed_total) + sum(audit_ledger_dq_checks_failed_total)) * 100",
+          "legendFormat": "DQ Pass Rate %"
+        }
+      ]
+    },
+    {
+      "collapsed": false,
+      "gridPos": { "h": 8, "w": 24, "x": 0, "y": 8 },
+      "id": 3,
+      "title": "Warehouse Records Ingested per Hour",
+      "type": "timeseries",
+      "targets": [
+        {
+          "expr": "sum(rate(audit_ledger_warehouse_loaded_records_total[1h])) by (warehouse)",
+          "legendFormat": "{{warehouse}} Ingestion Rate"
+        }
+      ]
+    }
+  ],
+  "schemaVersion": 38,
+  "title": "Contract Event Data Pipelines (Airflow & Dagster)",
+  "uid": "audit-ledger-data-pipelines"
+}

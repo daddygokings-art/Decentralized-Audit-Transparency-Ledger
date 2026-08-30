@@ -1,0 +1,122 @@
+{
+  "annotations": { "list": [] },
+  "editable": true,
+  "fiscalYearStartMonth": 0,
+  "graphTooltip": 0,
+  "id": null,
+  "links": [],
+  "liveNow": true,
+  "panels": [
+    {
+      "collapsed": false,
+      "gridPos": { "h": 1, "w": 24, "x": 0, "y": 0 },
+      "id": 1,
+      "title": "Real-Time Telemetry & Throughput (Sub-Second)",
+      "type": "row"
+    },
+    {
+      "fieldConfig": {
+        "defaults": {
+          "color": { "mode": "palette-classic" },
+          "mappings": [],
+          "thresholds": {
+            "mode": "absolute",
+            "steps": [
+              { "color": "green", "value": null },
+              { "color": "orange", "value": 500 },
+              { "color": "red", "value": 1000 }
+            ]
+          },
+          "unit": "ops"
+        },
+        "overrides": []
+      },
+      "gridPos": { "h": 6, "w": 6, "x": 0, "y": 1 },
+      "id": 2,
+      "options": {
+        "orientation": "auto",
+        "reduceOptions": { "calcs": ["lastNotNull"], "fields": "", "values": false },
+        "showThresholdLabels": false,
+        "showThresholdMarkers": true
+      },
+      "pluginVersion": "10.0.0",
+      "targets": [
+        {
+          "datasource": { "type": "clickhouse", "uid": "clickhouse-audit-events" },
+          "rawSql": "SELECT toStartOfInterval(timestamp, INTERVAL 1 SECOND) as time, count() / 1.0 as tps FROM audit_analytics.audit_events_raw WHERE timestamp >= $__fromTime AND timestamp <= $__toTime GROUP BY time ORDER BY time",
+          "refId": "A"
+        }
+      ],
+      "title": "Live Throughput (TPS)",
+      "type": "gauge"
+    },
+    {
+      "fieldConfig": {
+        "defaults": {
+          "color": { "mode": "palette-classic" },
+          "custom": { "axisCenteredZero": false, "axisLabel": "Milliseconds", "drawStyle": "line", "lineInterpolation": "smooth" },
+          "unit": "ms"
+        }
+      },
+      "gridPos": { "h": 6, "w": 9, "x": 6, "y": 1 },
+      "id": 3,
+      "targets": [
+        {
+          "datasource": { "type": "clickhouse", "uid": "clickhouse-audit-events" },
+          "rawSql": "SELECT toStartOfInterval(timestamp, INTERVAL 5 SECOND) as time, avg(latency_ms) as avg_latency, quantile(0.95)(latency_ms) as p95, quantile(0.99)(latency_ms) as p99 FROM audit_analytics.audit_events_raw WHERE timestamp >= $__fromTime AND timestamp <= $__toTime GROUP BY time ORDER BY time",
+          "refId": "A"
+        }
+      ],
+      "title": "Sub-Second Query Latency (Avg, P95, P99)",
+      "type": "timeseries"
+    },
+    {
+      "fieldConfig": {
+        "defaults": { "color": { "mode": "palette-classic" }, "unit": "none" }
+      },
+      "gridPos": { "h": 6, "w": 9, "x": 15, "y": 1 },
+      "id": 4,
+      "targets": [
+        {
+          "datasource": { "type": "clickhouse", "uid": "clickhouse-audit-events" },
+          "rawSql": "SELECT event_type, count() as total_events FROM audit_analytics.audit_events_raw WHERE timestamp >= $__fromTime AND timestamp <= $__toTime GROUP BY event_type ORDER BY total_events DESC LIMIT 10",
+          "refId": "A"
+        }
+      ],
+      "title": "Event Distribution by Type",
+      "type": "piechart"
+    },
+    {
+      "collapsed": false,
+      "gridPos": { "h": 1, "w": 24, "x": 0, "y": 7 },
+      "id": 5,
+      "title": "Rollup Aggregations (Hourly & Daily)",
+      "type": "row"
+    },
+    {
+      "fieldConfig": { "defaults": { "custom": { "displayMode": "auto" } } },
+      "gridPos": { "h": 8, "w": 24, "x": 0, "y": 8 },
+      "id": 6,
+      "options": { "sortBy": [{ "desc": true, "displayName": "total_events" }] },
+      "targets": [
+        {
+          "datasource": { "type": "clickhouse", "uid": "clickhouse-audit-events" },
+          "rawSql": "SELECT window_start, event_type, category, total_events, uniqMerge(unique_submitters) as unique_submitters, total_gas, quantileMerge(0.95)(latency_p95) as p95_latency FROM audit_analytics.audit_events_hourly_rollup GROUP BY window_start, event_type, category, total_events, latency_p95 ORDER BY window_start DESC LIMIT 100",
+          "refId": "A"
+        }
+      ],
+      "title": "Hourly Pre-Aggregated Rollups",
+      "type": "table"
+    }
+  ],
+  "refresh": "5s",
+  "schemaVersion": 38,
+  "style": "dark",
+  "tags": ["analytics", "clickhouse", "druid", "realtime", "bridge"],
+  "time": { "from": "now-1h", "to": "now" },
+  "timepicker": { "refresh_intervals": ["1s", "5s", "10s", "30s", "1m"] },
+  "timezone": "utc",
+  "title": "AuditLedger - Real-Time Analytics & Rollups",
+  "uid": "audit-realtime-analytics",
+  "version": 1
+}

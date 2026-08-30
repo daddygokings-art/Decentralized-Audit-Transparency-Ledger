@@ -1,0 +1,50 @@
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: audit-ledger-secondary-eu-central
+  namespace: audit-ledger
+  labels:
+    app.kubernetes.io/name: audit-ledger
+    topology.kubernetes.io/region: eu-central-1
+    role: standby
+spec:
+  replicas: 2
+  selector:
+    matchLabels:
+      app.kubernetes.io/name: audit-ledger
+      topology.kubernetes.io/region: eu-central-1
+  template:
+    metadata:
+      labels:
+        app.kubernetes.io/name: audit-ledger
+        topology.kubernetes.io/region: eu-central-1
+        role: standby
+    spec:
+      containers:
+        - name: relayer-engine
+          image: audit-ledger/bridge-relayer:latest
+          env:
+            - name: REGION
+              value: "eu-central-1"
+            - name: IS_PRIMARY
+              value: "false"
+            - name: PRIMARY_REGION_ENDPOINT
+              value: "https://us-east.audit-ledger.io"
+          ports:
+            - containerPort: 3000
+              name: http
+---
+apiVersion: v1
+kind: Service
+metadata:
+  name: audit-ledger-eu-central-svc
+  namespace: audit-ledger
+spec:
+  type: LoadBalancer
+  selector:
+    app.kubernetes.io/name: audit-ledger
+    topology.kubernetes.io/region: eu-central-1
+  ports:
+    - name: http
+      port: 80
+      targetPort: 3000

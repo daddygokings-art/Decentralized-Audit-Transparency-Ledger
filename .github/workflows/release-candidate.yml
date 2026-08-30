@@ -1,0 +1,44 @@
+name: Release Candidate Workflow
+
+on:
+  push:
+    branches:
+      - 'release/**'
+  workflow_dispatch:
+    inputs:
+      target_version:
+        description: 'Target version for Release Candidate (e.g. 1.2.0)'
+        required: true
+
+permissions:
+  contents: write
+  pull-requests: write
+
+jobs:
+  rc-staging:
+    name: Build & Verify Release Candidate
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+
+      - name: Install Rust Toolchain
+        uses: dtolnay/rust-toolchain@stable
+        with:
+          components: clippy, rustfmt
+          targets: wasm32v1-none
+
+      - name: Stage RC Artifacts & Validate
+        run: |
+          TARGET="${{ github.event.inputs.target_version || '1.0.0' }}"
+          ./scripts/release/rc-workflow.sh create-rc "$TARGET"
+          ./scripts/release/rc-workflow.sh validate-rc "v$TARGET-rc.1"
+
+      - name: Upload RC Bundle
+        uses: actions/upload-artifact@v4
+        with:
+          name: rc-bundle
+          path: |
+            dist/release/*
+            RELEASE_NOTES.md
