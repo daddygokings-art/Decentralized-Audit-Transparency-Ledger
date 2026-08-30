@@ -1,0 +1,31 @@
+service: audit-ledger-serverless-processor
+
+frameworkVersion: '3'
+
+provider:
+  name: aws
+  runtime: nodejs20.x
+  region: ${opt:region, 'us-east-1'}
+  stage: ${opt:stage, 'prod'}
+  memorySize: 512
+  timeout: 30
+  environment:
+    EVENTBRIDGE_BUS_ARN: arn:aws:events:${self:provider.region}:${aws:accountId}:event-bus/audit-events
+    AUDIT_ARCHIVE_QUEUE_ARN: arn:aws:sqs:${self:provider.region}:${aws:accountId}:audit-archive-dlq
+
+functions:
+  processContractEvent:
+    handler: handler.handler
+    events:
+      - http:
+          path: /events/process
+          method: post
+          cors: true
+      - sqs:
+          arn: arn:aws:sqs:${self:provider.region}:${aws:accountId}:raw-contract-events-queue
+          batchSize: 10
+      - eventBridge:
+          eventBus: arn:aws:events:${self:provider.region}:${aws:accountId}:event-bus/audit-events
+          pattern:
+            source:
+              - 'audit-ledger.stellar'

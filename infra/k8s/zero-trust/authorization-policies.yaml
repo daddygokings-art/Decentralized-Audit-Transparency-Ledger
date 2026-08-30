@@ -1,0 +1,39 @@
+apiVersion: security.istio.io/v1beta1
+kind: AuthorizationPolicy
+metadata:
+  name: require-spiffe-mtls
+  namespace: audit-ledger
+spec:
+  selector:
+    matchLabels:
+      app: audit-ledger-core
+  action: ALLOW
+  rules:
+    - from:
+        - source:
+            principals: ["spiffe://auditledger.org/ns/audit-ledger/sa/api-gateway"]
+      to:
+        - operation:
+            methods: ["GET", "POST"]
+            paths: ["/api/v1/events*", "/api/v1/compliance*"]
+---
+apiVersion: security.istio.io/v1beta1
+kind: AuthorizationPolicy
+metadata:
+  name: strict-vault-access
+  namespace: audit-ledger
+spec:
+  selector:
+    matchLabels:
+      app: vault
+  action: ALLOW
+  rules:
+    - from:
+        - source:
+            principals:
+              - "spiffe://auditledger.org/ns/audit-ledger/sa/secrets-rotator"
+              - "spiffe://auditledger.org/ns/audit-ledger/sa/audit-ledger-api"
+      to:
+        - operation:
+            methods: ["POST", "PUT"]
+            paths: ["/v1/transit/*", "/v1/secret/*"]

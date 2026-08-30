@@ -1,0 +1,74 @@
+name: Sign container images
+
+on:
+  push:
+    branches: [master]
+    paths:
+      - "docker/**"
+      - ".github/workflows/container-signing.yml"
+  workflow_dispatch:
+
+permissions:
+  contents: read
+  id-token: write
+  packages: write
+
+jobs:
+  build-sign:
+    runs-on: ubuntu-latest
+    strategy:
+      matrix:
+        include:
+          - image: api
+            dockerfile: docker/Dockerfile.api
+            context: .
+          - image: ui
+            dockerfile: docker/Dockerfile.ui
+            context: .
+          - image: contract
+            dockerfile: docker/Dockerfile.contract
+            context: .
+          - image: graphql
+            dockerfile: api/graphql/Dockerfile
+            context: api/graphql
+          - image: rest
+            dockerfile: api/rest/Dockerfile
+            context: api/rest
+          - image: web-ui
+            dockerfile: ui/Dockerfile
+            context: ui
+          - image: metrics-exporter
+            dockerfile: tools/metrics-exporter/Dockerfile
+            context: tools/metrics-exporter
+          - image: relayer
+            dockerfile: bridge/relayer/Dockerfile
+            context: bridge/relayer
+    steps:
+      - name: Check out source
+        uses: actions/checkout@v4
+
+      - name: Log in to GHCR
+        uses: docker/login-action@v3
+        with:
+          registry: ghcr.io
+          username: ${{ github.actor }}
+          password: ${{ secrets.GITHUB_TOKEN }}
+
+      - name: Build and publish image
+        uses: docker/build-push-action@v6
+        with:
+          context: ${{ matrix.context }}
+          file: ${{ matrix.dockerfile }}
+          push: true
+          tags: ghcr.io/${{ github.repository_owner }}/audit-ledger-${{ matrix.image }}:${{ github.sha }}
+
+      - name: Install cosign
+        uses: sigstore/cosign-installer@v3.7.0
+
+      - name: Sign image with keyless Sigstore identity
+        env:
+          COSIGN_EXPERIMENTAL: "1"
+          IMAGE: ghcr.io/${{ github.repository_owner }}/audit-ledger-${{ matrix.image }}:${{ github.sha }}
+        run: |
+          set -euo pipefail
+          cosign sign --yes "${IMAGE}"

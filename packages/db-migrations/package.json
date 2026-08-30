@@ -1,0 +1,24 @@
+{
+  "name": "@audit-ledger/db-migrations",
+  "version": "1.0.0",
+  "description": "Contract event database migration management with rollback, dry-run validation, and zero-downtime deployments",
+  "main": "dist/index.js",
+  "types": "dist/index.d.ts",
+  "bin": {
+    "audit-migrate": "dist/cli.js"
+  },
+  "scripts": {
+    "build": "tsc",
+    "test": "node --test test/*.test.js || node --test test/*.test.ts"
+  },
+  "keywords": [
+    "audit-ledger",
+    "migrations",
+    "zero-downtime",
+    "postgres",
+    "sqlite",
+    "mysql"
+  ],
+  "author": "Audit Ledger Contributors",
+  "license": "Apache-2.0"
+}

@@ -1,0 +1,56 @@
+name: Compliance Controls
+
+on:
+  pull_request:
+  push:
+    branches: [master]
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  secret-scan:
+    name: Secret and credential scan
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v6
+        with:
+          fetch-depth: 0
+          persist-credentials: false
+      - name: TruffleHog verified secrets scan
+        uses: trufflesecurity/trufflehog@main
+        with:
+          extra_args: --results=verified,unknown
+      - name: Gitleaks repository scan
+        uses: gitleaks/gitleaks-action@v2
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+      - name: Scan container images
+        uses: aquasecurity/trivy-action@0.28.0
+        with:
+          scan-type: fs
+          scan-ref: docker
+          scanners: secret
+          severity: CRITICAL,HIGH
+          exit-code: 1
+      - name: Scan Helm and Terraform files
+        uses: aquasecurity/trivy-action@0.28.0
+        with:
+          scan-type: config
+          scan-ref: .
+          severity: CRITICAL,HIGH
+          exit-code: 1
+
+  policy-check:
+    name: OPA compliance policy tests
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v6
+        with:
+          persist-credentials: false
+      - uses: open-policy-agent/setup-opa@v2
+      - name: Test policies
+        run: opa test policies/opa -v
+      - name: Validate policy bundles
+        run: opa check policies/opa

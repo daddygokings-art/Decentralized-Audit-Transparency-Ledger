@@ -1,0 +1,11 @@
+telemetry:
+  enabled: false
+
+storage:
+  postgres:
+    postgres_db:
+      hostname: "localhost"
+      username: "postgres"
+      password: "password"
+      db_name: "dagster"
+      port: 5432
