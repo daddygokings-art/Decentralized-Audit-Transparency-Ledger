@@ -1,0 +1,37 @@
+apiVersion: runbooks.audit-ledger.io/v1
+kind: OperationalRunbook
+metadata:
+  id: RB-003-SCHEMA-UPDATE
+  name: Zero-Downtime Event Schema Evolution & Upgrade
+  version: 1.0.0
+spec:
+  type: SCHEMA_UPDATE
+  author: Core Protocol Team
+  description: "Evolve event schema structure with zero downtime and forward/backward compatibility"
+  preconditions:
+    - check: schema_compatibility_diff
+      expected: "BACKWARD_AND_FORWARD_COMPATIBLE"
+    - check: api_version_support
+      minConsumersUpdated: 100
+  steps:
+    - id: 1
+      name: "Schema Compatibility & Structural Diff Verification"
+      isIdempotent: true
+      timeoutSeconds: 20
+      action: "verify_schema_structural_compatibility"
+    - id: 2
+      name: "Stage Schema & Register Migration Hash"
+      isIdempotent: true
+      timeoutSeconds: 40
+      action: "soroban_register_schema_version"
+      rollback: "soroban_deregister_staged_schema"
+    - id: 3
+      name: "Execute Dual-Read Validation Suite"
+      isIdempotent: true
+      timeoutSeconds: 30
+      action: "run_dual_read_parity_tests"
+    - id: 4
+      name: "Promote Schema Version to Active"
+      isIdempotent: true
+      timeoutSeconds: 20
+      action: "promote_active_schema_version"

@@ -5,6 +5,7 @@
 pub mod regulator;
 pub mod regulator_events;
 pub mod disclosure;
+pub mod contract_event_privacy;
 pub mod data_sharing;
 pub mod tamper_evidence;
 pub mod compliance_validators;
@@ -45,6 +46,19 @@ pub mod data_retention;
 // Multi-region high-availability, replication, and disaster recovery.
 pub mod multi_region;
 
+// Predictive capacity planning, ML forecasting, and auto-scaling.
+pub mod capacity_planning;
+
+// Operational runbook automation, validation, and execution auditing.
+pub mod runbook_automation;
+
+// Incident management, on-call rotations, escalation policies, and postmortems.
+pub mod incident_management;
+
+// Privacy-preserving analytics suite: DP, FL, SMPC, and HE (issue #528)
+pub mod privacy_preserving_analytics;
+// Contract event data governance and catalog (issue #527)
+pub mod data_governance;
 
 /// Zero/invalid Stellar address (all zeroes) used to reject `NewOwnerIsZero`.
 const NULL_ACCOUNT: &str = "GAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAWHF";
