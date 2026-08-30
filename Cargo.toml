@@ -14,6 +14,51 @@ soroban-sdk = { version = "27.0.6", features = ["testutils"] }
 rand = "0.9"
 proptest = "1"
 
+# ── Testcontainers integration-test dependencies ───────────────────────────────
+# Core testcontainers runtime (async, tokio-based)
+testcontainers        = { version = "0.28.0", default-features = false, features = ["ring"] }
+# Community modules: PostgreSQL, Redis, Kafka, Zookeeper (Kafka dependency)
+testcontainers-modules = { version = "0.15.0", default-features = false, features = [
+    "postgres",
+    "redis",
+    "kafka",
+    "zookeeper",
+] }
+
+# Async runtime for integration tests
+tokio = { version = "1", features = ["macros", "rt-multi-thread", "time", "sync"] }
+
+# PostgreSQL client (used in container tests)
+tokio-postgres = { version = "0.7", features = ["with-uuid-1"] }
+
+# Redis async client
+redis = { version = "0.32.0", features = ["tokio-comp", "connection-manager"] }
+
+# Kafka producer/consumer
+rdkafka = { version = "0.38.0", default-features = false, features = [
+    "cmake-build",
+    "tokio",
+] }
+
+# HTTP client for Soroban RPC mock calls
+reqwest = { version = "0.12.0", default-features = false, features = [
+    "json",
+    "rustls-tls",
+] }
+
+# JSON serialization for RPC payloads
+serde       = { version = "1.0", features = ["derive"] }
+serde_json  = "1.0"
+
+# UUID generation for test data
+uuid = { version = "1", features = ["v4"] }
+
+# Parallel test execution helpers
+futures = "0.3"
+
+# Serial-test macro for tests that must NOT run in parallel
+serial_test = "3.1"
+
 [profile.release]
 opt-level = "z"
 overflow-checks = true
