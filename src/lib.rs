@@ -5,6 +5,7 @@
 pub mod regulator;
 pub mod regulator_events;
 pub mod disclosure;
+pub mod contract_event_privacy;
 pub mod data_sharing;
 pub mod tamper_evidence;
 pub mod compliance_validators;

@@ -41,6 +41,15 @@ jobs:
       - name: Run cargo-deny (license policy + banned/duplicate crates)
         run: cargo install cargo-deny && cargo deny check
 
+      - name: Verify JavaScript dependencies and registries
+        run: ./scripts/supply-chain/verify-dependencies.sh
+
+      - name: Check JavaScript production licenses
+        run: |
+          for dir in api/graphql api/rest packages/security sdk/js services/notifier; do
+            (cd "$dir" && npx --yes license-checker --production --failOn 'GPL;AGPL;LGPL')
+          done
+
       - name: Generate SBOM with CycloneDX
         run: |
           cargo install cargo-cyclonedx
