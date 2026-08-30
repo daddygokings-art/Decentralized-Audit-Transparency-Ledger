@@ -1,0 +1,184 @@
+{
+  "$schema": "https://docs.renovatebot.com/renovate-schema.json",
+  "description": "Automated dependency updates for Decentralized Audit & Transparency Ledger",
+  "extends": [
+    "config:recommended",
+    "group:recommended",
+    "workarounds:all",
+    ":dependencyDashboard",
+    ":semanticCommitTypeAll(deps)",
+    ":enableVulnerabilityAlertsWithLabel(security)",
+    "schedule:weekly"
+  ],
+  "dependencyDashboard": true,
+  "dependencyDashboardTitle": "Dependency Updates Dashboard",
+  "dependencyDashboardLabels": ["dependencies", "automation"],
+  "labels": ["dependencies"],
+  "reviewers": ["daddygokings-art"],
+  "assignees": ["daddygokings-art"],
+  "timezone": "UTC",
+  "schedule": ["before 6am on Monday"],
+  "prHourlyLimit": 5,
+  "prConcurrentLimit": 3,
+  "rangeStrategy": "pin",
+  "rebaseWhen": "conflicted",
+  "semanticCommitScope": "deps",
+  "commitMessageTopic": "{{depName}}",
+  "packageRules": [
+    {
+      "description": "Group all patch updates together",
+      "matchUpdateTypes": ["patch"],
+      "groupName": "all patch updates",
+      "groupSlug": "all-patch",
+      "automerge": true,
+      "automergeType": "pr",
+      "matchPackagePatterns": ["*"]
+    },
+    {
+      "description": "Group minor updates for development dependencies",
+      "matchUpdateTypes": ["minor"],
+      "matchDepTypes": ["devDependencies"],
+      "groupName": "dev dependencies (minor)",
+      "groupSlug": "dev-deps-minor",
+      "automerge": false
+    },
+    {
+      "description": "Prioritize security updates",
+      "matchCategories": ["security"],
+      "labels": ["security", "critical", "automation"],
+      "prPriority": 10,
+      "schedule": ["at any time"],
+      "automerge": false,
+      "vulnerabilityAlerts": {
+        "enabled": true,
+        "labels": ["security", "critical"]
+      }
+    },
+    {
+      "description": "Auto-merge minor updates for GitHub Actions",
+      "matchManagers": ["github-actions"],
+      "matchUpdateTypes": ["minor", "patch"],
+      "groupName": "GitHub Actions",
+      "groupSlug": "github-actions",
+      "automerge": true,
+      "automergeType": "pr"
+    },
+    {
+      "description": "Group Rust dependencies",
+      "matchManagers": ["cargo"],
+      "groupName": "Rust dependencies",
+      "groupSlug": "rust-deps",
+      "matchUpdateTypes": ["minor", "patch"],
+      "automerge": true
+    },
+    {
+      "description": "Major Rust SDK updates require manual review",
+      "matchManagers": ["cargo"],
+      "matchPackagePatterns": ["soroban-sdk"],
+      "matchUpdateTypes": ["major"],
+      "automerge": false,
+      "labels": ["breaking-change", "needs-review", "dependencies"],
+      "reviewers": ["daddygokings-art"]
+    },
+    {
+      "description": "Group Node.js/npm dependencies",
+      "matchManagers": ["npm"],
+      "groupName": "Node.js dependencies",
+      "groupSlug": "node-deps",
+      "matchUpdateTypes": ["minor", "patch"],
+      "automerge": true
+    },
+    {
+      "description": "Major Node.js dependency updates require review",
+      "matchManagers": ["npm"],
+      "matchUpdateTypes": ["major"],
+      "automerge": false,
+      "labels": ["breaking-change", "needs-review", "dependencies"]
+    },
+    {
+      "description": "Group Docker dependencies",
+      "matchManagers": ["dockerfile"],
+      "groupName": "Docker images",
+      "groupSlug": "docker-images",
+      "matchUpdateTypes": ["minor", "patch"],
+      "automerge": true
+    },
+    {
+      "description": "Group Python dependencies",
+      "matchManagers": ["pip_requirements", "pip_setup", "pyproject"],
+      "groupName": "Python dependencies",
+      "groupSlug": "python-deps",
+      "matchUpdateTypes": ["minor", "patch"],
+      "automerge": true
+    },
+    {
+      "description": "Schedule npm updates separately from cargo",
+      "matchManagers": ["npm"],
+      "schedule": ["before 6am on Tuesday"]
+    },
+    {
+      "description": "Schedule Docker updates separately",
+      "matchManagers": ["dockerfile"],
+      "schedule": ["before 6am on Wednesday"]
+    }
+  ],
+  "cargo": {
+    "enabled": true,
+    "fileMatch": ["Cargo\\.toml$"],
+    "lockFileMaintenance": {
+      "enabled": true,
+      "schedule": ["before 6am on the first day of the month"]
+    }
+  },
+  "github-actions": {
+    "enabled": true,
+    "fileMatch": ["(^|/)\\.github/workflows/[^/]+\\.ya?ml$"]
+  },
+  "npm": {
+    "enabled": true,
+    "fileMatch": ["(^/)package\\.json$"],
+    "lockFileMaintenance": {
+      "enabled": true,
+      "schedule": ["before 6am on the first day of the month"]
+    }
+  },
+  "dockerfile": {
+    "enabled": true,
+    "fileMatch": ["(^|/)Dockerfile$", "(^|/)Dockerfile\\..*$"]
+  },
+  "pip_requirements": {
+    "enabled": true,
+    "fileMatch": "(^|/)(requirements[^/]*\\.(txt|in)|setup\\.(cfg|py))$"
+  },
+  "vulnerabilityAlerts": {
+    "enabled": true,
+    "labels": ["security", "critical"],
+    "automerge": false,
+    "prPriority": 10,
+    "schedule": ["at any time"]
+  },
+  "osvVulnerabilityAlerts": true,
+  "prBodyColumns": ["Package", "Change", "Age", "Adoption", "Passing", "Confidence"],
+  "prBodyDefinitions": {
+    "Age": "[![age](https://developer.mend.io/api/mc/badges/age/{{datasource}}/{{replace '/' '%2f' packageName}}/{{newVersion}}?slim=true)](https://docs.renovatebot.com/merge-confidence/)",
+    "Adoption": "[![adoption](https://developer.mend.io/api/mc/badges/adoption/{{datasource}}/{{replace '/' '%2f' packageName}}/{{newVersion}}?slim=true)](https://docs.renovatebot.com/merge-confidence/)",
+    "Passing": "[![passing](https://developer.mend.io/api/mc/badges/compatibility/{{datasource}}/{{replace '/' '%2f' packageName}}/{{currentVersion}}/{{newVersion}}?slim=true)](https://docs.renovatebot.com/merge-confidence/)",
+    "Confidence": "[![confidence](https://developer.mend.io/api/mc/badges/confidence/{{datasource}}/{{replace '/' '%2f' packageName}}/{{currentVersion}}/{{newVersion}}?slim=true)](https://docs.renovatebot.com/merge-confidence/)"
+  },
+  "prHeader": "This PR contains automated dependency updates. Please review the changes carefully.",
+  "lockFileMaintenance": {
+    "enabled": true,
+    "schedule": ["before 6am on the first day of the month"],
+    "commitMessageAction": "Lock file maintenance",
+    "prBodyNotes": "This PR regenerates lock files to use the latest versions of all dependencies."
+  },
+  "customManagers": [
+    {
+      "customType": "regex",
+      "fileMatch": ["Cargo\\.toml$"],
+      "matchStrings": ["(?m)^(?<depName>[a-zA-Z0-9_-]+)\\s*=\\s*\"(?<currentValue>[^\"]+)\"",
+      "datasourceTemplate": "crate",
+      "versioningTemplate": "semver"
+    }
+  ]
+}
