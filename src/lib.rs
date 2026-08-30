@@ -4800,6 +4800,7 @@ impl AuditLedger {
             .get(&DataKey::CMSmelter(smelter_id.clone()))
             .unwrap_or_else(|| panic_with_error!(&env, ContractError::CMSmelterNotFound))
     }
+}  // end impl AuditLedger
 
 #[cfg(test)]
 mod comprehensive_fuzz;
