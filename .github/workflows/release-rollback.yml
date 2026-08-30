@@ -1,0 +1,39 @@
+name: Release Rollback Automation
+
+on:
+  workflow_dispatch:
+    inputs:
+      from_version:
+        description: 'Version being rolled back (e.g. v1.2.0)'
+        required: true
+      target_version:
+        description: 'Target stable baseline version to restore (e.g. v1.1.9)'
+        required: true
+      reason:
+        description: 'Incident explanation and rationale for rollback'
+        required: true
+        default: 'Critical regression detected in production event emission'
+
+permissions:
+  contents: write
+  issues: write
+
+jobs:
+  execute-rollback:
+    name: Execute Release Rollback
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+
+      - name: Execute Rollback Scripts
+        run: |
+          ./scripts/release/rollback-release.sh \
+            --from "${{ github.event.inputs.from_version }}" \
+            --target "${{ github.event.inputs.target_version }}" \
+            --reason "${{ github.event.inputs.reason }}"
+
+      - name: Log Rollback Incident Notice
+        run: |
+          echo "Rollback successfully completed for ${{ github.event.inputs.from_version }} -> ${{ github.event.inputs.target_version }}"
