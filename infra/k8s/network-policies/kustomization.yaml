@@ -1,0 +1,13 @@
+# infra/k8s/network-policies/kustomization.yaml
+#
+# Apply with:
+#   kubectl apply -k infra/k8s/network-policies/
+#
+# Order matters: default-deny first, then allow rules.
+apiVersion: kustomize.config.k8s.io/v1beta1
+kind: Kustomization
+
+resources:
+  - default-deny.yaml
+  - allow-workloads.yaml
+  - allow-vault.yaml

@@ -1,0 +1,240 @@
+# infra/k8s/service-mesh/linkerd/servers.yaml
+#
+# Linkerd Server and ServerAuthorization (policy.linkerd.io/v1beta2) resources.
+#
+# Model:
+#   Server       — declares a port on a set of pods as a policy-enforced
+#                  endpoint. Any port NOT declared as a Server is inaccessible
+#                  via Linkerd policy (default deny).
+#   ServerAuthorization — grants a specific client identity (mTLS principal)
+#                         permission to call a Server.
+#
+# SPIFFE-style principal format (Linkerd):
+#   serviceaccount/<namespace>/<service-account-name>
+#
+# Linkerd policy mode: "default/deny" is set cluster-wide or per-namespace via
+#   linkerd upgrade --default-inbound-policy deny
+# or per-pod annotation:
+#   config.linkerd.io/default-inbound-policy: deny
+#
+# Issue #506 — zero-trust networking (Linkerd alternative)
+
+# ════════════════════════════════════════════════════════════════════════════
+# REST API  (:3002)
+# ════════════════════════════════════════════════════════════════════════════
+apiVersion: policy.linkerd.io/v1beta2
+kind: Server
+metadata:
+  name: api-rest
+  namespace: audit-ledger
+  labels:
+    app.kubernetes.io/part-of: audit-ledger
+    app.kubernetes.io/component: api-rest
+spec:
+  podSelector:
+    matchLabels:
+      app.kubernetes.io/component: api-rest
+  port: 3002
+  proxyProtocol: HTTP/2
+---
+apiVersion: policy.linkerd.io/v1beta2
+kind: ServerAuthorization
+metadata:
+  name: api-rest-allow
+  namespace: audit-ledger
+  labels:
+    app.kubernetes.io/part-of: audit-ledger
+    app.kubernetes.io/component: api-rest
+spec:
+  server:
+    name: api-rest
+  client:
+    meshTLS:
+      serviceAccounts:
+        - name: ui
+          namespace: audit-ledger
+        - name: linkerd-gateway   # inbound from Linkerd multi-cluster gateway
+          namespace: linkerd-multicluster
+---
+# ════════════════════════════════════════════════════════════════════════════
+# GraphQL API  (:4000)
+# ════════════════════════════════════════════════════════════════════════════
+apiVersion: policy.linkerd.io/v1beta2
+kind: Server
+metadata:
+  name: api-graphql
+  namespace: audit-ledger
+  labels:
+    app.kubernetes.io/part-of: audit-ledger
+    app.kubernetes.io/component: api-graphql
+spec:
+  podSelector:
+    matchLabels:
+      app.kubernetes.io/component: api-graphql
+  port: 4000
+  proxyProtocol: HTTP/2
+---
+apiVersion: policy.linkerd.io/v1beta2
+kind: ServerAuthorization
+metadata:
+  name: api-graphql-allow
+  namespace: audit-ledger
+  labels:
+    app.kubernetes.io/part-of: audit-ledger
+    app.kubernetes.io/component: api-graphql
+spec:
+  server:
+    name: api-graphql
+  client:
+    meshTLS:
+      serviceAccounts:
+        - name: api-rest
+          namespace: audit-ledger
+        - name: ui
+          namespace: audit-ledger
+---
+# ════════════════════════════════════════════════════════════════════════════
+# WebSocket Event Stream  (:4000)
+# ════════════════════════════════════════════════════════════════════════════
+apiVersion: policy.linkerd.io/v1beta2
+kind: Server
+metadata:
+  name: api-ws
+  namespace: audit-ledger
+  labels:
+    app.kubernetes.io/part-of: audit-ledger
+    app.kubernetes.io/component: api-ws
+spec:
+  podSelector:
+    matchLabels:
+      app.kubernetes.io/component: api-ws
+  port: 4000
+  proxyProtocol: HTTP/2
+---
+apiVersion: policy.linkerd.io/v1beta2
+kind: ServerAuthorization
+metadata:
+  name: api-ws-allow
+  namespace: audit-ledger
+  labels:
+    app.kubernetes.io/part-of: audit-ledger
+    app.kubernetes.io/component: api-ws
+spec:
+  server:
+    name: api-ws
+  client:
+    meshTLS:
+      serviceAccounts:
+        - name: api-graphql
+          namespace: audit-ledger
+        - name: notifier
+          namespace: audit-ledger
+---
+# ════════════════════════════════════════════════════════════════════════════
+# UI  (:3001)
+# ════════════════════════════════════════════════════════════════════════════
+apiVersion: policy.linkerd.io/v1beta2
+kind: Server
+metadata:
+  name: ui
+  namespace: audit-ledger
+  labels:
+    app.kubernetes.io/part-of: audit-ledger
+    app.kubernetes.io/component: ui
+spec:
+  podSelector:
+    matchLabels:
+      app.kubernetes.io/component: ui
+  port: 3001
+  proxyProtocol: HTTP/1
+---
+apiVersion: policy.linkerd.io/v1beta2
+kind: ServerAuthorization
+metadata:
+  name: ui-allow
+  namespace: audit-ledger
+  labels:
+    app.kubernetes.io/part-of: audit-ledger
+    app.kubernetes.io/component: ui
+spec:
+  server:
+    name: ui
+  client:
+    # Allow unauthenticated (external browser) traffic via the gateway.
+    # In a Linkerd multi-cluster setup this would be the gateway service account;
+    # for a standalone deployment, allow all meshed traffic.
+    meshTLS:
+      serviceAccounts:
+        - name: linkerd-gateway
+          namespace: linkerd-multicluster
+    unauthenticated: true   # permit plain HTTP from non-meshed ingress controllers
+---
+# ════════════════════════════════════════════════════════════════════════════
+# Metrics Exporter  (:8000)
+# ════════════════════════════════════════════════════════════════════════════
+apiVersion: policy.linkerd.io/v1beta2
+kind: Server
+metadata:
+  name: metrics-exporter
+  namespace: audit-ledger
+  labels:
+    app.kubernetes.io/part-of: audit-ledger
+    app.kubernetes.io/component: metrics-exporter
+spec:
+  podSelector:
+    matchLabels:
+      app.kubernetes.io/component: metrics-exporter
+  port: 8000
+  proxyProtocol: HTTP/1
+---
+apiVersion: policy.linkerd.io/v1beta2
+kind: ServerAuthorization
+metadata:
+  name: metrics-exporter-allow
+  namespace: audit-ledger
+  labels:
+    app.kubernetes.io/part-of: audit-ledger
+    app.kubernetes.io/component: metrics-exporter
+spec:
+  server:
+    name: metrics-exporter
+  client:
+    meshTLS:
+      serviceAccounts:
+        - name: prometheus
+          namespace: monitoring
+---
+# ════════════════════════════════════════════════════════════════════════════
+# Bridge Relayer  (:8080)
+# ════════════════════════════════════════════════════════════════════════════
+apiVersion: policy.linkerd.io/v1beta2
+kind: Server
+metadata:
+  name: relayer
+  namespace: audit-ledger
+  labels:
+    app.kubernetes.io/part-of: audit-ledger
+    app.kubernetes.io/component: relayer
+spec:
+  podSelector:
+    matchLabels:
+      app.kubernetes.io/component: relayer
+  port: 8080
+  proxyProtocol: HTTP/1
+---
+apiVersion: policy.linkerd.io/v1beta2
+kind: ServerAuthorization
+metadata:
+  name: relayer-allow
+  namespace: audit-ledger
+  labels:
+    app.kubernetes.io/part-of: audit-ledger
+    app.kubernetes.io/component: relayer
+spec:
+  server:
+    name: relayer
+  client:
+    meshTLS:
+      serviceAccounts:
+        - name: prometheus
+          namespace: monitoring

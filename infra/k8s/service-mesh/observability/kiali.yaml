@@ -1,0 +1,92 @@
+# infra/k8s/service-mesh/observability/kiali.yaml
+#
+# Kiali operator CR — deploys the Kiali service mesh topology UI with
+# Prometheus and Jaeger integration pre-configured for the audit-ledger stack.
+#
+# Install the Kiali operator first:
+#   helm install kiali-operator kiali/kiali-operator -n kiali-operator --create-namespace
+#
+# Then apply this file:
+#   kubectl apply -f infra/k8s/service-mesh/observability/kiali.yaml
+#
+# Kiali UI will be available at: http://kiali.audit-ledger.example/kiali
+#
+# Issue #506 — zero-trust networking
+apiVersion: kiali.io/v1alpha1
+kind: Kiali
+metadata:
+  name: kiali
+  namespace: istio-system
+  labels:
+    app.kubernetes.io/part-of: audit-ledger
+    audit-ledger.io/component: service-mesh-observability
+spec:
+  # ── Authentication ─────────────────────────────────────────────────────────
+  auth:
+    strategy: token   # use Kubernetes ServiceAccount token login
+
+  # ── Deployment settings ────────────────────────────────────────────────────
+  deployment:
+    accessible_namespaces:
+      - audit-ledger
+      - istio-system
+      - istio-ingress
+    resources:
+      requests:
+        cpu: 100m
+        memory: 128Mi
+      limits:
+        cpu: 500m
+        memory: 512Mi
+    ingress:
+      enabled: true
+      class_name: istio
+      override_yaml:
+        metadata:
+          annotations:
+            kubernetes.io/ingress.class: istio
+        spec:
+          rules:
+            - host: kiali.audit-ledger.example
+              http:
+                paths:
+                  - path: /kiali
+                    pathType: Prefix
+                    backend:
+                      service:
+                        name: kiali
+                        port:
+                          number: 20001
+
+  # ── External services ──────────────────────────────────────────────────────
+  external_services:
+    prometheus:
+      url: "http://prometheus-operated.monitoring.svc.cluster.local:9090"
+      auth:
+        type: none
+
+    grafana:
+      enabled: true
+      url: "http://grafana.monitoring.svc.cluster.local:3000"
+      in_cluster_url: "http://grafana.monitoring.svc.cluster.local:3000"
+      auth:
+        type: none
+
+    tracing:
+      enabled: true
+      in_cluster_url: "http://jaeger-query.monitoring.svc.cluster.local:16686"
+      provider: jaeger
+      use_grpc: true
+
+  # ── Graph settings ─────────────────────────────────────────────────────────
+  kiali_feature_flags:
+    certificates_information_indicators:
+      enabled: true
+    clustering:
+      autodetect_secrets:
+        enabled: true
+    validations:
+      ignore:
+        # Ignore IST0127 (DestinationRule without a corresponding VirtualService)
+        # for services that are accessed mesh-internally only.
+        - IST0127

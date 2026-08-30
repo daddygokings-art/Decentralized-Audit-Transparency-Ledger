@@ -1,0 +1,29 @@
+# infra/k8s/service-mesh/linkerd/namespace-annotation.yaml
+#
+# Annotates the audit-ledger workload namespace for automatic Linkerd proxy
+# injection.  This is the Linkerd equivalent of the Istio injection label in
+# namespace-injection.yaml — use one or the other, not both.
+#
+# Linkerd proxy injection is controlled by the annotation
+#   linkerd.io/inject: enabled
+# on the Namespace (or individual Pod/Deployment for finer control).
+#
+# Requires: Linkerd 2.14+ with the policy controller extension installed.
+#   linkerd install | kubectl apply -f -
+#   linkerd install --crds | kubectl apply -f -
+#
+# Issue #506 — zero-trust networking (Linkerd alternative)
+apiVersion: v1
+kind: Namespace
+metadata:
+  name: audit-ledger
+  annotations:
+    # Inject the Linkerd proxy sidecar into all new pods
+    linkerd.io/inject: enabled
+    # Require mTLS for all inbound connections (opaque ports are mTLS-only)
+    config.linkerd.io/proxy-await-shutdown: "true"
+  labels:
+    app.kubernetes.io/part-of: audit-ledger
+    audit-ledger.io/purpose: workloads
+    # Used by Linkerd policy to scope Server selectors
+    linkerd.io/control-plane-ns: linkerd

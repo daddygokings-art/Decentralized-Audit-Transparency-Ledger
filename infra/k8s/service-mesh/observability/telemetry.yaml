@@ -1,0 +1,58 @@
+# infra/k8s/service-mesh/observability/telemetry.yaml
+#
+# Istio Telemetry API — configures metrics, access logging, and distributed
+# tracing for all pods in the audit-ledger namespace.
+#
+# Metrics exported:
+#   - Standard Istio metrics (request count, duration, bytes)
+#   - Custom dimensions: source_workload, destination_workload, response_code
+#
+# Tracing:
+#   - Backend: Jaeger (Zipkin-compatible endpoint)
+#   - Sampling: 100 % in non-production (set to 0.01 in production)
+#
+# Issue #506 — zero-trust networking
+apiVersion: telemetry.istio.io/v1alpha1
+kind: Telemetry
+metadata:
+  name: audit-ledger-telemetry
+  namespace: audit-ledger
+  labels:
+    app.kubernetes.io/part-of: audit-ledger
+spec:
+  # ── Metrics ──────────────────────────────────────────────────────────────
+  metrics:
+    - providers:
+        - name: prometheus
+      overrides:
+        # Add workload-level tags to every metric for fine-grained dashboards
+        - match:
+            metric: ALL_METRICS
+          tagOverrides:
+            source_workload:
+              value: "%{source_workload}"
+            destination_workload:
+              value: "%{destination_workload}"
+            source_namespace:
+              value: "%{source_workload_namespace}"
+            destination_namespace:
+              value: "%{destination_workload_namespace}"
+
+  # ── Access Logs ───────────────────────────────────────────────────────────
+  accessLogging:
+    - providers:
+        - name: envoy
+
+  # ── Tracing ───────────────────────────────────────────────────────────────
+  tracing:
+    - providers:
+        - name: jaeger
+      randomSamplingPercentage: 100.0   # lower to 1.0 in production
+      customTags:
+        service_version:
+          header:
+            name: x-app-version
+            defaultValue: unknown
+        environment:
+          literal:
+            value: "staging"   # override per environment overlay

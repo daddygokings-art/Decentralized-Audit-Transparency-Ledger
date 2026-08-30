@@ -1,0 +1,311 @@
+# infra/k8s/network-policies/allow-workloads.yaml
+#
+# Per-service ingress/egress allow rules for the audit-ledger workload
+# namespace.  Every rule opens the minimum traffic path required for each
+# service to function.  All other traffic remains blocked by default-deny.yaml.
+#
+# Services modelled (matching docker-compose / architecture.md):
+#   api-rest        — REST API          :3002
+#   api-graphql     — GraphQL API       :4000
+#   api-ws          — WebSocket stream  :4000
+#   ui              — Next.js UI        :3001
+#   metrics-exporter— Prometheus scrape :8000
+#   notifier        — alert dispatcher  (egress only)
+#   relayer         — bridge relayer    :8080
+#
+# Issue #506 — zero-trust networking
+
+# ── REST API ─────────────────────────────────────────────────────────────────
+apiVersion: networking.k8s.io/v1
+kind: NetworkPolicy
+metadata:
+  name: allow-api-rest
+  namespace: audit-ledger
+  labels:
+    app.kubernetes.io/part-of: audit-ledger
+    app.kubernetes.io/component: api-rest
+spec:
+  podSelector:
+    matchLabels:
+      app.kubernetes.io/component: api-rest
+  policyTypes:
+    - Ingress
+    - Egress
+  ingress:
+    # Accept traffic from the UI and from the Istio ingress gateway
+    - from:
+        - podSelector:
+            matchLabels:
+              app.kubernetes.io/component: ui
+        - namespaceSelector:
+            matchLabels:
+              kubernetes.io/metadata.name: istio-ingress
+      ports:
+        - port: 3002
+          protocol: TCP
+  egress:
+    # Forward to GraphQL API
+    - to:
+        - podSelector:
+            matchLabels:
+              app.kubernetes.io/component: api-graphql
+      ports:
+        - port: 4000
+          protocol: TCP
+    # DNS resolution
+    - ports:
+        - port: 53
+          protocol: UDP
+        - port: 53
+          protocol: TCP
+---
+# ── GraphQL API ──────────────────────────────────────────────────────────────
+apiVersion: networking.k8s.io/v1
+kind: NetworkPolicy
+metadata:
+  name: allow-api-graphql
+  namespace: audit-ledger
+  labels:
+    app.kubernetes.io/part-of: audit-ledger
+    app.kubernetes.io/component: api-graphql
+spec:
+  podSelector:
+    matchLabels:
+      app.kubernetes.io/component: api-graphql
+  policyTypes:
+    - Ingress
+    - Egress
+  ingress:
+    - from:
+        - podSelector:
+            matchLabels:
+              app.kubernetes.io/component: api-rest
+        - podSelector:
+            matchLabels:
+              app.kubernetes.io/component: ui
+        - namespaceSelector:
+            matchLabels:
+              kubernetes.io/metadata.name: istio-ingress
+      ports:
+        - port: 4000
+          protocol: TCP
+  egress:
+    # Soroban RPC egress — reaches Stellar testnet/mainnet (HTTPS)
+    - ports:
+        - port: 443
+          protocol: TCP
+    # WebSocket stream
+    - to:
+        - podSelector:
+            matchLabels:
+              app.kubernetes.io/component: api-ws
+      ports:
+        - port: 4000
+          protocol: TCP
+    - ports:
+        - port: 53
+          protocol: UDP
+        - port: 53
+          protocol: TCP
+---
+# ── WebSocket Event Stream ───────────────────────────────────────────────────
+apiVersion: networking.k8s.io/v1
+kind: NetworkPolicy
+metadata:
+  name: allow-api-ws
+  namespace: audit-ledger
+  labels:
+    app.kubernetes.io/part-of: audit-ledger
+    app.kubernetes.io/component: api-ws
+spec:
+  podSelector:
+    matchLabels:
+      app.kubernetes.io/component: api-ws
+  policyTypes:
+    - Ingress
+    - Egress
+  ingress:
+    - from:
+        - podSelector:
+            matchLabels:
+              app.kubernetes.io/component: api-graphql
+        - podSelector:
+            matchLabels:
+              app.kubernetes.io/component: notifier
+        - namespaceSelector:
+            matchLabels:
+              kubernetes.io/metadata.name: istio-ingress
+      ports:
+        - port: 4000
+          protocol: TCP
+  egress:
+    - ports:
+        - port: 443
+          protocol: TCP
+    - ports:
+        - port: 53
+          protocol: UDP
+        - port: 53
+          protocol: TCP
+---
+# ── UI (Next.js) ─────────────────────────────────────────────────────────────
+apiVersion: networking.k8s.io/v1
+kind: NetworkPolicy
+metadata:
+  name: allow-ui
+  namespace: audit-ledger
+  labels:
+    app.kubernetes.io/part-of: audit-ledger
+    app.kubernetes.io/component: ui
+spec:
+  podSelector:
+    matchLabels:
+      app.kubernetes.io/component: ui
+  policyTypes:
+    - Ingress
+    - Egress
+  ingress:
+    - from:
+        - namespaceSelector:
+            matchLabels:
+              kubernetes.io/metadata.name: istio-ingress
+      ports:
+        - port: 3001
+          protocol: TCP
+  egress:
+    - to:
+        - podSelector:
+            matchLabels:
+              app.kubernetes.io/component: api-rest
+      ports:
+        - port: 3002
+          protocol: TCP
+    - to:
+        - podSelector:
+            matchLabels:
+              app.kubernetes.io/component: api-graphql
+      ports:
+        - port: 4000
+          protocol: TCP
+    # Soroban RPC direct reads from the browser-server component
+    - ports:
+        - port: 443
+          protocol: TCP
+    - ports:
+        - port: 53
+          protocol: UDP
+        - port: 53
+          protocol: TCP
+---
+# ── Metrics Exporter ─────────────────────────────────────────────────────────
+apiVersion: networking.k8s.io/v1
+kind: NetworkPolicy
+metadata:
+  name: allow-metrics-exporter
+  namespace: audit-ledger
+  labels:
+    app.kubernetes.io/part-of: audit-ledger
+    app.kubernetes.io/component: metrics-exporter
+spec:
+  podSelector:
+    matchLabels:
+      app.kubernetes.io/component: metrics-exporter
+  policyTypes:
+    - Ingress
+    - Egress
+  ingress:
+    # Prometheus scrape — from monitoring namespace
+    - from:
+        - namespaceSelector:
+            matchLabels:
+              kubernetes.io/metadata.name: monitoring
+          podSelector:
+            matchLabels:
+              app.kubernetes.io/name: prometheus
+      ports:
+        - port: 8000
+          protocol: TCP
+  egress:
+    # Soroban RPC poll
+    - ports:
+        - port: 443
+          protocol: TCP
+    - ports:
+        - port: 53
+          protocol: UDP
+        - port: 53
+          protocol: TCP
+---
+# ── Notifier Service ─────────────────────────────────────────────────────────
+apiVersion: networking.k8s.io/v1
+kind: NetworkPolicy
+metadata:
+  name: allow-notifier
+  namespace: audit-ledger
+  labels:
+    app.kubernetes.io/part-of: audit-ledger
+    app.kubernetes.io/component: notifier
+spec:
+  podSelector:
+    matchLabels:
+      app.kubernetes.io/component: notifier
+  policyTypes:
+    - Ingress
+    - Egress
+  ingress: []           # notifier exposes no inbound service port
+  egress:
+    # WebSocket event stream subscription
+    - to:
+        - podSelector:
+            matchLabels:
+              app.kubernetes.io/component: api-ws
+      ports:
+        - port: 4000
+          protocol: TCP
+    # Alert delivery: Slack / PagerDuty / webhook (HTTPS)
+    - ports:
+        - port: 443
+          protocol: TCP
+    - ports:
+        - port: 53
+          protocol: UDP
+        - port: 53
+          protocol: TCP
+---
+# ── Bridge Relayer ────────────────────────────────────────────────────────────
+apiVersion: networking.k8s.io/v1
+kind: NetworkPolicy
+metadata:
+  name: allow-relayer
+  namespace: audit-ledger
+  labels:
+    app.kubernetes.io/part-of: audit-ledger
+    app.kubernetes.io/component: relayer
+spec:
+  podSelector:
+    matchLabels:
+      app.kubernetes.io/component: relayer
+  policyTypes:
+    - Ingress
+    - Egress
+  ingress:
+    - from:
+        - namespaceSelector:
+            matchLabels:
+              kubernetes.io/metadata.name: monitoring
+          podSelector:
+            matchLabels:
+              app.kubernetes.io/name: prometheus
+      ports:
+        - port: 8080
+          protocol: TCP
+  egress:
+    # Stellar RPC + EVM RPC
+    - ports:
+        - port: 443
+          protocol: TCP
+    - ports:
+        - port: 53
+          protocol: UDP
+        - port: 53
+          protocol: TCP
