@@ -5,6 +5,7 @@
 pub mod regulator;
 pub mod regulator_events;
 pub mod disclosure;
+pub mod contract_event_privacy;
 pub mod data_sharing;
 pub mod tamper_evidence;
 pub mod compliance_validators;
@@ -44,6 +45,8 @@ pub mod data_retention;
 
 // Privacy-preserving analytics suite: DP, FL, SMPC, and HE (issue #528)
 pub mod privacy_preserving_analytics;
+// Contract event data governance and catalog (issue #527)
+pub mod data_governance;
 
 /// Zero/invalid Stellar address (all zeroes) used to reject `NewOwnerIsZero`.
 const NULL_ACCOUNT: &str = "GAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAWHF";
