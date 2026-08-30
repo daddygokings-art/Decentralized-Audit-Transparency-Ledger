@@ -258,7 +258,7 @@ pub struct GraduationCriteria {
     /// All regulatory requirements met
     pub regulatory_approval_required: bool,
     /// Financial health assessment passed
-    pub financial_health_assessment_required: bool,
+    pub financial_health_assess_req: bool,
     /// Technology readiness score (0-100)
     pub min_tech_readiness_score: u32,
 }

@@ -1455,7 +1455,7 @@ pub struct WaterDisclosure {
     pub sites_in_stressed_areas: u32,
     // ── W7: Accounting ──
     /// Scarcity-weighted total water use across all recorded footprints, L × 10⁻⁶.
-    pub scarcity_weighted_total_L_micro: u64,
+    pub scarcity_weighted_total_l_micro: u64,
     // ── W8: Targets achieved ──
     /// Reduction achieved since base year, L × 10⁻⁶ (CDP W8.1).
     pub reduction_achieved_L_micro: u64,
@@ -1476,7 +1476,7 @@ pub struct WaterTotals {
     /// Cumulative grey water footprint, L × 10⁻⁶.
     pub total_grey_L_micro: u64,
     /// Cumulative scarcity-weighted blue water, L × 10⁻⁶.
-    pub total_scarcity_weighted_L_micro: u64,
+    pub total_scarcity_weighted_l_micro: u64,
     /// Total water risk assessments registered.
     pub total_risk_assessments: u32,
     /// Total stewardship programmes registered.
@@ -1508,7 +1508,7 @@ pub struct WaterSnapshot {
     /// Total grey water (L × 10⁻⁶).
     pub total_grey_L_micro: u64,
     /// Total scarcity-weighted blue water (L × 10⁻⁶).
-    pub total_scarcity_weighted_L_micro: u64,
+    pub total_scarcity_weighted_l_micro: u64,
     /// Total water footprint (blue + green + grey), L × 10⁻⁶.
     pub total_water_footprint_L_micro: u64,
     /// Scarcity ratio: scarcity_weighted / blue × 10 000 (bps). 0 when no blue water.

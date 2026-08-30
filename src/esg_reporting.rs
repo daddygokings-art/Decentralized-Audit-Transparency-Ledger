@@ -445,8 +445,8 @@ pub fn generate_investor_report(
         .unwrap_or_else(|| panic!("Report not found"));
 
     let investor_id = env.crypto().sha256(soroban_sdk::bytes!(env, b"INVESTOR"));
-    let content = soroban_sdk::bytes!(
-        env,
+    let content = soroban_sdk::Bytes::from_slice(
+        &env,
         format!("ESG Score: {}, E: {}, S: {}, G: {}", report.esg_score, report.e_score, report.s_score, report.g_score).as_bytes()
     );
 
@@ -479,8 +479,8 @@ pub fn generate_employee_report(
         .unwrap_or_else(|| panic!("Report not found"));
 
     let employee_id = env.crypto().sha256(soroban_sdk::bytes!(env, b"EMPLOYEE"));
-    let content = soroban_sdk::bytes!(
-        env,
+    let content = soroban_sdk::Bytes::from_slice(
+        &env,
         format!(
             "Social Score: {}, Women: {}%, Training: {} hours",
             report.s_score, report.social.women_percent, report.social.training_hours_per_employee
@@ -511,8 +511,8 @@ pub fn generate_supplier_report(
         .unwrap_or_else(|| panic!("Report not found"));
 
     let supplier_id = env.crypto().sha256(soroban_sdk::bytes!(env, b"SUPPLIER"));
-    let content = soroban_sdk::bytes!(
-        env,
+    let content = soroban_sdk::Bytes::from_slice(
+        &env,
         format!("Governance Score: {}, Ethics: {}%", report.g_score, report.governance.ethics_training_percent)
             .as_bytes()
     );
@@ -540,8 +540,8 @@ pub fn generate_community_report(
         .unwrap_or_else(|| panic!("Report not found"));
 
     let community_id = env.crypto().sha256(soroban_sdk::bytes!(env, b"COMMUNITY"));
-    let content = soroban_sdk::bytes!(
-        env,
+    let content = soroban_sdk::Bytes::from_slice(
+        &env,
         format!(
             "Environmental Score: {}, Community Investment: ${} K",
             report.e_score, report.social.community_investment
