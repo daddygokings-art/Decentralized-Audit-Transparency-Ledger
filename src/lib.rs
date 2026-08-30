@@ -5,6 +5,7 @@
 pub mod regulator;
 pub mod regulator_events;
 pub mod disclosure;
+pub mod contract_event_privacy;
 pub mod data_sharing;
 pub mod tamper_evidence;
 pub mod compliance_validators;
@@ -42,8 +43,8 @@ pub mod esg_reporting;
 // Data retention, legal hold, GDPR erasure, and the immutable operational audit log.
 pub mod data_retention;
 
-// Continuous contract event audit, control monitoring, and compliance automation (SOX, GDPR, HIPAA, MiCA)
-pub mod event_compliance_automation;
+// Contract event feature flags, progressive delivery, canary rollouts, and kill switches.
+pub mod event_feature_flags;
 
 /// Zero/invalid Stellar address (all zeroes) used to reject `NewOwnerIsZero`.
 const NULL_ACCOUNT: &str = "GAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAWHF";

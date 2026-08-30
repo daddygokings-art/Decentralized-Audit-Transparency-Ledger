@@ -1,0 +1,52 @@
+groups:
+  - name: synthetic_monitoring_alerts
+    rules:
+      - alert: SyntheticProbeJourneyFailure
+        expr: rate(synthetic_probe_execution_failures_total[5m]) > 0.01
+        for: 2m
+        labels:
+          severity: critical
+          component: monitoring
+        annotations:
+          summary: "Synthetic journey {{ $labels.journey }} probe failure rate > 1%"
+          description: "Synthetic probe {{ $labels.probe_name }} for user journey {{ $labels.journey }} is experiencing elevated failures."
+
+      - alert: SyntheticSlaUptimeBreach
+        expr: synthetic_journey_sla_uptime_bps < 9990
+        for: 5m
+        labels:
+          severity: critical
+          tier: p1
+        annotations:
+          summary: "SLA uptime breach on journey {{ $labels.journey }}"
+          description: "Rolling 24h synthetic uptime is {{ $value }} bps (< 9990 bps / 99.90% SLA requirement)."
+
+      - alert: SyntheticLatencyDegradationP95
+        expr: synthetic_journey_p95_duration_seconds > 0.8
+        for: 10m
+        labels:
+          severity: warning
+          component: latency
+        annotations:
+          summary: "High P95 latency detected on {{ $labels.journey }}"
+          description: "95th percentile latency for journey {{ $labels.journey }} has exceeded 800ms for over 10 minutes."
+
+      - alert: SyntheticEndpointConsecutiveFailures
+        expr: synthetic_consecutive_failures_count >= 3
+        for: 1m
+        labels:
+          severity: critical
+          action: page_oncall
+        annotations:
+          summary: "Endpoint outage detected: 3+ consecutive synthetic failures on {{ $labels.journey }}"
+          description: "Journey {{ $labels.journey }} has failed 3 consecutive synthetic probes. Automated incident initiated."
+
+      - alert: GovernanceSyntheticJourneyStall
+        expr: synthetic_probe_execution_duration_seconds{journey="governance_operations"} > 3.0
+        for: 5m
+        labels:
+          severity: high
+          component: governance
+        annotations:
+          summary: "Governance operations synthetic execution exceeding 3s timeout"
+          description: "Synthetic proposal creation or vote tabulation journey latency is severely degraded."

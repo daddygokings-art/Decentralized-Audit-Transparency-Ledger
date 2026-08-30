@@ -1,0 +1,33 @@
+apiVersion: monitoring.coreos.com/v1
+kind: PrometheusRule
+metadata:
+  name: feature-flags-canary-alerts
+  namespace: audit-ledger
+  labels:
+    role: alert-rules
+    app.kubernetes.io/part-of: audit-ledger
+spec:
+  groups:
+    - name: feature-flags.rules
+      rules:
+        - alert: CanaryHighErrorRate
+          expr: (rate(auditledger_canary_errors_total[2m]) / rate(auditledger_canary_requests_total[2m])) * 10000 > 50
+          for: 1m
+          labels:
+            severity: critical
+            component: feature-flags
+          annotations:
+            summary: "Canary deployment error rate exceeded threshold ({{ $value }} bps)"
+            description: "Canary traffic for flag {{ $labels.flag_key }} is erroring at {{ $value }} bps, exceeding the 50 bps budget."
+            runbook_url: "https://github.com/ComputerOracle/Decentralized-Audit-Transparency-Ledger/blob/master/docs/feature-flags-progressive-delivery.md#canary-troubleshooting"
+
+        - alert: EmergencyKillSwitchTriggered
+          expr: auditledger_kill_switch_active == 1
+          for: 0m
+          labels:
+            severity: warning
+            component: feature-flags
+          annotations:
+            summary: "Emergency kill switch triggered for flag {{ $labels.flag_key }}"
+            description: "An emergency kill switch was activated by {{ $labels.triggered_by }}. All traffic routed to safe fallback."
+            runbook_url: "https://github.com/ComputerOracle/Decentralized-Audit-Transparency-Ledger/blob/master/docs/feature-flags-progressive-delivery.md#kill-switch-recovery"
