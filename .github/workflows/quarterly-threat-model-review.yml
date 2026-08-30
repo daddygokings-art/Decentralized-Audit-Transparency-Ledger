@@ -1,0 +1,22 @@
+name: Quarterly Threat Model Review & Validation
+
+on:
+  schedule:
+    - cron: '0 0 1 1,4,7,10 *' # 1st day of Jan, Apr, Jul, Oct
+  workflow_dispatch:
+
+jobs:
+  validate-threat-model:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v4
+
+      - name: Set up Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: '3.11'
+
+      - name: Validate Threat Model Coverage
+        run: |
+          python3 tools/threat-modeling/validate_threat_coverage.py

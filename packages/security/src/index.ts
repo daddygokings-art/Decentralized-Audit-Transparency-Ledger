@@ -25,3 +25,6 @@ export * from "./waf/botDetection";
 export * from "./waf/cloudflare";
 export * from "./waf/awsShield";
 export * from "./waf/middleware";
+
+// Zero-Trust Architecture
+export * from "./zerotrust";
