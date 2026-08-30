@@ -42,6 +42,9 @@ pub mod esg_reporting;
 // Data retention, legal hold, GDPR erasure, and the immutable operational audit log.
 pub mod data_retention;
 
+// Contract event release automation, semantic versioning, RC lifecycle, and rollback.
+pub mod event_release;
+
 /// Zero/invalid Stellar address (all zeroes) used to reject `NewOwnerIsZero`.
 const NULL_ACCOUNT: &str = "GAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAWHF";
 
