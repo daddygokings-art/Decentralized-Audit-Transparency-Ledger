@@ -1,0 +1,112 @@
+{
+  "editable": true,
+  "fiscalYearStartMonth": 0,
+  "graphTooltip": 1,
+  "id": null,
+  "panels": [
+    {
+      "collapsed": false,
+      "gridPos": { "h": 1, "w": 24, "x": 0, "y": 0 },
+      "id": 100,
+      "title": "Product Funnel & User Conversion",
+      "type": "row"
+    },
+    {
+      "datasource": "Prometheus",
+      "fieldConfig": {
+        "defaults": { "color": { "mode": "palette-classic" }, "unit": "percent" }
+      },
+      "gridPos": { "h": 6, "w": 12, "x": 0, "y": 1 },
+      "id": 1,
+      "title": "Audit Event Submission Funnel Conversion Rate",
+      "type": "bargauge",
+      "targets": [{ "expr": "audit_analytics_funnel_step_conversion_pct", "legendFormat": "{{step}}" }]
+    },
+    {
+      "datasource": "Prometheus",
+      "fieldConfig": {
+        "defaults": { "color": { "mode": "palette-classic" }, "unit": "s" }
+      },
+      "gridPos": { "h": 6, "w": 12, "x": 12, "y": 1 },
+      "id": 2,
+      "title": "Avg Time Between Funnel Steps",
+      "type": "bargauge",
+      "targets": [{ "expr": "audit_analytics_funnel_step_latency_seconds", "legendFormat": "{{step}}" }]
+    },
+    {
+      "collapsed": false,
+      "gridPos": { "h": 1, "w": 24, "x": 0, "y": 7 },
+      "id": 101,
+      "title": "Feature Adoption & Stickiness",
+      "type": "row"
+    },
+    {
+      "datasource": "Prometheus",
+      "fieldConfig": {
+        "defaults": { "color": { "mode": "palette-classic" }, "unit": "short" }
+      },
+      "gridPos": { "h": 7, "w": 12, "x": 0, "y": 8 },
+      "id": 3,
+      "title": "Feature Interaction Volume (Top Features)",
+      "type": "timeseries",
+      "targets": [{ "expr": "sum(rate(audit_analytics_feature_usage_total[1h])) by (feature)", "legendFormat": "{{feature}}" }]
+    },
+    {
+      "datasource": "Prometheus",
+      "fieldConfig": {
+        "defaults": { "color": { "mode": "palette-classic" }, "unit": "percent" }
+      },
+      "gridPos": { "h": 7, "w": 12, "x": 12, "y": 8 },
+      "id": 4,
+      "title": "Feature Stickiness (DAU/MAU)",
+      "type": "timeseries",
+      "targets": [{ "expr": "audit_analytics_feature_stickiness_pct", "legendFormat": "{{feature}}" }]
+    },
+    {
+      "collapsed": false,
+      "gridPos": { "h": 1, "w": 24, "x": 0, "y": 15 },
+      "id": 102,
+      "title": "Privacy Consent & GDPR Compliance",
+      "type": "row"
+    },
+    {
+      "datasource": "Prometheus",
+      "fieldConfig": {
+        "defaults": { "color": { "mode": "palette-classic" }, "unit": "percent" }
+      },
+      "gridPos": { "h": 5, "w": 8, "x": 0, "y": 16 },
+      "id": 5,
+      "title": "Analytics Opt-In Rate",
+      "type": "stat",
+      "targets": [{ "expr": "audit_analytics_consent_opt_in_pct", "legendFormat": "Opt-In Rate" }]
+    },
+    {
+      "datasource": "Prometheus",
+      "fieldConfig": {
+        "defaults": { "color": { "mode": "palette-classic" }, "unit": "short" }
+      },
+      "gridPos": { "h": 5, "w": 8, "x": 8, "y": 16 },
+      "id": 6,
+      "title": "Right to be Forgotten Erasures Processed",
+      "type": "stat",
+      "targets": [{ "expr": "audit_analytics_erasures_total", "legendFormat": "Erasures" }]
+    },
+    {
+      "datasource": "Prometheus",
+      "fieldConfig": {
+        "defaults": { "color": { "mode": "palette-classic" }, "unit": "short" }
+      },
+      "gridPos": { "h": 5, "w": 8, "x": 16, "y": 16 },
+      "id": 7,
+      "title": "DNT / GPC Signals Honored",
+      "type": "stat",
+      "targets": [{ "expr": "audit_analytics_dnt_signals_honored_total", "legendFormat": "DNT Signals" }]
+    }
+  ],
+  "schemaVersion": 38,
+  "style": "dark",
+  "tags": ["product-analytics", "funnels", "adoption", "cohorts", "gdpr", "privacy"],
+  "time": { "from": "now-30d", "to": "now" },
+  "title": "Product Analytics & User Insights",
+  "uid": "audit-ledger-product-analytics"
+}
