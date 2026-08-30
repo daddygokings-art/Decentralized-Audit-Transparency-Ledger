@@ -15,6 +15,7 @@ pub mod tax;
 pub mod vat_engine;
 pub mod tax_engines;
 pub mod tax_audit_trail;
+pub mod test_data_factories;
 
 // ── Automated Regulatory Reporting ──────────────────────────────────────────
 pub mod regulatory_reporting;
