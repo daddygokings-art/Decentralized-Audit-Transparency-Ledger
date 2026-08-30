@@ -1,0 +1,11 @@
+{
+  "name": "@audit-ledger/azure-event-processor",
+  "version": "1.0.0",
+  "main": "index.js",
+  "dependencies": {
+    "@azure/functions": "^4.0.0"
+  },
+  "devDependencies": {
+    "typescript": "^5.3.3"
+  }
+}
