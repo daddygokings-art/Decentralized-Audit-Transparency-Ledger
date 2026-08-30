@@ -93,6 +93,32 @@ chaos_permission_change_allowlist_mode
 - No events are lost or duplicated
 - Metrics catch up after service restart
 
+## Kubernetes Litmus Chaos
+
+For Kubernetes environments, the repository includes a LitmusChaos setup under `infra/k8s/litmus` that exercises pod failure, network partition, CPU saturation, memory saturation, and automated recovery validation for the AuditLedger workloads in the `audit-ledger` namespace.
+
+```bash
+# Install Litmus in the cluster, then apply the repo config
+kubectl apply -f https://raw.githubusercontent.com/litmuschaos/litmus/master/litmus-operator.yaml
+kubectl apply -k infra/k8s/litmus
+
+# Trigger the chaos workflow
+kubectl get chaosengine -n litmus
+kubectl describe chaosengine audit-ledger-chaos-engine -n litmus
+```
+
+### Included experiments
+- `pod-delete` for pod failure injection
+- `pod-network-chaos` for network partition simulation
+- `pod-cpu-hog` for resource exhaustion under CPU pressure
+- `pod-memory-hog` for memory exhaustion conditions
+- `audit-ledger-recovery-validation` to confirm the application recovers within the expected window
+
+### Recovery gates
+- The engine monitors `app.kubernetes.io/part-of=audit-ledger`
+- Recovery validation fails if the app does not become healthy within 60 seconds
+- Each experiment is recorded with a `ChaosResult` for automated verification and auditability
+
 ## Running Chaos Tests
 
 ### Prerequisites
@@ -184,3 +210,4 @@ Each chaos test should validate that:
 - [Principles of Chaos Engineering](https://principlesofchaos.org/)
 - [Gremlin Chaos Engineering](https://www.gremlin.com/chaos-engineering/)
 - [Netflix Chaos Engineering](https://netflixtechblog.com/tagged/chaos-engineering)
+- [LitmusChaos Documentation](https://docs.litmuschaos.io/)
