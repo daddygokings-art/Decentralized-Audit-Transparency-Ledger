@@ -1,0 +1,29 @@
+{
+  "baseline_id": "BASE-2026-Q3-01",
+  "generated_at": "2026-08-01T00:00:00Z",
+  "config": {
+    "min_multisig_quorum": 3,
+    "max_investigation_days": 90,
+    "min_stablecoin_reserve_ratio": 1.0,
+    "gdpr_erasure_sla_days": 30,
+    "max_gift_usd_limit": 250
+  },
+  "metrics": {
+    "total_historical_events": 54200,
+    "compliance_score_pct": 99.4,
+    "violation_counts": {
+      "CRITICAL": 0,
+      "HIGH": 0,
+      "MEDIUM": 2,
+      "LOW": 5
+    }
+  },
+  "active_policies": [
+    "compliance.events.anti_corruption",
+    "compliance.events.export_controls",
+    "compliance.events.trade_compliance",
+    "compliance.events.data_retention",
+    "compliance.events.financial_regulation",
+    "compliance.events.security_integrity"
+  ]
+}
