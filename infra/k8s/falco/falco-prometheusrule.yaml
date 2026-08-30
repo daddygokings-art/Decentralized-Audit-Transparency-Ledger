@@ -1,0 +1,131 @@
+# Runtime security alerts for the AuditLedger stack.
+#
+# Requires a Prometheus Operator (kube-prometheus-stack or equivalent)
+# watching PrometheusRule CRDs. Falco exposes native Prometheus metrics via
+# its /metrics webserver endpoint (see falco-config.yaml); rule-match totals
+# carry a `rule` label matching the rule name in
+# monitoring/falco/rules.d/audit-ledger-workloads.yaml.
+apiVersion: monitoring.coreos.com/v1
+kind: PrometheusRule
+metadata:
+  name: audit-ledger-falco-runtime-security
+  namespace: audit-ledger-security
+  labels:
+    release: kube-prometheus-stack
+spec:
+  groups:
+    - name: runtime-security
+      interval: 30s
+      rules:
+        - alert: AuditLedgerFalcoPrivilegeEscalation
+          expr: increase(falcosecurity_falco_rules_matches_total{rule="AuditLedger - Privilege Escalation Attempt"}[5m]) > 0
+          for: 0m
+          labels:
+            severity: critical
+            component: runtime-security
+          annotations:
+            summary: "Falco detected a privilege escalation attempt"
+            description: "A contract workload container attempted to escalate privileges (su/sudo/setpriv/unshare/nsenter). Investigate immediately and page the on-call."
+
+        - alert: AuditLedgerFalcoCryptoMining
+          expr: increase(falcosecurity_falco_rules_matches_total{rule="AuditLedger - Crypto Mining Detection"}[5m]) > 0
+          for: 0m
+          labels:
+            severity: critical
+            component: runtime-security
+          annotations:
+            summary: "Falco detected a crypto miner"
+            description: "A known crypto-mining binary was executed inside a contract container. Isolate the node and review the pod immediately."
+
+        - alert: AuditLedgerFalcoContainerEscape
+          expr: increase(falcosecurity_falco_rules_matches_total{rule="AuditLedger - Container Escape via Mount"}[5m]) > 0
+          for: 0m
+          labels:
+            severity: critical
+            component: runtime-security
+          annotations:
+            summary: "Falco detected a container escape attempt"
+            description: "A host filesystem mount attempt was detected inside a contract container. Page on-call — this indicates a compromised node."
+
+        - alert: AuditLedgerFalcoReverseShell
+          expr: increase(falcosecurity_falco_rules_matches_total{rule="AuditLedger - Reverse Shell Pattern"}[5m]) > 0
+          for: 0m
+          labels:
+            severity: critical
+            component: runtime-security
+          annotations:
+            summary: "Falco detected a reverse-shell / exfiltration pattern"
+            description: "A reverse-shell pattern was observed in a contract container. Suspect compromise — disconnect and investigate."
+
+        - alert: AuditLedgerFalcoForeignBinaryExec
+          expr: increase(falcosecurity_falco_rules_matches_total{rule="AuditLedger - Executing Binary Outside Container Image"}[5m]) > 0
+          for: 0m
+          labels:
+            severity: critical
+            component: runtime-security
+          annotations:
+            summary: "Falco detected execution of a foreign binary"
+            description: "A binary outside the original container image was executed (e.g. from /tmp). Possible image tampering."
+
+        - alert: AuditLedgerFalcoSensitiveMountWrite
+          expr: increase(falcosecurity_falco_rules_matches_total{rule="AuditLedger - Write to Sensitive Mount Path"}[5m]) > 0
+          for: 0m
+          labels:
+            severity: critical
+            component: runtime-security
+          annotations:
+            summary: "Falco detected a write to a sensitive mount"
+            description: "A write to a keystore/signing path occurred inside a contract container — possible signing-key tampering."
+
+        - alert: AuditLedgerFalcoSensitiveFileAccess
+          expr: increase(falcosecurity_falco_rules_matches_total{rule="AuditLedger - Sensitive File Access"}[5m]) > 0
+          for: 2m
+          labels:
+            severity: warning
+            component: runtime-security
+          annotations:
+            summary: "Falco detected sensitive-file access"
+            description: "Access to credentials/keys (e.g. /etc/shadow, id_rsa, .env) observed inside a contract container."
+
+        - alert: AuditLedgerFalcoSensitiveEnvAccess
+          expr: increase(falcosecurity_falco_rules_matches_total{rule="AuditLedger - Sensitive Environment Variable Access"}[5m]) > 0
+          for: 2m
+          labels:
+            severity: warning
+            component: runtime-security
+          annotations:
+            summary: "Falco detected secrets in a process environment"
+            description: "A process was spawned with secret values (PRIVATE_KEY/SECRET/TOKEN/API_KEY) on its command line."
+
+        - alert: AuditLedgerFalcoUnusualNetwork
+          expr: increase(falcosecurity_falco_rules_matches_total{rule="AuditLedger - Unusual Network Connection"}[5m]) > 0
+          for: 3m
+          labels:
+            severity: warning
+            component: runtime-security
+          annotations:
+            summary: "Falco detected an unusual outbound network connection"
+            description: "A contract container connected to an unexpected (non-private) destination — possible exfiltration or C2."
+
+        - alert: AuditLedgerFalcoShellSpawn
+          expr: increase(falcosecurity_falco_rules_matches_total{rule="AuditLedger - Unexpected Shell Spawned in Container"}[5m]) > 0
+          for: 3m
+          labels:
+            severity: warning
+            component: runtime-security
+          annotations:
+            summary: "Falco detected an unexpected shell in a container"
+            description: "An interactive shell was spawned inside a contract container."
+
+        # Availability guard: if Falco stops exposing metrics entirely we
+        # cannot trust the runtime-security baseline; page so the control
+        # plane is checked.
+        - alert: AuditLedgerFalcoSilence
+          expr: absent(falcosecurity_falco_version_info)
+          for: 30m
+          labels:
+            severity: warning
+            component: runtime-security
+          annotations:
+            summary: "Falco is silent or absent in the cluster"
+            description: "No Falco Prometheus metrics observed for 30 minutes. Either the daemonset is down or metrics are disabled — verify falco pods are Running and config is intact."

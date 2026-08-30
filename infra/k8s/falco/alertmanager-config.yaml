@@ -1,0 +1,52 @@
+# Alertmanager configuration for the AuditLedger runtime-security stack.
+#
+# Security-critical Falco alerts (privilege escalation, crypto mining,
+# container escape, reverse shell, foreign binary exec, signing-key tampering)
+# are routed to a dedicated incident-response receiver so they page the
+# on-call rotation immediately. Lower-severity signals go to the investigate
+# receiver for review.
+apiVersion: v1
+kind: ConfigMap
+metadata:
+  name: alertmanager-config
+  namespace: audit-ledger-security
+  labels:
+    app.kubernetes.io/name: alertmanager
+    app.kubernetes.io/part-of: audit-ledger
+data:
+  alertmanager.yml: |-
+    global:
+      resolve_timeout: 5m
+
+    route:
+      group_by: ['alertname']
+      group_wait: 10s
+      group_interval: 1m
+      repeat_interval: 4h
+      receiver: 'incident-response-investigate'
+      routes:
+        # Critical runtime-security events page the on-call incident channel.
+        - matchers:
+            - alertname =~ "AuditLedgerFalco(PrivilegeEscalation|CryptoMining|ContainerEscape|ReverseShell|ForeignBinaryExec|SensitiveMountWrite)"
+          receiver: 'incident-response-critical'
+          group_wait: 0s
+          group_interval: 10s
+          repeat_interval: 30m
+          continue: true
+
+    receivers:
+      - name: 'incident-response-critical'
+        webhook_configs:
+          - url: 'http://incident-response.audit-ledger-security.svc.cluster.local:8080/incidents'
+            send_resolved: true
+        # Keep PagerDuty / Slack / generic webhook endpoints as commented
+        # placeholders to be filled with the operator's incident tooling.
+        # pagerduty_configs:
+        #   - service_key: "${PAGERDUTY_SERVICE_KEY}"
+        # slack_configs:
+        #   - api_url: "${SLACK_INCIDENT_WEBHOOK}"
+
+      - name: 'incident-response-investigate'
+        webhook_configs:
+          - url: 'http://incident-response.audit-ledger-security.svc.cluster.local:8080/investigate'
+            send_resolved: true

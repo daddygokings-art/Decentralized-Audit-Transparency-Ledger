@@ -1,0 +1,195 @@
+# Falco custom rules for the AuditLedger contract workloads.
+#
+# These rules target the contract-specific containers deployed as part of the
+# Decentralized Audit Transparency Ledger stack (relayer, metrics-exporter,
+# REST API, UI and notifier). They detect runtime threats that static analysis
+# and SAST tooling cannot catch, such as post-exploitation behavior, container
+# escape, crypto mining and exfiltration.
+#
+# Load location (Falco K8s daemonset): /etc/falco/rules.d/audit-ledger-workloads.yaml
+
+# ---------------------------------------------------------------------------
+# Macros and lists shared by the AuditLedger rules
+# ---------------------------------------------------------------------------
+
+- macro: audit_ledger_container
+  condition: >
+    container and
+    (container.image.repository in ("audit-ledger-relayer", "audit-ledger-metrics-exporter", "audit-ledger-rest", "audit-ledger-ui", "audit-ledger-notifier") or
+     container.name in ("relayer", "metrics-exporter", "rest", "ui", "notifier"))
+
+- list: audit_ledger_images
+  items: [audit-ledger-relayer, audit-ledger-metrics-exporter, audit-ledger-rest, audit-ledger-ui, audit-ledger-notifier]
+
+- list: audit_ledger_shells
+  items: [bash, sh, zsh, dash, ksh, csh, tcsh, fish, python, python3, perl, ruby, lua, node, php, nc, ncat, netcat, socat, curl, wget, busybox]
+
+- list: audit_ledger_miners
+  items: [xmrig, minerd, cpuminer, cgminer, bfgminer, nbminer, t-rex, phoenixminer, lolminer, teamredminer, gminer, dstm, ewbf, ccminer, nheqminer, eqm, dtsm, averminer, nanominer, castxmr, srbminer, kawpowminer, turbominer]
+
+- list: audit_ledger_privilege_tools
+  items: [su, sudo, doas, pkexec, setpriv, unshare, nsenter, capsh, setcap]
+
+- list: audit_ledger_pkg_managers
+  items: [apt-get, apt, yum, dnf, apk, pip, pip3, npm, npx, yarn, pnpm, cargo, go, gem, bundler, composer]
+
+# ---------------------------------------------------------------------------
+# Contract-specific threat rules
+# ---------------------------------------------------------------------------
+
+- rule: AuditLedger - Unexpected Shell Spawned in Container
+  desc: Detect shell spawns in contract workload containers, a common post-exploitation step.
+  condition: >
+    audit_ledger_container and
+    evt.type in (execve, execveat) and
+    proc.name in (audit_ledger_shells)
+  output: >
+    Time=%evt.time Container=%container.name Image=%container.image.repository:%container.image.tag
+    Shell=%proc.name Cmd=%proc.cmdline User=%user.name UID=%proc.uid GID=%proc.gid
+    (audit_ledger_shell_spawn)
+  priority: WARNING
+  tags: [container, audit_ledger, shell_spawn]
+
+- rule: AuditLedger - Sensitive File Access
+  desc: Detect read/write access to sensitive files inside contract containers.
+  condition: >
+    audit_ledger_container and
+    evt.type in (open, openat, creat) and
+    fd.name regex ("/etc/shadow|/etc/passwd|/etc/ssh/|/root/|/home/.ssh|id_rsa|id_ed25519|\.env|secret|credential|\.pem|\.p12|seed\.json|key")
+  output: >
+    Time=%evt.time Container=%container.name Image=%container.image.repository:%container.image.tag
+    File=%fd.name User=%user.name (audit_ledger_sensitive_file_access)
+  priority: WARNING
+  tags: [container, audit_ledger, file_access]
+
+- rule: AuditLedger - Unusual Network Connection
+  desc: Detect outbound network connections to unexpected (non-private) destinations.
+  condition: >
+    audit_ledger_container and
+    evt.type in (connect) and
+    fd.typechar = '4' and
+    not fd.rip in (10.0.0.0/8, 172.16.0.0/12, 192.168.0.0/16) and
+    not fd.sip in (127.0.0.1, ::1)
+  output: >
+    Time=%evt.time Container=%container.name Image=%container.image.repository:%container.image.tag
+    DestIP=%fd.rip DestPort=%fd.rport Protocol=%fd.l4proto User=%user.name
+    (audit_ledger_unusual_network_connection)
+  priority: WARNING
+  tags: [container, audit_ledger, network]
+
+- rule: AuditLedger - Privilege Escalation Attempt
+  desc: Detect privilege escalation attempts in contract containers.
+  condition: >
+    audit_ledger_container and
+    (evt.type in (execve, execveat) and
+     (proc.name in ("su", "sudo", "doas", "pkexec") or
+      (proc.name = "setpriv" and proc.cmdline contains "--clear-groups") or
+      (proc.name = "unshare" and proc.cmdline contains ("--user", "--map-root-user")) or
+      (proc.name = "nsenter" and proc.cmdline contains ("-t", "1"))))
+  output: >
+    Time=%evt.time Container=%container.name Image=%container.image.repository:%container.image.tag
+    Proc=%proc.name Cmd=%proc.cmdline User=%user.name UID=%proc.uid (audit_ledger_privilege_escalation)
+  priority: CRITICAL
+  tags: [container, audit_ledger, privilege_escalation]
+
+- rule: AuditLedger - Crypto Mining Detection
+  desc: Detect crypto miner processes in contract containers.
+  condition: >
+    audit_ledger_container and
+    (evt.type in (execve, execveat) and
+     proc.name in (audit_ledger_miners))
+  output: >
+    Time=%evt.time Container=%container.name Image=%container.image.repository:%container.image.tag
+    Miner=%proc.name Cmd=%proc.cmdline (audit_ledger_crypto_miner)
+  priority: CRITICAL
+  tags: [container, audit_ledger, crypto_mining]
+
+- rule: AuditLedger - Unusual Package Manager Activity
+  desc: Detect package manager usage inside running contract containers (a tampering indicator).
+  condition: >
+    audit_ledger_container and
+    (evt.type in (execve, execveat) and
+     proc.name in (audit_ledger_pkg_managers))
+  output: >
+    Time=%evt.time Container=%container.name Image=%container.image.repository:%container.image.tag
+    PackageManager=%proc.name Cmd=%proc.cmdline (audit_ledger_package_manager)
+  priority: NOTICE
+  tags: [container, audit_ledger, package_manager]
+
+- rule: AuditLedger - Container Escape via Mount
+  desc: Detect attempts to mount host filesystems from within containers.
+  condition: >
+    audit_ledger_container and
+    (evt.type in (mount, mount_move) and
+     proc.name in ("mount", "nsenter", "umount"))
+  output: >
+    Time=%evt.time Container=%container.name Image=%container.image.repository:%container.image.tag
+    MountPoint=%proc.cmdline User=%user.name (audit_ledger_container_escape)
+  priority: CRITICAL
+  tags: [container, audit_ledger, container_escape]
+
+- rule: AuditLedger - Sensitive Environment Variable Access
+  desc: Detect processes started with sensitive secrets on the command line.
+  condition: >
+    audit_ledger_container and
+    (evt.type in (execve, execveat) and
+     (proc.cmdline contains "PRIVATE_KEY" or
+      proc.cmdline contains "SECRET" or
+      proc.cmdline contains "PASSWORD" or
+      proc.cmdline contains "TOKEN" or
+      proc.cmdline contains "API_KEY"))
+  output: >
+    Time=%evt.time Container=%container.name Image=%container.image.repository:%container.image.tag
+    Proc=%proc.name Cmd=%proc.cmdline (audit_ledger_sensitive_env_access)
+  priority: WARNING
+  tags: [container, audit_ledger, sensitive_data]
+
+- rule: AuditLedger - Reverse Shell Pattern
+  desc: Detect reverse-shell command patterns in contract containers (data exfiltration).
+  condition: >
+    audit_ledger_container and
+    evt.type in (execve, execveat) and
+    proc.cmdline contains ("/dev/tcp/", "-i /dev/tcp/", "bash -i >&", "sh -i >&", "nc -e", "ncat -e", "socat exec:")
+  output: >
+    Time=%evt.time Container=%container.name Image=%container.image.repository:%container.image.tag
+    Proc=%proc.name Cmd=%proc.cmdline (audit_ledger_reverse_shell)
+  priority: CRITICAL
+  tags: [container, audit_ledger, reverse_shell, exfiltration]
+
+- rule: AuditLedger - Write to Sensitive Mount Path
+  desc: Detect write/open-for-write access to the relayer signing/keystore mount, which may indicate tampering.
+  condition: >
+    audit_ledger_container and
+    (evt.type in (open, openat, openat2, creat)) and
+    fd.typechar = 'f' and
+    fd.name regex ("/keys/|/keystore/|/wallet/|/secrets/|/vault/|/signing/") and
+    (evt.arg.flags contains "O_WRONLY" or evt.arg.flags contains "O_RDWR" or evt.arg.flags contains "O_CREAT")
+  output: >
+    Time=%evt.time Container=%container.name Image=%container.image.repository:%container.image.tag
+    File=%fd.name User=%user.name (audit_ledger_sensitive_mount_write)
+  priority: CRITICAL
+  tags: [container, audit_ledger, tampering]
+
+- rule: AuditLedger - Executing Binary Outside Container Image
+  desc: Detect execution of binaries that are not part of the original container image (layer tampering).
+  condition: >
+    audit_ledger_container and
+    evt.type in (execve, execveat) and
+    proc.aname in (audit_ledger_shells) and
+    proc.exepath regex ("/tmp/|/var/tmp/|/dev/shm/|/run/|/proc/|/mnt/|/home/")
+  output: >
+    Time=%evt.time Container=%container.name Image=%container.image.repository:%container.image.tag
+    Executable=%proc.exepath Cmd=%proc.cmdline (audit_ledger_foreign_binary_exec)
+  priority: CRITICAL
+  tags: [container, audit_ledger, tampering]
+
+# ---------------------------------------------------------------------------
+# Cleanup / informational filters
+# ---------------------------------------------------------------------------
+
+- macro: audit_ledger_trusted_network
+  condition: >
+    (fd.sip in (127.0.0.1, ::1) or fd.ip in (10.0.0.0/8, 172.16.0.0/12, 192.168.0.0/16))
+
+- list: audit_ledger_legitimate_procs
+  items: [prometheus, exporter, node, java, rustc, cargo]

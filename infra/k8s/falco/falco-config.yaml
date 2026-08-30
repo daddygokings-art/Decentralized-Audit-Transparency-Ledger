@@ -1,0 +1,54 @@
+apiVersion: v1
+kind: ConfigMap
+metadata:
+  name: falco-config
+  namespace: audit-ledger-security
+  labels:
+    app.kubernetes.io/name: falco
+    app.kubernetes.io/part-of: audit-ledger
+data:
+  # Falco main configuration.
+  #   * loads the custom contract rules from /etc/falco/rules.d
+  #   * enables Falco's native Prometheus metrics endpoint (no falco-exporter
+  #     needed — it is deprecated since Falco 0.38) on the webserver port
+  #     so Prometheus can scrape /metrics directly.
+  falco.yaml: |-
+    # rules load order
+    rules_files:
+      - /etc/falco/rules.d/*.yaml
+
+    priority: debug
+    buffered_outputs: false
+
+    time_format_iso_8601: true
+
+    # ---- Output channels ----
+    # Send every event to stdout (collected by the CLI / log aggregator) and
+    # to a fifo used by the incident-response pipeline.
+    stdout_output:
+      enabled: true
+
+    program_output:
+      enabled: false
+
+    # ---- Native Prometheus metrics (Falco >= 0.38) ----
+    # Exposes rule-match counters and internal health on the webserver /metrics
+    # endpoint. Prometheus scalers the Service on port 8765.
+    metrics:
+      enabled: true
+      interval: 30s
+      rules_counters_enabled: true
+      resource_utilization_enabled: true
+      kernel_event_counters_enabled: true
+      state_counters_enabled: true
+
+    webserver:
+      enabled: true
+      listen_port: 8765
+      listen_address: 0.0.0.0
+      k8s_healthz_endpoint: /healthz
+      prometheus_metrics_enabled: true
+      ssl_enabled: false
+
+    metadata:
+      load: true

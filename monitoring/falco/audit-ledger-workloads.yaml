@@ -2,13 +2,13 @@
 
 ## Overview
 
-This document describes the runtime security monitoring setup for the AuditLedger stack using Falco and Tetragon. Runtime security detects and alerts on anomalous behavior that static analysis and SAST tools cannot catch.
+This document describes the runtime security monitoring setup for the AuditLedger stack using Falco for Kubernetes. Runtime security detects and alerts on anomalous behavior that static analysis and SAST tools cannot catch, such as post-exploitation shells, privilege escalation, crypto mining, container escape and signing-key tampering.
 
 ## Architecture
 
 ```
 ┌───────────────────────────────────────────────────────────────┐
-│                    Host / Container Runtime                   │
+│                      Kubernetes Cluster                       │
 │                                                               │
 │  ┌─────────────┐  ┌─────────────┐  ┌─────────────┐          │
 │  │  Relayer    │  │  Metrics    │  │   REST      │          │
@@ -17,9 +17,9 @@ This document describes the runtime security monitoring setup for the AuditLedge
 │         │                │                │                   │
 │         ▼                ▼                ▼                   │
 │  ┌───────────────────────────────────────────────────────┐   │
-│  │                    Falco / Tetragon                   │   │
+│  │            Falco DaemonSet (per node)                 │   │
 │  │  ┌─────────────────────────────────────────────────┐ │   │
-│  │  │  Kernel Module / eBPF (Tetragon)                 │ │   │
+│  │  │  Kernel Module / eBPF                            │ │   │
 │  │  │  - Process execution monitoring                  │ │   │
 │  │  │  - File access monitoring                        │ │   │
 │  │  │  - Network connection monitoring                 │ │   │
@@ -27,294 +27,122 @@ This document describes the runtime security monitoring setup for the AuditLedge
 │  │  │  - Crypto mining detection                       │ │   │
 │  │  └─────────────────────────────────────────────────┘ │   │
 │  │  ┌─────────────────────────────────────────────────┐ │   │
-│  │  │  Falco Rules Engine                             │ │   │
-│  │  │  - Custom rules for contract workloads           │ │   │
-│  │  │  - Alert routing                                 │ │   │
+│  │  │  Custom Rules Engine                            │ │   │
+│  │  │  - audit-ledger-workloads.yaml (contract rules) │ │   │
+│  │  └─────────────────────────────────────────────────┘ │   │
+│  │  ┌─────────────────────────────────────────────────┐ │   │
+│  │  │  falco-native metrics -> /metrics (8765)       │ │   │
 │  │  └─────────────────────────────────────────────────┘ │   │
 │  └───────────────────────────────────────────────────────┘   │
 │                              │                                │
 │                              ▼                                │
-│                    ┌─────────────────┐                       │
-│                    │  Prometheus /   │                       │
-│                    │  Alertmanager   │                       │
-│                    └─────────────────┘                       │
+│                    ┌──────────────────┐                     │
+│                    │  Prometheus /    │                     │
+│                    │  Alertmanager    │                     │
+│                    └────────┬─────────┘                     │
+│                             ▼                                │
+│                    ┌──────────────────┐                     │
+│                    │ incident-response│  -> notifier /       │
+│                    │  webhook (8080)  │  -> Slack/PagerDuty  │
+│                    └──────────────────┘                     │
 └───────────────────────────────────────────────────────────────┘
 ```
 
-## Installation
+## Deployment
 
-### Falco
-
-```bash
-# Install Falco using the official installer
-curl -fsSL https://falco.org/repo/falcosecurity-packages.asc | \
-  gpg --dearmor -o /usr/share/keyrings/falco-archive-keyring.gpg
-echo "deb [signed-by=/usr/share/keyrings/falco-archive-keyring.gpg] https://download.falco.org/packages/deb stable main" \
-  | tee /etc/apt/sources.list.d/falcosecurity.list
-apt-get update && apt-get install -y falco
-```
-
-### Tetragon (eBPF-based alternative)
+All manifests live in `infra/k8s/falco/` and are applied with kustomize:
 
 ```bash
-# Install Tetragon
-curl -L https://github.com/cilium/tetragon/releases/latest/download/tetragon.yaml | \
-  kubectl apply -f -
+kubectl apply -k infra/k8s/falco/
 ```
+
+This installs into the `audit-ledger-security` namespace:
+
+| Manifest | Purpose |
+| --- | --- |
+| `namespace.yaml` | Dedicated `audit-ledger-security` namespace |
+| `rbac.yaml` | ServiceAccount + ClusterRole(Binding) for Falco |
+| `falco-daemonset.yaml` | Falco daemonset exposing native /metrics on port 8765 |
+| `falco-service.yaml` | Prometheus scrape target on port 8765 |
+| `falco-rules` (ConfigMap) | Custom contract rules generated from `monitoring/falco/rules.d/` |
+| `falco-config` (ConfigMap) | Falco engine configuration |
+| `falco-prometheusrule.yaml` | PrometheusRule CRDs for runtime-security alerts |
+| `alertmanager-config.yaml` | Routes security alerts to the incident-response receiver |
+| `incident-response.yaml` | Incident receiver deployment + service |
 
 ## Custom Falco Rules
 
-### Contract Workload Rules
+Canonical contract-specific rules are maintained in:
 
-Create `/etc/falco/rules.d/audit-ledger-workloads.yaml`:
-
-```yaml
-- rule: AuditLedger - Unexpected Shell Spawned in Container
-  desc: Detect shell spawns in contract workload containers
-  condition: >
-    container and
-    (container.image.repository in ("audit-ledger-relayer", "audit-ledger-metrics-exporter", "audit-ledger-rest") or
-     container.name in ("relayer", "metrics-exporter", "rest")) and
-    evt.type in (execve, execveat) and
-    proc.name in ("bash", "sh", "zsh", "dash", "ksh", "csh", "tcsh", "fish", "python", "python3", "perl", "ruby", "lua", "node", "php", "nc", "ncat", "netcat", "socat", "curl", "wget", "busybox")
-  output: >
-    Time=%evt.time
-    Container=%container.name
-    Image=%container.image.repository:%container.image.tag
-    Shell=%proc.name
-    Cmd=%proc.cmdline
-    User=%user.name
-    UID=%proc.uid
-    GID=%proc.gid
-    (audit_ledger_shell_spawn)
-  priority: WARNING
-  tags: [container, audit_ledger, shell_spawn]
-
-- rule: AuditLedger - Sensitive File Access
-  desc: Detect access to sensitive files in contract containers
-  condition: >
-    container and
-    (container.image.repository in ("audit-ledger-relayer", "audit-ledger-metrics-exporter", "audit-ledger-rest") or
-     container.name in ("relayer", "metrics-exporter", "rest")) and
-    evt.type in (open, openat, creat) and
-    fd.name regex ("/etc/shadow|/etc/passwd|/etc/ssh/|/root/|/home/.ssh|id_rsa|id_ed25519|.env|secret|credential|key|pem|p12")
-  output: >
-    Time=%evt.time
-    Container=%container.name
-    Image=%container.image.repository:%container.image.tag
-    File=%fd.name
-    User=%user.name
-    (audit_ledger_sensitive_file_access)
-  priority: WARNING
-  tags: [container, audit_ledger, file_access]
-
-- rule: AuditLedger - Unusual Network Connection
-  desc: Detect outbound network connections to unexpected destinations
-  condition: >
-    container and
-    (container.image.repository in ("audit-ledger-relayer", "audit-ledger-metrics-exporter", "audit-ledger-rest") or
-     container.name in ("relayer", "metrics-exporter", "rest")) and
-    evt.type in (connect) and
-    fd.typechar = '4' and
-    not fd.rip in (10.0.0.0/8, 172.16.0.0/12, 192.168.0.0/16) and
-    not fd.sip in (127.0.0.1, ::1)
-  output: >
-    Time=%evt.time
-    Container=%container.name
-    Image=%container.image.repository:%container.image.tag
-    DestIP=%fd.rip
-    DestPort=%fd.rport
-    Protocol=%fd.l4proto
-    User=%user.name
-    (audit_ledger_unusual_network_connection)
-  priority: WARNING
-  tags: [container, audit_ledger, network]
-
-- rule: AuditLedger - Privilege Escalation Attempt
-  desc: Detect privilege escalation attempts in contract containers
-  condition: >
-    container and
-    (container.image.repository in ("audit-ledger-relayer", "audit-ledger-metrics-exporter", "audit-ledger-rest") or
-     container.name in ("relayer", "metrics-exporter", "rest")) and
-    (evt.type in (execve, execveat) and
-     (proc.name in ("su", "sudo", "doas", "pkexec") or
-      (proc.name = "setpriv" and proc.cmdline contains "--clear-groups") or
-      (proc.name = "unshare" and proc.cmdline contains ("--user", "--map-root-user")) or
-      (proc.name = "nsenter" and proc.cmdline contains ("-t", "1"))))
-  output: >
-    Time=%evt.time
-    Container=%container.name
-    Image=%container.image.repository:%container.image.tag
-    Proc=%proc.name
-    Cmd=%proc.cmdline
-    User=%user.name
-    UID=%proc.uid
-    (audit_ledger_privilege_escalation)
-  priority: CRITICAL
-  tags: [container, audit_ledger, privilege_escalation]
-
-- rule: AuditLedger - Crypto Mining Detection
-  desc: Detect crypto miner processes in contract containers
-  condition: >
-    container and
-    (container.image.repository in ("audit-ledger-relayer", "audit-ledger-metrics-exporter", "audit-ledger-rest") or
-     container.name in ("relayer", "metrics-exporter", "rest")) and
-    (evt.type in (execve, execveat) and
-     proc.name regex ("xmrig|minerd|cpuminer|cgminer|bfgminer|nbminer|t-rex|phoenixminer|lolminer|teamredminer|nbminer|gminer|dstm|ewbf|ccminer|nheqminer|eqm|dtsm|averminer|nanominer|castxmr|srbminer|kawpowminer|turbominer"))
-  output: >
-    Time=%evt.time
-    Container=%container.name
-    Image=%container.image.repository:%container.image.tag
-    Miner=%proc.name
-    Cmd=%proc.cmdline
-    (audit_ledger_crypto_miner)
-  priority: CRITICAL
-  tags: [container, audit_ledger, crypto_mining]
-
-- rule: AuditLedger - Unusual Package Manager Activity
-  desc: Detect package manager usage in running containers
-  condition: >
-    container and
-    (container.image.repository in ("audit-ledger-relayer", "audit-ledger-metrics-exporter", "audit-ledger-rest") or
-     container.name in ("relayer", "metrics-exporter", "rest")) and
-    (evt.type in (execve, execveat) and
-     proc.name in ("apt-get", "apt", "yum", "dnf", "apk", "pip", "pip3", "npm", "npx", "yarn", "pnpm", "cargo", "go", "gem", "bundler", "composer"))
-  output: >
-    Time=%evt.time
-    Container=%container.name
-    Image=%container.image.repository:%container.image.tag
-    PackageManager=%proc.name
-    Cmd=%proc.cmdline
-    (audit_ledger_package_manager)
-  priority: NOTICE
-  tags: [container, audit_ledger, package_manager]
-
-- rule: AuditLedger - Container Escape via Mount
-  desc: Detect attempts to mount host filesystems
-  condition: >
-    container and
-    (container.image.repository in ("audit-ledger-relayer", "audit-ledger-metrics-exporter", "audit-ledger-rest") or
-     container.name in ("relayer", "metrics-exporter", "rest")) and
-    (evt.type in (mount, mount_move) and
-     proc.name in ("mount", "nsenter", "umount"))
-  output: >
-    Time=%evt.time
-    Container=%container.name
-    Image=%container.image.repository:%container.image.tag
-    MountPoint=%proc.cmdline
-    User=%user.name
-    (audit_ledger_container_escape)
-  priority: CRITICAL
-  tags: [container, audit_ledger, container_escape]
-
-- rule: AuditLedger - Sensitive Environment Variable Access
-  desc: Detect access to sensitive environment variables
-  condition: >
-    container and
-    (container.image.repository in ("audit-ledger-relayer", "audit-ledger-metrics-exporter", "audit-ledger-rest") or
-     container.name in ("relayer", "metrics-exporter", "rest")) and
-    (evt.type in (execve, execveat) and
-     proc.env contains "PRIVATE_KEY" or
-     proc.env contains "SECRET" or
-     proc.env contains "PASSWORD" or
-     proc.env contains "TOKEN" or
-     proc.env contains "API_KEY")
-  output: >
-    Time=%evt.time
-    Container=%container.name
-    Image=%container.image.repository:%container.image.tag
-    Proc=%proc.name
-    Cmd=%proc.cmdline
-    (audit_ledger_sensitive_env_access)
-  priority: WARNING
-  tags: [container, audit_ledger, sensitive_data]
+```
+monitoring/falco/rules.d/audit-ledger-workloads.yaml
 ```
 
-## Docker Compose Integration
+These are bundled into the `falco-rules` ConfigMap via `configMapGenerator`
+(see `infra/k8s/falco/kustomization.yaml`), so the daemonset mounts
+`/etc/falco/rules.d/audit-ledger-workloads.yaml` and reloads on change.
 
-Add Falco to `docker-compose.yml`:
+Rules cover contract-specific threats:
 
-```yaml
-  falco:
-    image: falcosecurity/falco:0.37.0
-    volumes:
-      - /var/run/docker.sock:/host/var/run/docker.sock:ro
-      - ./monitoring/falco/rules.d:/etc/falco/rules.d:ro
-      - ./monitoring/falco/falco.yaml:/etc/falco/falco.yaml:ro
-    cap_add:
-      - SYS_ADMIN
-      - NET_ADMIN
-    security_opt:
-      - apparmor=unconfined
-    restart: unless-stopped
-    depends_on:
-      - relayer
-      - metrics-exporter
-```
+- `audit_ledger_shell_spawn` — unexpected shells in contract containers.
+- `audit_ledger_sensitive_file_access` — access to credentials/keys.
+- `audit_ledger_unusual_network_connection` — outbound egress to non-private IPs.
+- `audit_ledger_privilege_escalation` — su/sudo/setpriv/unshare/nsenter.
+- `audit_ledger_crypto_miner` — known miner binaries.
+- `audit_ledger_package_manager` — package managers run at runtime.
+- `audit_ledger_container_escape` — host filesystem mounts.
+- `audit_ledger_sensitive_env_access` — secrets passed on the command line.
+- `audit_ledger_reverse_shell` — exfiltration / reverse-shell patterns.
+- `audit_ledger_sensitive_mount_write` — writes to keystore/signing paths.
+- `audit_ledger_foreign_binary_exec` — binaries not part of the image.
 
-## Alert Integration
+## Alerting
 
-### Prometheus Metrics Export
+`falco-prometheusrule.yaml` defines `PrometheusRule` CRDs (require a Prometheus
+Operator) that fire on Falco's native rule-match metrics (`falcosecurity_falco_rules_matches_total`):
 
-Falco can export metrics to Prometheus using the Falco Prometheus exporter:
+- **Critical** — privilege escalation, crypto mining, container escape, reverse
+  shell, foreign binary exec, signing-key tampering.
+- **Warning** — sensitive file/env access, unusual network egress, shell spawn.
+- **Availability guard** — `AuditLedgerFalcoSilence` fires if Falco goes quiet.
 
-```bash
-# Install falco-exporter
-docker run -d --name falco-exporter \
-  -p 1501:1501 \
-  -v /var/run/docker.sock:/var/run/docker.sock \
-  falcosecurity/falco-exporter:0.7.0
-```
+`alertmanager-config.yaml` routes critical events to the `incident-response`
+webhook so the on-call rotation is paged immediately.
 
-### Alertmanager Rules
+## Incident Response
 
-```yaml
-groups:
-  - name: runtime_security
-    rules:
-      - alert: FalcoCriticalAlert
-        expr: falco_events_total{rule="audit_ledger_privilege_escalation"} > 0
-        for: 0m
-        labels:
-          severity: critical
-        annotations:
-          summary: "Falco detected privilege escalation"
-          description: "{{ $labels.container }} attempted privilege escalation"
-
-      - alert: FalcoCryptoMining
-        expr: falco_events_total{rule="audit_ledger_crypto_miner"} > 0
-        for: 0m
-        labels:
-          severity: critical
-        annotations:
-          summary: "Falco detected crypto miner"
-          description: "{{ $labels.container }} ran crypto miner process"
-
-      - alert: FalcoContainerEscape
-        expr: falco_events_total{rule="audit_ledger_container_escape"} > 0
-        for: 0m
-        labels:
-          severity: critical
-        annotations:
-          summary: "Falco detected container escape attempt"
-          description: "{{ $labels.container }} attempted container escape via mount"
-```
+`incident-response.yaml` deploys an in-cluster receiver (see
+`services/incident-response/`). Alertmanager posts security-critical events to
+`/incidents`; the receiver logs each incident and forwards it to external
+incident tooling (Slack / PagerDuty / generic webhook) configured via the
+`INCIDENT_FORWARD_URL` environment variable.
 
 ## Verification
 
 ```bash
-# Verify Falco is running and rules are loaded
-falco -L
+# Validate the rules file with a local falco binary (dev machine only)
+falco -r monitoring/falco/rules.d/audit-ledger-workloads.yaml --list
 
-# Test rules manually
-falco -r monitoring/falco/rules.d/audit-ledger-workloads.yaml --dry-run
+# Render the kustomize output
+kubectl kustomize infra/k8s/falco/
 
-# Check Falco logs
-docker logs falco --tail 100
+# Apply to the cluster
+kubectl apply -k infra/k8s/falco/
+
+# Confirm daemonset is running on every node
+kubectl -n audit-ledger-security get daemonset falco
+
+# Check that custom rules were loaded (rules are listed at startup)
+kubectl -n audit-ledger-security logs daemonset/falco | grep -i "audit_ledger"
+
+# Scrape Falco native metrics
+kubectl -n audit-ledger-security port-forward svc/falco 8765:8765
+curl localhost:8765/metrics | grep falcosecurity_falco_rules_matches_total
 ```
 
 ## References
 
 - [Falco Documentation](https://falco.org/docs/)
-- [Tetragon Documentation](https://tetragon.io/docs/)
-- [Cilium Tetragon](https://github.com/cilium/tetragon)
+- [Falco Rules Reference](https://falco.org/docs/rules/)
+- [Falco Metrics](https://falco.org/docs/metrics/)
+- [Falco Web Server / Prometheus](https://falco.org/docs/reference/daemon/webserver/)
