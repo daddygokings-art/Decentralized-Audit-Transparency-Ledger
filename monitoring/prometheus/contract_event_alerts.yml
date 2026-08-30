@@ -1,0 +1,79 @@
+groups:
+  - name: contract_event_observability_alerts
+    rules:
+      - alert: ContractEventIngestionLagHigh
+        expr: audit_ingestion_lag_ledgers > 20
+        for: 3m
+        labels:
+          severity: critical
+          team: platform-core
+        annotations:
+          summary: "Contract event ingestion lag is exceeding 20 ledgers"
+          description: "Ingestion service is lagging {{ $value }} ledgers behind network tip for contract {{ $labels.contract_id }}."
+          runbook_url: "docs/runbooks/contract-event-observability-runbooks.md#contracteventingestionlaghigh"
+
+      - alert: ContractEventProcessingErrorRateSpike
+        expr: sum(rate(audit_errors_total[5m])) / sum(rate(audit_event_ingestion_total[5m])) > 0.05
+        for: 2m
+        labels:
+          severity: critical
+          team: platform-core
+        annotations:
+          summary: "Event processing error rate exceeds 5%"
+          description: "High error rate detected in event ingestion pipeline: {{ $value | humanizePercentage }}."
+          runbook_url: "docs/runbooks/contract-event-observability-runbooks.md#contracteventprocessingerrorratespike"
+
+      - alert: BridgeRelayerVerificationFailure
+        expr: rate(audit_event_verification_total{status="failed"}[5m]) > 0.02
+        for: 3m
+        labels:
+          severity: critical
+          team: bridge
+        annotations:
+          summary: "Cross-chain bridge proof verification failure detected"
+          description: "Verification failure rate on target chain {{ $labels.chain }} exceeds threshold."
+          runbook_url: "docs/runbooks/contract-event-observability-runbooks.md#bridgerelayerverificationfailure"
+
+      - alert: DatabaseMigrationLockTimeout
+        expr: rate(audit_errors_total{error_type="migration_lock_timeout"}[5m]) > 0
+        for: 1m
+        labels:
+          severity: warning
+          team: database
+        annotations:
+          summary: "Database migration advisory lock timed out"
+          description: "A migration execution timed out while attempting to acquire distributed lock."
+          runbook_url: "docs/runbooks/contract-event-observability-runbooks.md#databasemigrationlocktimeout"
+
+      - alert: EventDeadLetterQueueGrowing
+        expr: audit_dead_letter_queue_size > 50
+        for: 5m
+        labels:
+          severity: warning
+          team: platform-core
+        annotations:
+          summary: "Dead Letter Queue has more than 50 unprocessable events"
+          description: "DLQ backlog for service {{ $labels.service }} has reached {{ $value }} items."
+          runbook_url: "docs/runbooks/contract-event-observability-runbooks.md#eventdeadletterqueuegrowing"
+
+      - alert: LowSubmitterDiversityAnomaly
+        expr: audit_active_submitters_gauge{window="24h"} < 3
+        for: 30m
+        labels:
+          severity: info
+          team: analytics
+        annotations:
+          summary: "Low submitter diversity detected"
+          description: "Fewer than 3 unique submitters active in the last 24 hours."
+          runbook_url: "docs/runbooks/contract-event-observability-runbooks.md#lowsubmitterdiversityanomaly"
+
+      - alert: ContractRpcSimulationFailureRate
+        expr: rate(audit_ledger_rpc_errors_total[5m]) > 0.1
+        for: 3m
+        labels:
+          severity: critical
+          team: infrastructure
+        annotations:
+          summary: "High Soroban RPC simulation failure rate"
+          description: "Soroban RPC client is experiencing elevated failure rates."
+          runbook_url: "docs/runbooks/contract-event-observability-runbooks.md#contractrpcsimulationfailurerate"

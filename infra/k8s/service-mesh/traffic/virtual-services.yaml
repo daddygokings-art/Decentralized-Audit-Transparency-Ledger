@@ -1,0 +1,180 @@
+# infra/k8s/service-mesh/traffic/virtual-services.yaml
+#
+# Istio VirtualService resources for the audit-ledger stack.
+#
+# Each VirtualService configures:
+#   - Ingress routing from the Gateway to the right service
+#   - Retry policies (idempotent reads: 3 attempts; writes: 1)
+#   - Timeouts (API calls capped at 10 s; WebSocket upgraded separately)
+#   - Traffic splitting for canary/blue-green rollouts via subset weights
+#     (modify STABLE_WEIGHT / CANARY_WEIGHT to shift traffic)
+#
+# Issue #506 — zero-trust networking
+
+# ── REST API ─────────────────────────────────────────────────────────────────
+apiVersion: networking.istio.io/v1beta1
+kind: VirtualService
+metadata:
+  name: api-rest
+  namespace: audit-ledger
+  labels:
+    app.kubernetes.io/part-of: audit-ledger
+    app.kubernetes.io/component: api-rest
+spec:
+  hosts:
+    - "api.audit-ledger.example"
+  gateways:
+    - istio-ingress/audit-ledger-gateway
+    - mesh   # also applies to in-cluster callers
+  http:
+    # Health / readiness probes — no retries, short timeout
+    - match:
+        - uri:
+            prefix: /healthz
+      route:
+        - destination:
+            host: api-rest.audit-ledger.svc.cluster.local
+            port:
+              number: 3002
+            subset: stable
+      timeout: 5s
+
+    # All other routes — canary split + retry policy
+    - route:
+        - destination:
+            host: api-rest.audit-ledger.svc.cluster.local
+            port:
+              number: 3002
+            subset: stable
+          weight: 100
+        - destination:
+            host: api-rest.audit-ledger.svc.cluster.local
+            port:
+              number: 3002
+            subset: canary
+          weight: 0
+      timeout: 10s
+      retries:
+        attempts: 3
+        perTryTimeout: 3s
+        retryOn: "connect-failure,reset,retriable-4xx,gateway-error"
+---
+# ── GraphQL API ──────────────────────────────────────────────────────────────
+apiVersion: networking.istio.io/v1beta1
+kind: VirtualService
+metadata:
+  name: api-graphql
+  namespace: audit-ledger
+  labels:
+    app.kubernetes.io/part-of: audit-ledger
+    app.kubernetes.io/component: api-graphql
+spec:
+  hosts:
+    - api-graphql.audit-ledger.svc.cluster.local
+  gateways:
+    - mesh
+  http:
+    # GraphQL subscriptions (long-lived) — extended timeout, no retries
+    - match:
+        - headers:
+            upgrade:
+              exact: websocket
+      route:
+        - destination:
+            host: api-graphql.audit-ledger.svc.cluster.local
+            port:
+              number: 4000
+            subset: stable
+          weight: 100
+        - destination:
+            host: api-graphql.audit-ledger.svc.cluster.local
+            port:
+              number: 4000
+            subset: canary
+          weight: 0
+      timeout: 3600s   # 1 h — long enough for a subscription session
+
+    # Regular GraphQL queries / mutations
+    - route:
+        - destination:
+            host: api-graphql.audit-ledger.svc.cluster.local
+            port:
+              number: 4000
+            subset: stable
+          weight: 100
+        - destination:
+            host: api-graphql.audit-ledger.svc.cluster.local
+            port:
+              number: 4000
+            subset: canary
+          weight: 0
+      timeout: 10s
+      retries:
+        attempts: 3
+        perTryTimeout: 3s
+        retryOn: "connect-failure,reset,retriable-4xx,gateway-error"
+---
+# ── WebSocket Event Stream ───────────────────────────────────────────────────
+apiVersion: networking.istio.io/v1beta1
+kind: VirtualService
+metadata:
+  name: api-ws
+  namespace: audit-ledger
+  labels:
+    app.kubernetes.io/part-of: audit-ledger
+    app.kubernetes.io/component: api-ws
+spec:
+  hosts:
+    - api-ws.audit-ledger.svc.cluster.local
+  gateways:
+    - mesh
+  http:
+    - route:
+        - destination:
+            host: api-ws.audit-ledger.svc.cluster.local
+            port:
+              number: 4000
+            subset: stable
+          weight: 100
+        - destination:
+            host: api-ws.audit-ledger.svc.cluster.local
+            port:
+              number: 4000
+            subset: canary
+          weight: 0
+      timeout: 3600s
+---
+# ── UI ───────────────────────────────────────────────────────────────────────
+apiVersion: networking.istio.io/v1beta1
+kind: VirtualService
+metadata:
+  name: ui
+  namespace: audit-ledger
+  labels:
+    app.kubernetes.io/part-of: audit-ledger
+    app.kubernetes.io/component: ui
+spec:
+  hosts:
+    - "app.audit-ledger.example"
+  gateways:
+    - istio-ingress/audit-ledger-gateway
+    - mesh
+  http:
+    - route:
+        - destination:
+            host: ui.audit-ledger.svc.cluster.local
+            port:
+              number: 3001
+            subset: stable
+          weight: 100
+        - destination:
+            host: ui.audit-ledger.svc.cluster.local
+            port:
+              number: 3001
+            subset: canary
+          weight: 0
+      timeout: 10s
+      retries:
+        attempts: 2
+        perTryTimeout: 5s
+        retryOn: "connect-failure,reset,gateway-error"

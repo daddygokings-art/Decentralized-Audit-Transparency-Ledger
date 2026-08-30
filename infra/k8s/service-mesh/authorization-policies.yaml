@@ -1,0 +1,197 @@
+# infra/k8s/service-mesh/authorization-policies.yaml
+#
+# Istio AuthorizationPolicy resources — layer-7 access control that sits on
+# top of the mTLS identity enforced by PeerAuthentication.
+#
+# Model: deny-all by default (empty AuthorizationPolicy per namespace), then
+# explicitly allow each required call path using SPIFFE service-account
+# principals.
+#
+# SPIFFE principal format (Istio):
+#   cluster.local/ns/<namespace>/sa/<service-account>
+#
+# Issue #506 — zero-trust networking
+
+# ═══════════════════════════════════════════════════════════════════════════
+# Namespace-wide deny-all baseline (allow rules override per service)
+# ═══════════════════════════════════════════════════════════════════════════
+apiVersion: security.istio.io/v1beta1
+kind: AuthorizationPolicy
+metadata:
+  name: deny-all
+  namespace: audit-ledger
+  labels:
+    app.kubernetes.io/part-of: audit-ledger
+    audit-ledger.io/policy-type: authz
+spec:
+  {}   # no rules → deny everything; explicit allows follow below
+---
+# ═══════════════════════════════════════════════════════════════════════════
+# REST API
+# ═══════════════════════════════════════════════════════════════════════════
+apiVersion: security.istio.io/v1beta1
+kind: AuthorizationPolicy
+metadata:
+  name: allow-api-rest
+  namespace: audit-ledger
+  labels:
+    app.kubernetes.io/part-of: audit-ledger
+    app.kubernetes.io/component: api-rest
+spec:
+  selector:
+    matchLabels:
+      app.kubernetes.io/component: api-rest
+  action: ALLOW
+  rules:
+    - from:
+        # Ingress gateway (external client traffic)
+        - source:
+            principals:
+              - "cluster.local/ns/istio-ingress/sa/istio-ingressgateway-service-account"
+        # UI server-side rendering calls
+        - source:
+            principals:
+              - "cluster.local/ns/audit-ledger/sa/ui"
+      to:
+        - operation:
+            methods: ["GET", "POST"]
+            ports: ["3002"]
+---
+# ═══════════════════════════════════════════════════════════════════════════
+# GraphQL API
+# ═══════════════════════════════════════════════════════════════════════════
+apiVersion: security.istio.io/v1beta1
+kind: AuthorizationPolicy
+metadata:
+  name: allow-api-graphql
+  namespace: audit-ledger
+  labels:
+    app.kubernetes.io/part-of: audit-ledger
+    app.kubernetes.io/component: api-graphql
+spec:
+  selector:
+    matchLabels:
+      app.kubernetes.io/component: api-graphql
+  action: ALLOW
+  rules:
+    - from:
+        - source:
+            principals:
+              - "cluster.local/ns/istio-ingress/sa/istio-ingressgateway-service-account"
+        - source:
+            principals:
+              - "cluster.local/ns/audit-ledger/sa/api-rest"
+        - source:
+            principals:
+              - "cluster.local/ns/audit-ledger/sa/ui"
+      to:
+        - operation:
+            methods: ["GET", "POST"]
+            ports: ["4000"]
+---
+# ═══════════════════════════════════════════════════════════════════════════
+# WebSocket Event Stream
+# ═══════════════════════════════════════════════════════════════════════════
+apiVersion: security.istio.io/v1beta1
+kind: AuthorizationPolicy
+metadata:
+  name: allow-api-ws
+  namespace: audit-ledger
+  labels:
+    app.kubernetes.io/part-of: audit-ledger
+    app.kubernetes.io/component: api-ws
+spec:
+  selector:
+    matchLabels:
+      app.kubernetes.io/component: api-ws
+  action: ALLOW
+  rules:
+    - from:
+        - source:
+            principals:
+              - "cluster.local/ns/audit-ledger/sa/api-graphql"
+              - "cluster.local/ns/audit-ledger/sa/notifier"
+              - "cluster.local/ns/istio-ingress/sa/istio-ingressgateway-service-account"
+      to:
+        - operation:
+            ports: ["4000"]
+---
+# ═══════════════════════════════════════════════════════════════════════════
+# UI
+# ═══════════════════════════════════════════════════════════════════════════
+apiVersion: security.istio.io/v1beta1
+kind: AuthorizationPolicy
+metadata:
+  name: allow-ui
+  namespace: audit-ledger
+  labels:
+    app.kubernetes.io/part-of: audit-ledger
+    app.kubernetes.io/component: ui
+spec:
+  selector:
+    matchLabels:
+      app.kubernetes.io/component: ui
+  action: ALLOW
+  rules:
+    - from:
+        - source:
+            principals:
+              - "cluster.local/ns/istio-ingress/sa/istio-ingressgateway-service-account"
+      to:
+        - operation:
+            methods: ["GET", "POST"]
+            ports: ["3001"]
+---
+# ═══════════════════════════════════════════════════════════════════════════
+# Metrics Exporter — Prometheus scrape only
+# ═══════════════════════════════════════════════════════════════════════════
+apiVersion: security.istio.io/v1beta1
+kind: AuthorizationPolicy
+metadata:
+  name: allow-metrics-exporter
+  namespace: audit-ledger
+  labels:
+    app.kubernetes.io/part-of: audit-ledger
+    app.kubernetes.io/component: metrics-exporter
+spec:
+  selector:
+    matchLabels:
+      app.kubernetes.io/component: metrics-exporter
+  action: ALLOW
+  rules:
+    - from:
+        - source:
+            principals:
+              - "cluster.local/ns/monitoring/sa/prometheus"
+      to:
+        - operation:
+            methods: ["GET"]
+            paths: ["/metrics"]
+            ports: ["8000"]
+---
+# ═══════════════════════════════════════════════════════════════════════════
+# Bridge Relayer — Prometheus scrape only (relayer initiates all egress)
+# ═══════════════════════════════════════════════════════════════════════════
+apiVersion: security.istio.io/v1beta1
+kind: AuthorizationPolicy
+metadata:
+  name: allow-relayer
+  namespace: audit-ledger
+  labels:
+    app.kubernetes.io/part-of: audit-ledger
+    app.kubernetes.io/component: relayer
+spec:
+  selector:
+    matchLabels:
+      app.kubernetes.io/component: relayer
+  action: ALLOW
+  rules:
+    - from:
+        - source:
+            principals:
+              - "cluster.local/ns/monitoring/sa/prometheus"
+      to:
+        - operation:
+            methods: ["GET"]
+            paths: ["/metrics", "/health"]
+            ports: ["8080"]

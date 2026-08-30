@@ -1,0 +1,21 @@
+apiVersion: networking.k8s.io/v1
+kind: Ingress
+metadata:
+  name: global-audit-ledger-ingress
+  namespace: audit-ledger
+  annotations:
+    cloudflare.com/traffic-policy: "geo-proximity"
+    external-dns.alpha.kubernetes.io/hostname: "api.audit-ledger.io"
+    external-dns.alpha.kubernetes.io/ttl: "60"
+spec:
+  rules:
+    - host: api.audit-ledger.io
+      http:
+        paths:
+          - path: /
+            pathType: Prefix
+            backend:
+              service:
+                name: audit-ledger-us-east-svc
+                port:
+                  number: 80

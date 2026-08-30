@@ -1,5 +1,6 @@
 #![allow(dead_code)]
 
+use alloc::string::String;
 use soroban_sdk::{contracterror, contracttype, Address, Bytes, BytesN, Env, Symbol, Vec};
 
 /// Supply chain specific error types

@@ -1,0 +1,539 @@
+# Coverage configuration for the Decentralized Audit & Transparency Ledger
+# Used by scripts/coverage.sh and scripts/check_coverage_thresholds.py
+# Issue #495 — contract event test coverage reporting with thresholds
+
+# ── Global defaults ────────────────────────────────────────────────────────────
+[global]
+# Minimum line coverage percentage required across the entire crate (0–100).
+line_threshold = 60.0
+
+# Minimum branch coverage percentage required across the entire crate (0–100).
+# Set to 0 to disable branch enforcement globally.
+branch_threshold = 0.0
+
+# Fail the coverage check if the overall line coverage drops below this value.
+# This acts as a hard floor regardless of per-module settings.
+hard_floor = 50.0
+
+# Number of historical trend data-points to keep in coverage-trend.json.
+trend_history_limit = 30
+
+# ── Exclusion rules ────────────────────────────────────────────────────────────
+# Patterns matched against file paths (relative to the crate root).
+# Any file whose path contains one of these strings is excluded from coverage.
+[exclusions]
+files = [
+    # Fuzz-harness entry points — not intended to be exercised by unit tests
+    "src/fuzz.rs",
+    "src/comprehensive_fuzz.rs",
+
+    # Pure benchmark harness
+    "src/bench.rs",
+
+    # Property-based test drivers (proptest strategy declarations)
+    "src/proptest.rs",
+
+    # Test modules — we measure *production* code coverage only
+    "src/test.rs",
+    "src/supply_chain_tests.rs",
+    "src/stablecoin_reserves_tests.rs",
+    "src/defi_auditing_tests.rs",
+    "src/carbon_credits_tests.rs",
+    "src/esg_reporting_tests.rs",
+    "src/regulatory_reporting_tests.rs",
+    "src/tax_tests.rs",
+    "src/regulator_tests.rs",
+    "src/boundary_tests.rs",
+    "src/fee_tests.rs",
+    "src/chaos_tests.rs",
+    "src/concurrent_tests.rs",
+    "src/security_tests.rs",
+    "src/cross_contract_tests.rs",
+    "src/regression_tests.rs",
+    "src/upgrade_tests.rs",
+    "src/sandbox_tests.rs",
+    "src/asset_lifecycle_tests.rs",
+    "src/dao_governance_tests.rs",
+    "src/nft_provenance_tests.rs",
+    "src/digital_passport_tests.rs",
+    "src/cbdc_tests.rs",
+    "src/token_gating_tests.rs",
+    "src/suptech_tests.rs",
+    "src/data_retention_tests.rs",
+    "src/anti_corruption/tests.rs",
+    "src/export_controls/tests.rs",
+    "src/responsible_sourcing/tests.rs",
+    "src/trade_compliance/tests.rs",
+
+    # Integration tests live outside src/
+    "tests/",
+]
+
+# Regex patterns matched against function names to exclude individual functions.
+# Primarily used to skip trivial derives and generated impls.
+functions = [
+    # Soroban-generated contract dispatch stubs
+    "__call",
+    "spec_xdr",
+    # Rust auto-derives
+    "fmt",
+    "clone",
+    "eq",
+    "partial_eq",
+    "hash",
+]
+
+# ── Per-module thresholds ──────────────────────────────────────────────────────
+# Each [[module]] entry applies to a source file path prefix.
+# The FIRST matching entry wins (most specific first).
+# `line` and `branch` are percentages (0–100); omit to inherit the global default.
+
+# ─ Core audit ledger (main lib) ───────────────────────────────────────────────
+[[module]]
+name = "core"
+path_prefix = "src/lib.rs"
+line = 75.0
+branch = 50.0
+description = "Core AuditLedger contract — event logging, governance, ownership"
+
+# ─ Regulatory reporting pipeline ─────────────────────────────────────────────
+[[module]]
+name = "regulatory_reporting"
+path_prefix = "src/regulatory_reporting.rs"
+line = 65.0
+branch = 40.0
+description = "Automated regulatory report generation and submission"
+
+[[module]]
+name = "report_generators"
+path_prefix = "src/report_generators.rs"
+line = 60.0
+description = "Report format generators (JSON, CSV, XML)"
+
+[[module]]
+name = "report_validation"
+path_prefix = "src/report_validation.rs"
+line = 65.0
+description = "Schema validation for generated reports"
+
+[[module]]
+name = "submission_tracker"
+path_prefix = "src/submission_tracker.rs"
+line = 60.0
+description = "Tracks report submission status and deadlines"
+
+[[module]]
+name = "reporting_audit_trail"
+path_prefix = "src/reporting_audit_trail.rs"
+line = 60.0
+description = "Audit trail for the reporting pipeline itself"
+
+# ─ Supply chain transparency ──────────────────────────────────────────────────
+[[module]]
+name = "supply_chain"
+path_prefix = "src/supply_chain.rs"
+line = 65.0
+branch = 40.0
+description = "Product provenance, certifications, chain of custody"
+
+# ─ Stablecoin reserve auditing ────────────────────────────────────────────────
+[[module]]
+name = "stablecoin_reserves"
+path_prefix = "src/stablecoin_reserves.rs"
+line = 60.0
+description = "Reserve asset registration and attestation types"
+
+[[module]]
+name = "stablecoin_reserves_impl"
+path_prefix = "src/stablecoin_reserves_impl.rs"
+line = 60.0
+description = "Reserve auditing contract implementation"
+
+# ─ DeFi protocol auditing ─────────────────────────────────────────────────────
+[[module]]
+name = "defi_auditing"
+path_prefix = "src/defi_auditing.rs"
+line = 60.0
+description = "TVL, oracle, liquidation, and governance monitoring types"
+
+[[module]]
+name = "defi_auditing_impl"
+path_prefix = "src/defi_auditing_impl.rs"
+line = 60.0
+description = "DeFi protocol auditing contract implementation"
+
+# ─ Carbon credits & ESG ───────────────────────────────────────────────────────
+[[module]]
+name = "carbon_credits"
+path_prefix = "src/carbon_credits.rs"
+line = 60.0
+description = "Carbon credit issuance, retirement, and market types"
+
+[[module]]
+name = "esg_reporting"
+path_prefix = "src/esg_reporting.rs"
+line = 60.0
+description = "ESG metrics collection and report generation"
+
+# ─ Tax & VAT ─────────────────────────────────────────────────────────────────
+[[module]]
+name = "tax"
+path_prefix = "src/tax.rs"
+line = 65.0
+description = "Core tax computation logic"
+
+[[module]]
+name = "vat_engine"
+path_prefix = "src/vat_engine.rs"
+line = 60.0
+description = "VAT calculation and jurisdiction rules"
+
+[[module]]
+name = "tax_audit_trail"
+path_prefix = "src/tax_audit_trail.rs"
+line = 60.0
+description = "Tax event audit trail"
+
+[[module]]
+name = "tax_engines"
+path_prefix = "src/tax_engines.rs"
+line = 55.0
+description = "Pluggable tax engine abstractions"
+
+# ─ Regulator access & disclosure ─────────────────────────────────────────────
+[[module]]
+name = "regulator"
+path_prefix = "src/regulator.rs"
+line = 65.0
+description = "Regulator role management and access control"
+
+[[module]]
+name = "regulator_events"
+path_prefix = "src/regulator_events.rs"
+line = 60.0
+description = "Regulator-specific event types"
+
+[[module]]
+name = "disclosure"
+path_prefix = "src/disclosure.rs"
+line = 60.0
+description = "Selective disclosure and privacy controls"
+
+# ─ Compliance & data management ──────────────────────────────────────────────
+[[module]]
+name = "compliance_validators"
+path_prefix = "src/compliance_validators.rs"
+line = 65.0
+description = "Cross-cutting compliance validation rules"
+
+[[module]]
+name = "data_sharing"
+path_prefix = "src/data_sharing.rs"
+line = 60.0
+description = "Consent-based data sharing framework"
+
+[[module]]
+name = "data_retention"
+path_prefix = "src/data_retention.rs"
+line = 60.0
+description = "Data retention policies, legal holds, GDPR erasure"
+
+[[module]]
+name = "tamper_evidence"
+path_prefix = "src/tamper_evidence.rs"
+line = 65.0
+description = "Hash-chain tamper evidence verification"
+
+# ─ RWA (Real-World Assets) ────────────────────────────────────────────────────
+[[module]]
+name = "rwa_tokenization"
+path_prefix = "src/rwa_tokenization.rs"
+line = 55.0
+description = "RWA token lifecycle management"
+
+[[module]]
+name = "rwa_kyc_aml"
+path_prefix = "src/rwa_kyc_aml.rs"
+line = 55.0
+description = "KYC/AML compliance for RWA"
+
+[[module]]
+name = "rwa_custody"
+path_prefix = "src/rwa_custody.rs"
+line = 55.0
+description = "RWA custody and transfer records"
+
+[[module]]
+name = "rwa_oracle"
+path_prefix = "src/rwa_oracle.rs"
+line = 50.0
+description = "Price oracle integration for RWA valuation"
+
+[[module]]
+name = "rwa_monitoring"
+path_prefix = "src/rwa_monitoring.rs"
+line = 50.0
+description = "Ongoing RWA monitoring and alerts"
+
+[[module]]
+name = "rwa_compliance"
+path_prefix = "src/rwa_compliance.rs"
+line = 55.0
+description = "RWA regulatory compliance checks"
+
+[[module]]
+name = "rwa_valuation"
+path_prefix = "src/rwa_valuation.rs"
+line = 55.0
+description = "RWA asset valuation methodology"
+
+[[module]]
+name = "rwa_asset"
+path_prefix = "src/rwa_asset.rs"
+line = 55.0
+description = "RWA asset registration and metadata"
+
+[[module]]
+name = "rwa_types"
+path_prefix = "src/rwa_types.rs"
+line = 50.0
+description = "Common RWA type definitions"
+
+# ─ DAO governance ─────────────────────────────────────────────────────────────
+[[module]]
+name = "dao_governance"
+path_prefix = "src/dao_governance.rs"
+line = 60.0
+description = "DAO proposal and voting mechanics"
+
+[[module]]
+name = "dao_treasury"
+path_prefix = "src/dao_treasury.rs"
+line = 55.0
+description = "DAO treasury management"
+
+[[module]]
+name = "dao_dispute_resolution"
+path_prefix = "src/dao_dispute_resolution.rs"
+line = 55.0
+description = "DAO dispute resolution framework"
+
+# ─ CBDC ───────────────────────────────────────────────────────────────────────
+[[module]]
+name = "cbdc_offline"
+path_prefix = "src/cbdc_offline.rs"
+line = 55.0
+description = "CBDC offline transaction support"
+
+[[module]]
+name = "cbdc_privacy"
+path_prefix = "src/cbdc_privacy.rs"
+line = 55.0
+description = "CBDC privacy features"
+
+[[module]]
+name = "cbdc_interop"
+path_prefix = "src/cbdc_interop.rs"
+line = 55.0
+description = "CBDC interoperability layer"
+
+[[module]]
+name = "cbdc_logging"
+path_prefix = "src/cbdc_logging.rs"
+line = 55.0
+description = "CBDC transaction logging"
+
+[[module]]
+name = "cbdc_types"
+path_prefix = "src/cbdc_types.rs"
+line = 50.0
+description = "CBDC type definitions"
+
+# ─ NFT provenance ─────────────────────────────────────────────────────────────
+[[module]]
+name = "nft_provenance"
+path_prefix = "src/nft_provenance.rs"
+line = 55.0
+description = "NFT provenance types"
+
+[[module]]
+name = "nft_provenance_impl"
+path_prefix = "src/nft_provenance_impl.rs"
+line = 55.0
+description = "NFT provenance contract implementation"
+
+# ─ Digital passport ───────────────────────────────────────────────────────────
+[[module]]
+name = "digital_passport"
+path_prefix = "src/digital_passport.rs"
+line = 55.0
+description = "EU ESPR digital product passport"
+
+# ─ Anti-corruption ────────────────────────────────────────────────────────────
+[[module]]
+name = "anti_corruption"
+path_prefix = "src/anti_corruption.rs"
+line = 55.0
+description = "Anti-corruption compliance checks"
+
+# ─ Trade compliance & export controls ────────────────────────────────────────
+[[module]]
+name = "trade_compliance"
+path_prefix = "src/trade_compliance.rs"
+line = 55.0
+description = "Trade compliance and sanctions screening"
+
+[[module]]
+name = "export_controls"
+path_prefix = "src/export_controls.rs"
+line = 50.0
+description = "Export control regime enforcement"
+
+# ─ Responsible sourcing ───────────────────────────────────────────────────────
+[[module]]
+name = "responsible_sourcing"
+path_prefix = "src/responsible_sourcing.rs"
+line = 55.0
+description = "Responsible sourcing audits and certifications"
+
+# ─ Prediction markets & parametric insurance ─────────────────────────────────
+[[module]]
+name = "prediction_markets"
+path_prefix = "src/prediction_markets.rs"
+line = 50.0
+description = "Prediction market contract types"
+
+[[module]]
+name = "prediction_market_oracle"
+path_prefix = "src/prediction_market_oracle.rs"
+line = 50.0
+description = "Oracle integration for prediction market resolution"
+
+[[module]]
+name = "parametric_insurance"
+path_prefix = "src/parametric_insurance.rs"
+line = 50.0
+description = "Parametric insurance product types"
+
+# ─ Sandboxing & RegTech innovation ───────────────────────────────────────────
+[[module]]
+name = "sandbox_mgmt"
+path_prefix = "src/sandbox_mgmt.rs"
+line = 55.0
+description = "Regulatory sandbox management"
+
+[[module]]
+name = "sandbox_env"
+path_prefix = "src/sandbox_env.rs"
+line = 55.0
+description = "Sandbox environment configuration"
+
+[[module]]
+name = "sandbox_types"
+path_prefix = "src/sandbox_types.rs"
+line = 50.0
+description = "Sandbox type definitions"
+
+[[module]]
+name = "sandbox_graduation"
+path_prefix = "src/sandbox_graduation.rs"
+line = 55.0
+description = "Sandbox graduation criteria and workflow"
+
+[[module]]
+name = "sandbox_supervision"
+path_prefix = "src/sandbox_supervision.rs"
+line = 55.0
+description = "Supervisory access to sandbox participants"
+
+[[module]]
+name = "sandbox_innovation"
+path_prefix = "src/sandbox_innovation.rs"
+line = 55.0
+description = "Innovation pipeline tracking"
+
+# ─ SupTech (Supervisory Technology) ──────────────────────────────────────────
+[[module]]
+name = "suptech_reporting"
+path_prefix = "src/suptech_reporting.rs"
+line = 55.0
+description = "SupTech automated report generation"
+
+[[module]]
+name = "suptech_rules"
+path_prefix = "src/suptech_rules.rs"
+line = 55.0
+description = "Supervisory rule engine"
+
+[[module]]
+name = "suptech_api"
+path_prefix = "src/suptech_api.rs"
+line = 50.0
+description = "SupTech API bindings"
+
+[[module]]
+name = "suptech_feeds"
+path_prefix = "src/suptech_feeds.rs"
+line = 50.0
+description = "Regulatory data feed integration"
+
+[[module]]
+name = "suptech_integration"
+path_prefix = "src/suptech_integration.rs"
+line = 50.0
+description = "SupTech platform integration layer"
+
+[[module]]
+name = "suptech_types"
+path_prefix = "src/suptech_types.rs"
+line = 50.0
+description = "SupTech type definitions"
+
+# ─ Misc ───────────────────────────────────────────────────────────────────────
+[[module]]
+name = "token_gating"
+path_prefix = "src/token_gating.rs"
+line = 60.0
+description = "Token-gated access control"
+
+[[module]]
+name = "cross_chain_bridge"
+path_prefix = "src/cross_chain_bridge.rs"
+line = 55.0
+description = "Cross-chain event bridging"
+
+[[module]]
+name = "asset_lifecycle"
+path_prefix = "src/asset_lifecycle.rs"
+line = 55.0
+description = "Asset lifecycle state machine"
+
+[[module]]
+name = "asset_lifecycle_impl"
+path_prefix = "src/asset_lifecycle_impl.rs"
+line = 55.0
+description = "Asset lifecycle implementation"
+
+[[module]]
+name = "reputation_system"
+path_prefix = "src/reputation_system.rs"
+line = 50.0
+description = "On-chain reputation scoring"
+
+[[module]]
+name = "privacy_metrics"
+path_prefix = "src/privacy_metrics.rs"
+line = 50.0
+description = "Privacy-preserving metrics aggregation"
+
+[[module]]
+name = "submitter_dids"
+path_prefix = "src/submitter_dids.rs"
+line = 50.0
+description = "DID-based submitter identity"
+
+[[module]]
+name = "ssi_integration"
+path_prefix = "src/ssi_integration.rs"
+line = 50.0
+description = "Self-sovereign identity integration"

@@ -1,0 +1,77 @@
+[
+  {
+    "id": "evt-001",
+    "topic": "anti_corruption",
+    "action": "incident_reported",
+    "timestamp": "2026-08-28T10:00:00Z",
+    "payload": {
+      "severity": "CRITICAL",
+      "assigned_officer": "GAK4K6K4Z67A5M7X5SLLM"
+    }
+  },
+  {
+    "id": "evt-002",
+    "topic": "export_controls",
+    "action": "customs_declaration",
+    "timestamp": "2026-08-28T11:15:00Z",
+    "payload": {
+      "screening_status": "CLEAR",
+      "is_dual_use": true,
+      "license_number": "DOC-BIS-2026-9812",
+      "destination_country": "DE"
+    }
+  },
+  {
+    "id": "evt-003",
+    "topic": "trade_compliance",
+    "action": "shipment_dispatched",
+    "timestamp": "2026-08-28T12:30:00Z",
+    "payload": {
+      "certificate_of_origin_hash": "0x7f83b1657ff1fc53b92dc18148a1d65dfc2d4b1fa3d677284addd200126d9069",
+      "origin_verified": true,
+      "hs_code": "84713000",
+      "declared_value_usd": 125000,
+      "benchmark_value_usd": 128000
+    }
+  },
+  {
+    "id": "evt-004",
+    "topic": "stablecoin_reserves",
+    "action": "reserve_attestation",
+    "timestamp": "2026-08-28T13:00:00Z",
+    "payload": {
+      "asset_id": "EURC_VAULT",
+      "reserve_ratio": 1.05
+    }
+  },
+  {
+    "id": "evt-005",
+    "topic": "data_retention",
+    "action": "erasure_requested",
+    "timestamp": "2026-08-28T14:20:00Z",
+    "payload": {
+      "pending_days": 14,
+      "erasure_completed": true,
+      "legal_hold": false
+    }
+  },
+  {
+    "id": "evt-006",
+    "topic": "governance",
+    "action": "contract_paused",
+    "timestamp": "2026-08-28T15:00:00Z",
+    "payload": {
+      "signatures_count": 3,
+      "required_quorum": 3
+    }
+  },
+  {
+    "id": "evt-007",
+    "topic": "tamper_evidence",
+    "action": "batch_sealed",
+    "timestamp": "2026-08-28T16:00:00Z",
+    "payload": {
+      "state_hash": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855"
+    }
+  }
+]

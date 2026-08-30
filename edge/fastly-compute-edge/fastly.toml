@@ -1,0 +1,15 @@
+manifest_version = 3
+name = "audit-ledger-fastly-compute"
+description = "Fastly Compute@Edge low-latency event ingestion and query caching worker"
+authors = ["AuditLedger Core Team <core@audit-ledger.network>"]
+language = "javascript"
+
+[scripts]
+build = "js-compute-runtime src/index.ts bin/main.wasm"
+
+[local_server]
+  [local_server.backends]
+    [local_server.backends.stellar_rpc]
+      url = "https://soroban-rpc.mainnet.stellar.org"
+    [local_server.backends.audit_api]
+      url = "https://api.audit-ledger.network"

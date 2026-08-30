@@ -1,10 +1,13 @@
 #![no_std]
 // Migration to #[contractevent] macro is deferred (issue tracked separately)
 #![allow(deprecated)]
+#[macro_use]
+extern crate alloc;
 
 pub mod regulator;
 pub mod regulator_events;
 pub mod disclosure;
+pub mod contract_event_privacy;
 pub mod data_sharing;
 pub mod tamper_evidence;
 pub mod compliance_validators;
@@ -41,6 +44,23 @@ pub mod esg_reporting;
 
 // Data retention, legal hold, GDPR erasure, and the immutable operational audit log.
 pub mod data_retention;
+
+// Multi-region high-availability, replication, and disaster recovery.
+pub mod multi_region;
+
+// Predictive capacity planning, ML forecasting, and auto-scaling.
+pub mod capacity_planning;
+
+// Operational runbook automation, validation, and execution auditing.
+pub mod runbook_automation;
+
+// Incident management, on-call rotations, escalation policies, and postmortems.
+pub mod incident_management;
+
+// Privacy-preserving analytics suite: DP, FL, SMPC, and HE (issue #528)
+pub mod privacy_preserving_analytics;
+// Contract event data governance and catalog (issue #527)
+pub mod data_governance;
 
 /// Zero/invalid Stellar address (all zeroes) used to reject `NewOwnerIsZero`.
 const NULL_ACCOUNT: &str = "GAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAWHF";
@@ -332,6 +352,43 @@ pub enum DataKey {
     /// secret-rotation) audit records via `log_operational_action`, in addition to the
     /// contract owner(s).
     OpsAuditRecorders,
+
+    // ── RBAC (issue #365) ───────────────────────────────────────────────────
+
+    /// Whether role-based access control is active. When false (default), all legacy
+    /// owner/multisig and open-submitter behaviour is preserved for compatibility.
+    RbacEnabled,
+    /// Role assigned to an address: `DataKey::Role(Address) -> Role`.
+    Role(Address),
+
+    // ── Configurable dedup policies (issue #366) ─────────────────────────────
+
+    /// Global dedup policy (default `DedupPolicy::ContentHash`).
+    DedupPolicyConfig,
+    /// Per-event-type dedup policy override.
+    DedupPolicyConfigForType(Symbol),
+    /// Timestamp-scoped dedup map: content hash → (event index, ledger timestamp).
+    EventContentHashWithTs(BytesN<32>),
+    /// Custom-policy dedup map: user-supplied key → event index.
+    EventCustomKey(BytesN<32>),
+    /// Transient handshake key for the active `log_event_with_custom_key` call.
+    PendingCustomDedupKey,
+
+    // ── Archiving with compression & off-chain storage (issue #367) ──────────
+
+    /// Current archiving configuration.
+    ArchiveConfig,
+    /// Counter of archived events stored with on-chain compression.
+    ArchivedCompressedCount,
+    /// Counter of archived events stored as off-chain references.
+    ArchivedOffchainCount,
+    /// Off-chain archive pointer stored in place of (or alongside) full event data.
+    ArchivedEventRefKey(BytesN<32>),
+
+    // ── Event versioning (issue #368) ────────────────────────────────────────
+
+    /// Optional tag attached to a specific historical version of an event.
+    EventVersionTag(u32, u32),
 }
 
 #[contracterror]
@@ -641,6 +698,19 @@ pub enum ContractError {
     /// `add_ops_recorder`.
     /// **Resolution**: Have the owner call `add_ops_recorder` for this address first.
     UnauthorizedOpsRecorder = 73,
+
+    /// **Code 74**: Caller's role is insufficient for the operation (RBAC, issue #365).
+    /// **Common cause**: Calling an operation whose `require_role_min` threshold exceeds
+    /// the caller's assigned `Role`, when RBAC is enabled.
+    /// **Resolution**: Have an Admin assign a sufficient role via `set_role`, or disable
+    /// RBAC (compatibility mode) via `enable_rbac(false)`.
+    RoleNotGranted = 74,
+
+    /// **Code 75**: An unknown deduplication policy discriminant was supplied (issue #366).
+    /// **Common cause**: `set_dedup_policy`/`set_dedup_policy_for_type` called with a value
+    /// outside the `DedupPolicy` enum.
+    /// **Resolution**: Use `DedupPolicy::None | ContentHash | ContentHashWithTimestamp | Custom`.
+    InvalidDedupPolicy = 75,
 }
 
 #[contracttype]
@@ -778,6 +848,153 @@ pub struct TtlCleanupStats {
     pub cleaned: u32,
     /// Ledger sequence number of the last cleanup run, 0 if none.
     pub last_run_ledger: u32,
+}
+
+// ── RBAC types (issue #365) ──────────────────────────────────────────────────
+
+/// Roles for the role-based access control system.
+///
+/// Precedence (high → low): `Admin` > `Auditor` > `Submitter` > `Viewer`.
+/// A caller satisfying a role also satisfies every role below it.
+#[contracttype]
+#[derive(Clone, Copy, Debug, Eq, PartialEq, Ord, PartialOrd)]
+pub enum Role {
+    /// Full governance & configuration authority.
+    Admin = 0,
+    /// Read statistics and analyst data.
+    Auditor = 1,
+    /// Submit audit events.
+    Submitter = 2,
+    /// Read-only access.
+    Viewer = 3,
+}
+
+impl Role {
+    /// Rank used for precedence checks. Higher rank = higher privilege.
+    pub fn rank(&self) -> u32 {
+        match self {
+            Role::Admin => 4,
+            Role::Auditor => 3,
+            Role::Submitter => 2,
+            Role::Viewer => 1,
+        }
+    }
+}
+
+/// When RBAC is disabled (`RbacEnabled` false), role checks are not enforced so that
+/// legacy owner/multisig and open-submitter behaviour is fully preserved. Once enabled,
+/// writes require at least `Submitter`, governance requires `Admin`, reads require at
+/// least `Viewer`, and `get_statistics` requires at least `Auditor`.
+
+// ── Deduplication policy types (issue #366) ──────────────────────────────────
+
+/// Configurable event deduplication policy.
+#[contracttype]
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub enum DedupPolicy {
+    /// Never deduplicate; every call stores a new event.
+    None = 0,
+    /// Deduplicate on `hash(event_type || submitter || metadata)` (legacy behaviour).
+    ContentHash = 1,
+    /// Deduplicate on the content hash but only within the same ledger timestamp.
+    ContentHashWithTimestamp = 2,
+    /// Deduplicate on a caller-supplied key (off-chain logic decides what is a duplicate).
+    Custom = 3,
+}
+
+// ── Archiving types (issue #367) ─────────────────────────────────────────────
+
+/// Compression mode for archived event metadata.
+///
+/// `0` = no compression, `1` = run-length encoding. Real-world gzip/zstd cannot be
+/// executed on-chain in a `no_std` Soroban contract, so run-length encoding is used
+/// on-chain; richer compression can be applied off-chain before upload.
+#[contracttype]
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct ArchiveConfig {
+    /// Off-chain storage enabled: archived events are stored as references
+    /// (URI + checksum) instead of full payloads to minimise on-chain footprint.
+    pub offchain_storage: bool,
+    /// Base URL (UTF-8 bytes) under which archived event payloads are retrievable.
+    pub base_url: Bytes,
+    /// Compression mode: 0 = none, 1 = run-length encoding.
+    pub compression: u8,
+}
+
+impl ArchiveConfig {
+    /// Default: in-chain storage, no compression, empty base URL.
+    pub fn default_config(env: &Env) -> Self {
+        ArchiveConfig {
+            offchain_storage: false,
+            base_url: Bytes::new(env),
+            compression: 0,
+        }
+    }
+}
+
+/// Pointer to an event archived off-chain.
+#[contracttype]
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct ArchivedEventRef {
+    /// Content-addressed event ID.
+    pub id: BytesN<32>,
+    /// Sequential index of the archived event.
+    pub index: u32,
+    /// SHA-256 of the event's serialised payload (for off-chain verification).
+    pub checksum: BytesN<32>,
+    /// Fully-qualified retrieval URL (`base_url || <event_id-hex>`).
+    pub url: Bytes,
+    /// Ledger timestamp at which the event was archived.
+    pub archived_at: u64,
+}
+
+/// Aggregate archive statistics.
+#[contracttype]
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct ArchiveStats {
+    /// Total archived events.
+    pub total_archived: u32,
+    /// Archived events stored with on-chain compressed metadata.
+    pub total_compressed: u32,
+    /// Archived events stored as off-chain references.
+    pub total_offchain: u32,
+}
+
+// ── Versioning types (issue #368) ────────────────────────────────────────────
+
+/// A single semantic field change between two versions of an event.
+///
+/// `from`/`to` encode field values canonically: numbers via little-endian bytes,
+/// `Symbol` via UTF-8 name bytes, `Bytes` raw, and `Address` via its strkey bytes.
+#[contracttype]
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct FieldChange {
+    /// Name of the changed field (`metadata`, `event_type`, `submitter`, ...).
+    pub field: Symbol,
+    /// Canonical bytes of the previous value (empty marker = absent/`None`).
+    pub from: Bytes,
+    /// Canonical bytes of the new value.
+    pub to: Bytes,
+}
+
+/// Detailed structural comparison of two versions of an event.
+#[contracttype]
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct VersionComparison {
+    /// Event index being compared.
+    pub index: u32,
+    /// Origin version.
+    pub from_version: u32,
+    /// Target version.
+    pub to_version: u32,
+    /// True when the two versions are semantically identical.
+    pub same: bool,
+    /// List of field-level changes.
+    pub changes: Vec<FieldChange>,
+    /// Hash of the original event version.
+    pub from_hash: BytesN<32>,
+    /// Hash of the target event version.
+    pub to_hash: BytesN<32>,
 }
 
 // ── Additional type definitions ──────────────────────────────────────────────
@@ -1455,7 +1672,7 @@ pub struct WaterDisclosure {
     pub sites_in_stressed_areas: u32,
     // ── W7: Accounting ──
     /// Scarcity-weighted total water use across all recorded footprints, L × 10⁻⁶.
-    pub scarcity_weighted_total_L_micro: u64,
+    pub scarcity_wtd_total_L_micro: u64,
     // ── W8: Targets achieved ──
     /// Reduction achieved since base year, L × 10⁻⁶ (CDP W8.1).
     pub reduction_achieved_L_micro: u64,
@@ -1476,7 +1693,7 @@ pub struct WaterTotals {
     /// Cumulative grey water footprint, L × 10⁻⁶.
     pub total_grey_L_micro: u64,
     /// Cumulative scarcity-weighted blue water, L × 10⁻⁶.
-    pub total_scarcity_weighted_L_micro: u64,
+    pub total_scarcity_wtd_L_micro: u64,
     /// Total water risk assessments registered.
     pub total_risk_assessments: u32,
     /// Total stewardship programmes registered.
@@ -1508,7 +1725,7 @@ pub struct WaterSnapshot {
     /// Total grey water (L × 10⁻⁶).
     pub total_grey_L_micro: u64,
     /// Total scarcity-weighted blue water (L × 10⁻⁶).
-    pub total_scarcity_weighted_L_micro: u64,
+    pub total_scarcity_wtd_L_micro: u64,
     /// Total water footprint (blue + green + grey), L × 10⁻⁶.
     pub total_water_footprint_L_micro: u64,
     /// Scarcity ratio: scarcity_weighted / blue × 10 000 (bps). 0 when no blue water.
@@ -1582,6 +1799,14 @@ impl AuditLedger {
         env.storage()
             .instance()
             .set(&DataKey::DefaultNonceMaxValue, &u32::MAX);
+
+        // Issue #365: RBAC is off by default (backward-compatible). Owner(s) are
+        // seeded as Admins so enabling RBAC never locks out existing authorities.
+        env.storage().instance().set(&DataKey::RbacEnabled, &false);
+        for i in 0..owners.len() {
+            let o = owners.get(i).unwrap();
+            env.storage().instance().set(&DataKey::Role(o), &Role::Admin);
+        }
     }
 
     /// Log a batch of events atomically and return their sequential indices.
@@ -1642,6 +1867,9 @@ impl AuditLedger {
             }
             if !already_authorized {
                 submitter.require_auth();
+                // Issue #365: when RBAC is enabled, batch submitters must hold at
+                // least the Submitter role.
+                Self::require_role_min(&env, &submitter, Role::Submitter);
                 authorized_submitters.push_back(submitter.clone());
             }
 
@@ -1813,6 +2041,8 @@ impl AuditLedger {
     ) -> BytesN<32> {
         Self::require_initialized(&env);
         submitter.require_auth();
+        // Issue #365: when RBAC is enabled, logging requires at least Submitter.
+        Self::require_role_min(&env, &submitter, Role::Submitter);
 
         // --- issue #61: reentrancy guard ---
         // Temporary storage is scoped to the current transaction; if a
@@ -1936,21 +2166,68 @@ impl AuditLedger {
             type_count_opt = Some(count);
         }
 
-        // --- Content-addressed deduplication ---
-        // Compute hash(event_type || submitter || metadata) for dedup.
-        let content_hash = Self::compute_content_hash(&env, &event_type, &submitter, &metadata);
+        // --- Configurable content-addressed deduplication (issue #366) ---
+        // The policy is read per event type; the default (ContentHash) preserves the
+        // legacy behaviour. `force` bypasses deduplication entirely.
+        let dedup_policy = Self::effective_dedup_policy(&env, &event_type);
         if !force {
-            if let Some(existing_index) = env
-                .storage()
-                .instance()
-                .get::<_, u32>(&DataKey::EventContentHash(content_hash.clone()))
-            {
-                let existing_id: BytesN<32> = env
-                    .storage()
-                    .instance()
-                    .get(&DataKey::EventOrder(existing_index))
-                    .unwrap();
-                return existing_id;
+            match dedup_policy {
+                DedupPolicy::None => {
+                    // no deduplication: always store a new event
+                }
+                DedupPolicy::ContentHash => {
+                    let content_hash = Self::compute_content_hash(&env, &event_type, &submitter, &metadata);
+                    if let Some(existing_index) = env
+                        .storage()
+                        .instance()
+                        .get::<_, u32>(&DataKey::EventContentHash(content_hash.clone()))
+                    {
+                        let existing_id: BytesN<32> = env
+                            .storage()
+                            .instance()
+                            .get(&DataKey::EventOrder(existing_index))
+                            .unwrap();
+                        return existing_id;
+                    }
+                }
+                DedupPolicy::ContentHashWithTimestamp => {
+                    let content_hash = Self::compute_content_hash(&env, &event_type, &submitter, &metadata);
+                    let now = env.ledger().timestamp();
+                    if let Some((existing_index, existing_ts)) = env
+                        .storage()
+                        .instance()
+                        .get::<_, (u32, u64)>(&DataKey::EventContentHashWithTs(content_hash.clone()))
+                    {
+                        // Only treat as duplicate within the same ledger timestamp.
+                        if existing_ts == now {
+                            let existing_id: BytesN<32> = env
+                                .storage()
+                                .instance()
+                                .get(&DataKey::EventOrder(existing_index))
+                                .unwrap();
+                            return existing_id;
+                        }
+                    }
+                }
+                DedupPolicy::Custom => {
+                    // Custom deduplication requires an explicit key supplied through
+                    // `log_event_with_custom_key`; without one no duplicate detection
+                    // can be performed so the event is stored.
+                    if let Some(custom_key) = Self::pending_custom_key(&env) {
+                        if let Some(existing_index) = env
+                            .storage()
+                            .instance()
+                            .get::<_, u32>(&DataKey::EventCustomKey(custom_key))
+                        {
+                            let existing_id: BytesN<32> = env
+                                .storage()
+                                .instance()
+                                .get(&DataKey::EventOrder(existing_index))
+                                .unwrap();
+                            return existing_id;
+                        }
+                    }
+                }
             }
         }
 
@@ -2024,6 +2301,32 @@ impl AuditLedger {
                 .persistent()
                 .extend_ttl(&DataKey::EventData(event_id.clone()), ttl, ttl);
         }
+
+        // --- issue #366: persist dedup index maps for the effective policy ---
+        match dedup_policy {
+            DedupPolicy::ContentHash => {
+                let content_hash = Self::compute_content_hash(&env, &event_type, &submitter, &metadata);
+                env.storage()
+                    .instance()
+                    .set(&DataKey::EventContentHash(content_hash), &index);
+            }
+            DedupPolicy::ContentHashWithTimestamp => {
+                let content_hash = Self::compute_content_hash(&env, &event_type, &submitter, &metadata);
+                env.storage()
+                    .instance()
+                    .set(&DataKey::EventContentHashWithTs(content_hash), &(index, timestamp));
+            }
+            DedupPolicy::Custom => {
+                if let Some(custom_key) = Self::pending_custom_key(&env) {
+                    env.storage()
+                        .instance()
+                        .set(&DataKey::EventCustomKey(custom_key), &index);
+                }
+            }
+            DedupPolicy::None => {}
+        }
+        // Clear any custom-key handshake state for this call.
+        env.storage().temporary().remove(&DataKey::PendingCustomDedupKey);
 
         // Task 4: cache low_cost_mode to avoid double read.
         let low_cost = Self::effective_low_cost_mode(&env);
@@ -2408,14 +2711,36 @@ impl AuditLedger {
 
     /// Archive events older than `cutoff_timestamp` into cold storage.
     /// Owner-only. Returns number archived.
+    ///
+    /// Honours the configured `ArchiveConfig` (issue #367):
+    /// - `compression == 1`: archived metadata is stored run-length encoded.
+    /// - `offchain_storage == true`: the full event payload is not kept on-chain;
+    ///   instead an `ArchivedEventRef` (URI + checksum) is stored under
+    ///   `ArchivedEventRefKey`, so the payload can be fetched off-chain and verified
+    ///   via `verify_archived_event_checksum`.
     pub fn archive_events(env: Env, caller: Address, cutoff_timestamp: u64) -> u32 {
         caller.require_auth();
         Self::require_owner_or_multisig(&env, &caller);
         let total = Self::total_events(env.clone());
+        let config: ArchiveConfig = env
+            .storage()
+            .instance()
+            .get(&DataKey::ArchiveConfig)
+            .unwrap_or_else(|| ArchiveConfig::default_config(&env));
         let mut archived: u32 = env
             .storage()
             .instance()
             .get(&DataKey::ArchivedTotalEvents)
+            .unwrap_or(0u32);
+        let mut compressed_count: u32 = env
+            .storage()
+            .instance()
+            .get(&DataKey::ArchivedCompressedCount)
+            .unwrap_or(0u32);
+        let mut offchain_count: u32 = env
+            .storage()
+            .instance()
+            .get(&DataKey::ArchivedOffchainCount)
             .unwrap_or(0u32);
         let mut moved: u32 = 0;
         // Resume scanning from the last position to avoid re-scanning entire history on each call.
@@ -2437,10 +2762,7 @@ impl AuditLedger {
             if evt.timestamp >= cutoff_timestamp {
                 break;
             }
-            // copy into archived storage
-            env.storage()
-                .instance()
-                .set(&DataKey::ArchivedEventData(id.clone()), &evt);
+
             if let Some(header) = env
                 .storage()
                 .instance()
@@ -2450,15 +2772,59 @@ impl AuditLedger {
                     .instance()
                     .set(&DataKey::ArchivedEventHeaderKey(id.clone()), &header);
             }
-            if let Some(meta) = env
+            let meta: Bytes = env
                 .storage()
                 .instance()
-                .get::<_, Bytes>(&DataKey::EventMetadata(id.clone()))
-            {
+                .get(&DataKey::EventMetadata(id.clone()))
+                .unwrap_or(Bytes::new(&env));
+
+            // Off-chain storage: keep only header + compressed metadata + ref.
+            if config.offchain_storage {
+                let stored_meta = if config.compression == 1 {
+                    Self::compress_bytes(&env, &meta)
+                } else {
+                    Self::tag_raw_bytes(&env, &meta)
+                };
                 env.storage()
                     .instance()
-                    .set(&DataKey::ArchivedEventMetadata(id.clone()), &meta);
+                    .set(&DataKey::ArchivedEventMetadata(id.clone()), &stored_meta);
+                env.storage().instance().set(
+                    &DataKey::ArchivedEventRefKey(id.clone()),
+                    &ArchivedEventRef {
+                        id: id.clone(),
+                        index: i,
+                        checksum: evt.event_hash.clone(),
+                        url: Self::build_archive_url(&env, &config, &id),
+                        archived_at: env.ledger().timestamp(),
+                    },
+                );
+                if config.compression == 1 {
+                    compressed_count += 1;
+                }
+                offchain_count += 1;
+            } else {
+                // On-chain storage: keep the full event (metadata potentially compressed).
+                if config.compression == 1 {
+                    let stored_meta = Self::compress_bytes(&env, &meta);
+                    let mut stored_evt = evt.clone();
+                    stored_evt.metadata = stored_meta;
+                    env.storage()
+                        .instance()
+                        .set(&DataKey::ArchivedEventData(id.clone()), &stored_evt);
+                    env.storage()
+                        .instance()
+                        .set(&DataKey::ArchivedEventMetadata(id.clone()), &stored_meta);
+                    compressed_count += 1;
+                } else {
+                    env.storage()
+                        .instance()
+                        .set(&DataKey::ArchivedEventData(id.clone()), &evt);
+                    env.storage()
+                        .instance()
+                        .set(&DataKey::ArchivedEventMetadata(id.clone()), &meta);
+                }
             }
+
             env.storage()
                 .instance()
                 .set(&DataKey::EventArchivedFlag(id.clone()), &true);
@@ -2472,19 +2838,107 @@ impl AuditLedger {
         // persist scan cursor so subsequent calls resume where we left off
         env.storage().instance().set(&DataKey::ArchiveScanCursor, &i);
         env.storage().instance().set(&DataKey::ArchivedTotalEvents, &archived);
+        if moved > 0 {
+            env.storage()
+                .instance()
+                .set(&DataKey::ArchivedCompressedCount, &compressed_count);
+            env.storage()
+                .instance()
+                .set(&DataKey::ArchivedOffchainCount, &offchain_count);
+        }
         env.events().publish((Symbol::new(&env, "events_archived"),), (moved,));
         moved
     }
 
+    /// Return a fully reconstructed archived event. Prefers the on-chain copy; when
+    /// the event was archived off-chain it is rebuilt from the stored header, tagged
+    /// metadata and event hash (issue #367).
     pub fn get_archived_event(env: Env, id: BytesN<32>) -> Event {
-        env.storage()
+        if let Some(evt) = env
+            .storage()
             .instance()
-            .get(&DataKey::ArchivedEventData(id))
-            .unwrap_or_else(|| panic_with_error!(&env, ContractError::EventDoesNotExist))
+            .get::<_, Event>(&DataKey::ArchivedEventData(id.clone()))
+        {
+            let mut evt = evt;
+            if Self::is_compressed_tag(&env, &evt.metadata) {
+                evt.metadata = Self::expand_archived_metadata(&env, &evt.metadata);
+            }
+            return evt;
+        }
+        let proof: ArchivedEventRef = env
+            .storage()
+            .instance()
+            .get(&DataKey::ArchivedEventRefKey(id.clone()))
+            .unwrap_or_else(|| panic_with_error!(&env, ContractError::EventDoesNotExist));
+        let header: EventHeader = env
+            .storage()
+            .instance()
+            .get(&DataKey::ArchivedEventHeaderKey(id.clone()))
+            .unwrap_or_else(|| panic_with_error!(&env, ContractError::EventDoesNotExist));
+        let metadata = Self::expand_archived_metadata(
+            &env,
+            &env.storage()
+                .instance()
+                .get(&DataKey::ArchivedEventMetadata(id.clone()))
+                .unwrap_or(Bytes::new(&env)),
+        );
+        Event {
+            index: header.index,
+            timestamp: header.timestamp,
+            event_type: header.event_type,
+            category: Symbol::new(&env, "general"),
+            submitter: header.submitter,
+            metadata,
+            sub_event_type: None,
+            version: Self::current_contract_version(&env),
+            event_hash: proof.checksum,
+            prev_hash: BytesN::from_array(&env, &[0u8; 32]),
+            parent_event_id: None,
+        }
+    }
+
+    /// Return the off-chain archive reference for an archived event (issue #367).
+    pub fn get_archived_event_ref(env: Env, id: BytesN<32>) -> Option<ArchivedEventRef> {
+        env.storage().instance().get(&DataKey::ArchivedEventRefKey(id))
+    }
+
+    /// Verify that a caller-reconstructed off-chain payload matches the on-chain
+    /// checksum recorded at archive time (issue #367).
+    pub fn verify_archived_event_checksum(env: Env, id: BytesN<32>, candidate: Event) -> bool {
+        let Some(proof) = env
+            .storage()
+            .instance()
+            .get::<_, ArchivedEventRef>(&DataKey::ArchivedEventRefKey(id.clone()))
+        else {
+            return false;
+        };
+        candidate.event_hash == proof.checksum
+    }
+
+    /// Aggregate archiving statistics (issue #367).
+    pub fn get_archive_stats(env: Env) -> ArchiveStats {
+        Self::require_initialized(&env);
+        ArchiveStats {
+            total_archived: env
+                .storage()
+                .instance()
+                .get(&DataKey::ArchivedTotalEvents)
+                .unwrap_or(0u32),
+            total_compressed: env
+                .storage()
+                .instance()
+                .get(&DataKey::ArchivedCompressedCount)
+                .unwrap_or(0u32),
+            total_offchain: env
+                .storage()
+                .instance()
+                .get(&DataKey::ArchivedOffchainCount)
+                .unwrap_or(0u32),
+        }
     }
 
     pub fn get_archived_event_count(env: Env) -> u32 {
-        // count actual archived entries (tolerate gaps)
+        // count actual archived entries (tolerate gaps); off-chain refs count too.
         let total: u32 = env
             .storage()
             .instance()
@@ -2497,7 +2951,9 @@ impl AuditLedger {
                 .instance()
                 .get::<_, BytesN<32>>(&DataKey::ArchivedEventOrder(i))
             {
-                if env.storage().instance().has(&DataKey::ArchivedEventData(id)) {
+                if env.storage().instance().has(&DataKey::ArchivedEventData(id.clone()))
+                    || env.storage().instance().has(&DataKey::ArchivedEventRefKey(id))
+                {
                     cnt += 1;
                 }
             }
@@ -3512,6 +3968,13 @@ impl AuditLedger {
             }
         }
         env.storage().instance().set(&DataKey::Owners, &owners);
+        // Issue #365: keep RBAC roles consistent with ownership.
+        if Self::rbac_enabled(&env) {
+            env.storage().instance().set(&DataKey::Role(new_owner.clone()), &Role::Admin);
+            if Self::get_role_of(&env, &current_owner) == Some(Role::Admin) {
+                env.storage().instance().remove(&DataKey::Role(current_owner.clone()));
+            }
+        }
         env.events().publish(
             (Symbol::new(&env, "governance"), Symbol::new(&env, "transfer_ownership")),
             (caller, current_owner, new_owner),
@@ -3874,8 +4337,12 @@ impl AuditLedger {
         Self::effective_metadata_max_size(&env, &event_type)
     }
 
-    pub fn get_statistics(env: Env) -> ContractStatistics {
+    /// Contract-wide usage statistics. When RBAC is enabled, requires at least the
+    /// `Auditor` role (issue #365).
+    pub fn get_statistics(env: Env, caller: Address) -> ContractStatistics {
         Self::require_initialized(&env);
+        caller.require_auth();
+        Self::require_role_min(&env, &caller, Role::Auditor);
         Self::collect_statistics(&env)
     }
 
@@ -4237,6 +4704,78 @@ impl AuditLedger {
         }
     }
 
+    // ── RBAC helpers (issue #365) ────────────────────────────────────────────
+
+    /// Whether role-based access control is currently enforced.
+    fn rbac_enabled(env: &Env) -> bool {
+        env.storage().instance().get(&DataKey::RbacEnabled).unwrap_or(false)
+    }
+
+    /// Look up the role assigned to `addr`.
+    fn get_role_of(env: &Env, addr: &Address) -> Option<Role> {
+        env.storage().instance().get(&DataKey::Role(addr.clone()))
+    }
+
+    /// Enforce a minimum role when RBAC is enabled. In compatibility mode
+    /// (RBAC disabled) this is a no-op, preserving legacy behaviour.
+    fn require_role_min(env: &Env, addr: &Address, min: Role) {
+        if !Self::rbac_enabled(env) {
+            return;
+        }
+        let granted = Self::get_role_of(env, addr).unwrap_or(Role::Viewer);
+        if granted.rank() < min.rank() {
+            panic_with_error!(env, ContractError::RoleNotGranted);
+        }
+    }
+
+    /// Legacy owner/multisig check. When RBAC is enabled, ownership checks are
+    /// replaced by the Admin role (all owners are seeded as Admins at init).
+    fn require_owner_or_multisig(env: &Env, addr: &Address) {
+        if Self::rbac_enabled(env) {
+            Self::require_role_min(env, addr, Role::Admin);
+            return;
+        }
+        if !Self::is_addr_owner(env, addr) {
+            panic_with_error!(env, ContractError::CallerNotOwner);
+        }
+    }
+
+    // ── Deduplication policy helpers (issue #366) ───────────────────────────
+
+    /// Effective dedup policy for an event type: per-type override, else global, else
+    /// `ContentHash` (legacy behaviour).
+    fn effective_dedup_policy(env: &Env, event_type: &Symbol) -> DedupPolicy {
+        if let Some(policy) = env
+            .storage()
+            .instance()
+            .get::<_, DedupPolicy>(&DataKey::DedupPolicyConfigForType(event_type.clone()))
+        {
+            return policy;
+        }
+        env.storage()
+            .instance()
+            .get::<_, DedupPolicy>(&DataKey::DedupPolicyConfig)
+            .unwrap_or(DedupPolicy::ContentHash)
+    }
+
+    /// Validate a `u32` discriminant as a `DedupPolicy`.
+    fn dedup_policy_from_discriminant(env: &Env, disc: u32) -> DedupPolicy {
+        match disc {
+            0 => DedupPolicy::None,
+            1 => DedupPolicy::ContentHash,
+            2 => DedupPolicy::ContentHashWithTimestamp,
+            3 => DedupPolicy::Custom,
+            _ => panic_with_error!(env, ContractError::InvalidDedupPolicy),
+        }
+    }
+
+    /// Read the transient custom-dedup key for the current call (if any).
+    fn pending_custom_key(env: &Env) -> Option<BytesN<32>> {
+        env.storage()
+            .temporary()
+            .get::<_, BytesN<32>>(&DataKey::PendingCustomDedupKey)
+    }
+
     fn get_owners(env: &Env) -> Vec<Address> {
         env.storage()
             .instance()
@@ -4267,12 +4806,6 @@ impl AuditLedger {
         false
     }
 
-    fn require_owner_or_multisig(env: &Env, addr: &Address) {
-        if !Self::is_addr_owner(env, addr) {
-            panic_with_error!(env, ContractError::CallerNotOwner);
-        }
-    }
-
     pub fn add_owner(env: Env, caller: Address, new_owner: Address) {
         caller.require_auth();
         Self::require_owner_or_multisig(&env, &caller);
@@ -4287,6 +4820,10 @@ impl AuditLedger {
         }
         owners.push_back(new_owner.clone());
         env.storage().instance().set(&DataKey::Owners, &owners);
+        // Issue #365: seed the Admin role for the new owner.
+        if Self::rbac_enabled(&env) {
+            env.storage().instance().set(&DataKey::Role(new_owner.clone()), &Role::Admin);
+        }
         env.events().publish((Symbol::new(&env, "owner_added"),), (new_owner,));
     }
 
@@ -4693,95 +5230,499 @@ impl AuditLedger {
             .unwrap_or(1000)
     }
 
-    // ── Conflict minerals reporting (Dodd-Frank §1502) ──────────────────
+    // ═══════════════════════════════════════════════════════════════════════
+    // RBAC (issue #365)
+    // ═══════════════════════════════════════════════════════════════════════
 
-    /// Record a mineral allocation to product and smelter(s). Owner-only.
-    ///
-    /// Emits a `("cm", "alloc")` event with payload `(submitter, allocation_id, mineral)`.
-    pub fn record_mineral_allocation(
+    /// Assign (or clear, when `role` is `None`) a role for `target`.
+    /// Admin-only when RBAC is enabled; legacy owner/multisig otherwise.
+    pub fn set_role(env: Env, caller: Address, target: Address, role: Option<Role>) {
+        Self::require_initialized(&env);
+        caller.require_auth();
+        // Only an Admin may change roles.
+        if Self::rbac_enabled(&env) {
+            Self::require_role_min(&env, &caller, Role::Admin);
+        } else {
+            Self::require_owner_or_multisig(&env, &caller);
+        }
+        match role {
+            Some(r) => env.storage().instance().set(&DataKey::Role(target), &r),
+            None => env.storage().instance().remove(&DataKey::Role(target)),
+        }
+        env.events().publish(
+            (Symbol::new(&env, "rbac"), Symbol::new(&env, "role_set")),
+            (caller, target, role),
+        );
+    }
+
+    /// Read the role assigned to `target`.
+    pub fn get_role(env: Env, target: Address) -> Option<Role> {
+        Self::require_initialized(&env);
+        Self::get_role_of(&env, &target)
+    }
+
+    /// Toggle RBAC enforcement. Admin-only when already enabled; legacy
+    /// owner/multisig otherwise. Disabling restores full legacy behaviour.
+    pub fn enable_rbac(env: Env, caller: Address, enabled: bool) {
+        Self::require_initialized(&env);
+        caller.require_auth();
+        if Self::rbac_enabled(&env) {
+            Self::require_role_min(&env, &caller, Role::Admin);
+        } else {
+            Self::require_owner_or_multisig(&env, &caller);
+        }
+        env.storage().instance().set(&DataKey::RbacEnabled, &enabled);
+        env.events().publish(
+            (Symbol::new(&env, "rbac"), Symbol::new(&env, "rbac_toggled")),
+            (caller, enabled),
+        );
+    }
+
+    /// Whether RBAC is currently enforced.
+    pub fn is_rbac_enabled(env: Env) -> bool {
+        Self::rbac_enabled(&env)
+    }
+
+    // ═══════════════════════════════════════════════════════════════════════
+    // Deduplication policies (issue #366)
+    // ═══════════════════════════════════════════════════════════════════════
+
+    /// Set the global dedup policy.
+    pub fn set_dedup_policy(env: Env, caller: Address, policy: DedupPolicy) {
+        Self::require_initialized(&env);
+        caller.require_auth();
+        Self::require_owner_or_multisig(&env, &caller);
+        // Validate the discriminant.
+        Self::dedup_policy_from_discriminant(&env, policy as u32);
+        env.storage()
+            .instance()
+            .set(&DataKey::DedupPolicyConfig, &policy);
+        env.events().publish(
+            (Symbol::new(&env, "dedup"), Symbol::new(&env, "policy_set")),
+            (caller, policy as u32),
+        );
+    }
+
+    /// Get the global dedup policy (defaults to `ContentHash`).
+    pub fn get_dedup_policy(env: Env) -> DedupPolicy {
+        Self::require_initialized(&env);
+        env.storage()
+            .instance()
+            .get(&DataKey::DedupPolicyConfig)
+            .unwrap_or(DedupPolicy::ContentHash)
+    }
+
+    /// Set (or clear, when `policy` is `None`) a per-event-type dedup policy override.
+    pub fn set_dedup_policy_for_type(env: Env, caller: Address, event_type: Symbol, policy: Option<DedupPolicy>) {
+        Self::require_initialized(&env);
+        caller.require_auth();
+        Self::require_owner_or_multisig(&env, &caller);
+        if let Some(p) = policy {
+            Self::dedup_policy_from_discriminant(&env, p as u32);
+            env.storage()
+                .instance()
+                .set(&DataKey::DedupPolicyConfigForType(event_type), &p);
+        } else {
+            env.storage()
+                .instance()
+                .remove(&DataKey::DedupPolicyConfigForType(event_type));
+        }
+        env.events().publish(
+            (Symbol::new(&env, "dedup"), Symbol::new(&env, "policy_set_type")),
+            (caller, event_type, policy.map(|p| p as u32)),
+        );
+    }
+
+    /// Get the effective dedup policy for an event type.
+    pub fn get_dedup_policy_for_type(env: Env, event_type: Symbol) -> DedupPolicy {
+        Self::require_initialized(&env);
+        Self::effective_dedup_policy(&env, &event_type)
+    }
+
+    /// Log an event while supplying an explicit deduplication key for the `Custom`
+    /// policy. The key is only consulted while the `Custom` policy is effective for
+    /// the event type; otherwise behaviour matches `log_event`.
+    pub fn log_event_with_custom_key(
+        env: Env,
+        submitter: Address,
+        event_type: Symbol,
+        metadata: Bytes,
+        category: Option<Symbol>,
+        sub_event_type: Option<Symbol>,
+        force: bool,
+        custom_key: Option<BytesN<32>>,
+    ) -> BytesN<32> {
+        if let Some(key) = custom_key.clone() {
+            env.storage().temporary().set(&DataKey::PendingCustomDedupKey, &key);
+        }
+        let id = Self::log_event_with_hierarchy(
+            env.clone(),
+            submitter,
+            event_type,
+            metadata,
+            category,
+            sub_event_type,
+            force,
+        );
+        env.storage().temporary().remove(&DataKey::PendingCustomDedupKey);
+        id
+    }
+
+    /// Remove stale dedup index entries (content-hash, content-hash-with-timestamp,
+    /// and custom-key maps) whose recorded index no longer points at an event whose
+    /// re-computed content matches. Admin/owner-only.
+    pub fn cleanup_stale_dedup_entries(
         env: Env,
         caller: Address,
-        allocation: MineralAllocation,
+        start_index: u32,
+        batch_size: u32,
     ) -> u32 {
+        Self::require_initialized(&env);
         caller.require_auth();
-        Self::require_owner(&env, &caller);
+        Self::require_owner_or_multisig(&env, &caller);
 
-        let key = DataKey::CMAllocation(allocation.allocation_id.clone());
-        if env.storage().instance().has(&key) {
-            panic_with_error!(&env, ContractError::CMAllocationExists);
+        let total = Self::total_events(env.clone());
+        let mut cleaned: u32 = 0;
+        let mut idx = start_index;
+        let end = (start_index + batch_size).min(total);
+
+        while idx < end {
+            if let Some(event_id) = env
+                .storage()
+                .instance()
+                .get::<_, BytesN<32>>(&DataKey::EventOrder(idx))
+            {
+                if let Some(evt) = env
+                    .storage()
+                    .instance()
+                    .get::<_, Event>(&DataKey::EventData(event_id.clone()))
+                {
+                    let content_hash =
+                        Self::compute_content_hash(&env, &evt.event_type, &evt.submitter, &evt.metadata);
+                    // ContentHash map
+                    if let Some(stored_index) = env
+                        .storage()
+                        .instance()
+                        .get::<_, u32>(&DataKey::EventContentHash(content_hash.clone()))
+                    {
+                        if stored_index != idx {
+                            env.storage()
+                                .instance()
+                                .remove(&DataKey::EventContentHash(content_hash.clone()));
+                            cleaned += 1;
+                        }
+                    }
+                    // ContentHashWithTimestamp map
+                    if let Some((stored_index, _)) = env
+                        .storage()
+                        .instance()
+                        .get::<_, (u32, u64)>(&DataKey::EventContentHashWithTs(content_hash))
+                    {
+                        if stored_index != idx {
+                            env.storage()
+                                .instance()
+                                .remove(&DataKey::EventContentHashWithTs(content_hash));
+                            cleaned += 1;
+                        }
+                    }
+                }
+            }
+            idx += 1;
         }
 
-        let count: u32 = env
-            .storage()
-            .instance()
-            .get(&DataKey::CMAllocationCount)
-            .unwrap_or(0u32);
-
-        env.storage().instance().set(&key, &allocation);
-        env.storage()
-            .instance()
-            .set(&DataKey::CMAllocationCount, &(count + 1));
-
-        env.events().publish(
-            (symbol_short!("cm"), symbol_short!("alloc")),
-            (caller, allocation.allocation_id.clone(), allocation.mineral.clone()),
-        );
-
-        count
+        env.events()
+            .publish((Symbol::new(&env, "stale_dedup_cleaned"),), (cleaned,));
+        cleaned
     }
 
-    /// Retrieve a mineral allocation by allocation_id.
-    pub fn get_mineral_allocation(env: Env, allocation_id: Symbol) -> MineralAllocation {
-        env.storage()
-            .instance()
-            .get(&DataKey::CMAllocation(allocation_id.clone()))
-            .unwrap_or_else(|| panic_with_error!(&env, ContractError::CMAllocationNotFound))
-    }
+    // ═══════════════════════════════════════════════════════════════════════
+    // Archiving configuration (issue #367)
+    // ═══════════════════════════════════════════════════════════════════════
 
-    /// Return total mineral allocations recorded.
-    pub fn cm_allocation_count(env: Env) -> u32 {
-        env.storage()
-            .instance()
-            .get(&DataKey::CMAllocationCount)
-            .unwrap_or(0u32)
-    }
-
-    /// Register a smelter in the conflict minerals registry. Owner-only.
-    pub fn record_smelter(env: Env, caller: Address, smelter: Smelter) -> u32 {
+    /// Set the archiving configuration (compression + off-chain storage).
+    /// Admin/owner-only.
+    pub fn set_archive_config(env: Env, caller: Address, config: ArchiveConfig) {
+        Self::require_initialized(&env);
         caller.require_auth();
-        Self::require_owner(&env, &caller);
+        Self::require_owner_or_multisig(&env, &caller);
+        env.storage().instance().set(&DataKey::ArchiveConfig, &config);
+        env.events().publish(
+            (Symbol::new(&env, "archive"), Symbol::new(&env, "config_set")),
+            (
+                caller,
+                config.offchain_storage,
+                config.compression,
+            ),
+        );
+    }
 
-        let key = DataKey::CMSmelter(smelter.smelter_id.clone());
-        if env.storage().instance().has(&key) {
-            panic_with_error!(&env, ContractError::CMSmelterExists);
+    /// Current archiving configuration.
+    pub fn get_archive_config(env: Env) -> Option<ArchiveConfig> {
+        Self::require_initialized(&env);
+        env.storage().instance().get(&DataKey::ArchiveConfig)
+    }
+
+    // ═══════════════════════════════════════════════════════════════════════
+    // Event versioning — semantic diffs & audit trail (issue #368)
+    // ═══════════════════════════════════════════════════════════════════════
+
+    /// Structured audit trail for an event: every recorded `EventVersion`
+    /// (initial + every update/rollback), in ascending version order. The
+    /// `updated_by`/`updated_at` fields give a non-repudiable change log.
+    pub fn get_event_audit_trail(env: Env, index: u32) -> Vec<EventVersion> {
+        Self::require_initialized(&env);
+        let total = Self::total_events(env.clone());
+        if index >= total {
+            return Vec::new(&env);
         }
-
-        let count: u32 = env
+        if let Some(versions) = env
             .storage()
             .instance()
-            .get(&DataKey::CMSmelterCount)
-            .unwrap_or(0u32);
+            .get::<_, Vec<EventVersion>>(&DataKey::EventVersions(index))
+        {
+            return versions;
+        }
+        // No written history: build a single-entry trail from the current event.
+        let event_id: BytesN<32> = env.storage().instance().get(&DataKey::EventOrder(index)).unwrap();
+        let event: Event = env.storage().instance().get(&DataKey::EventData(event_id)).unwrap();
+        let mut trail = Vec::new(&env);
+        trail.push_back(EventVersion {
+            version: 0,
+            data: event.clone(),
+            updated_at: event.timestamp,
+            updated_by: event.submitter,
+        });
+        trail
+    }
+}
 
-        env.storage().instance().set(&key, &smelter);
-        env.storage()
-            .instance()
-            .set(&DataKey::CMSmelterCount, &(count + 1));
-
+    /// Attach a human-readable tag to a specific historical version (e.g.
+    /// `approved`, `superseded`). Admin/owner-only.
+    pub fn tag_event_version(env: Env, caller: Address, index: u32, version: u32, tag: Symbol) {
+        Self::require_initialized(&env);
+        caller.require_auth();
+        Self::require_owner_or_multisig(&env, &caller);
+        let total = Self::total_events(env.clone());
+        if index >= total {
+            panic_with_error!(&env, ContractError::EventDoesNotExist);
+        }
+        let trail = Self::get_event_audit_trail(env.clone(), index);
+        if version >= trail.len() as u32 {
+            panic_with_error!(&env, ContractError::InvalidVersion);
+        }
+        env.storage().instance().set(&DataKey::EventVersionTag(index, version), &tag);
         env.events().publish(
-            (symbol_short!("cm"), symbol_short!("smelter")),
-            (caller, smelter.smelter_id.clone(), smelter.mineral_type.clone()),
+            (Symbol::new(&env, "versioning"), Symbol::new(&env, "version_tagged")),
+            (caller, index, version, tag),
         );
-
-        count
     }
 
-    /// Retrieve a smelter by smelter_id.
-    pub fn get_smelter(env: Env, smelter_id: Symbol) -> Smelter {
-        env.storage()
-            .instance()
-            .get(&DataKey::CMSmelter(smelter_id.clone()))
-            .unwrap_or_else(|| panic_with_error!(&env, ContractError::CMSmelterNotFound))
+    /// Read the tag attached to a given version, if any.
+    pub fn get_event_version_tag(env: Env, index: u32, version: u32) -> Option<Symbol> {
+        Self::require_initialized(&env);
+        env.storage().instance().get(&DataKey::EventVersionTag(index, version))
     }
+}  // end impl AuditLedger
+
+    /// Semantic field-level diff between two versions of an event
+    /// (issue #368). Versions are 0-based indices into the event's audit trail.
+    pub fn get_event_diff(env: Env, index: u32, from_version: u32, to_version: u32) -> Vec<FieldChange> {
+        Self::require_initialized(&env);
+        let trail = Self::get_event_audit_trail(env.clone(), index);
+        if trail.is_empty() {
+            return Vec::new(&env);
+        }
+        if from_version >= trail.len() as u32 || to_version >= trail.len() as u32 {
+            panic_with_error!(&env, ContractError::InvalidVersion);
+        }
+        let from_data = &trail.get(from_version).unwrap().data;
+        let to_data = &trail.get(to_version).unwrap().data;
+        Self::diff_events(&env, from_data, to_data)
+    }
+
+    /// Detailed structural comparison of two versions of an event with hashes.
+    pub fn compare_event_versions_detailed(
+        env: Env,
+        index: u32,
+        from_version: u32,
+        to_version: u32,
+    ) -> VersionComparison {
+        Self::require_initialized(&env);
+        let trail = Self::get_event_audit_trail(env.clone(), index);
+        if trail.is_empty() {
+            panic_with_error!(&env, ContractError::EventDoesNotExist);
+        }
+        if from_version >= trail.len() as u32 || to_version >= trail.len() as u32 {
+            panic_with_error!(&env, ContractError::InvalidVersion);
+        }
+        let from = &trail.get(from_version).unwrap();
+        let to = &trail.get(to_version).unwrap();
+        let changes = Self::diff_events(&env, &from.data, &to.data);
+        VersionComparison {
+            index,
+            from_version,
+            to_version,
+            same: changes.is_empty(),
+            changes,
+            from_hash: from.data.event_hash.clone(),
+            to_hash: to.data.event_hash.clone(),
+        }
+    }
+
+    // ── private helpers ─────────────────────────────────────────────────────
+
+    /// Whether the leading byte marks an archived payload as compressed.
+    fn is_compressed_tag(env: &Env, payload: &Bytes) -> bool {
+        payload.len() >= 1 && payload.get(0) == Some(0x01)
+    }
+
+    /// Tag a raw payload as uncompressed (`0x00` prefix so reads can distinguish it).
+    fn tag_raw_bytes(env: &Env, payload: &Bytes) -> Bytes {
+        let mut out = Bytes::new(env);
+        out.push_back(0x00);
+        for i in 0..payload.len() {
+            out.push_back(payload.get(i).unwrap());
+        }
+        out
+    }
+
+    /// Run-length compression (mode 1) used for archived metadata.
+    ///
+    /// Encoding: first byte `0x01` = tag; then a stream of items:
+    /// - `0x01, byte, len_le16` — a run of `len` (≥ 3) copies of `byte`;
+    /// - `0x00, byte` — a single literal `byte` (escape for the tag byte);
+    /// - anything else — a literal byte.
+    fn compress_bytes(env: &Env, payload: &Bytes) -> Bytes {
+        let mut out = Bytes::new(env);
+        out.push_back(0x01);
+        let mut i: u32 = 0;
+        let n = payload.len();
+        while i < n {
+            let b = payload.get(i).unwrap();
+            let mut run: u32 = 1;
+            while i + run < n && payload.get(i + run) == Some(b) {
+                run += 1;
+            }
+            if run >= 3 {
+                out.push_back(0x01);
+                out.push_back(b);
+                out.push_back((run & 0xff) as u8);
+                out.push_back(((run >> 8) & 0xff) as u8);
+            } else {
+                for _ in 0..run {
+                    if b == 0x00 || b == 0x01 {
+                        out.push_back(0x00);
+                    }
+                    out.push_back(b);
+                }
+            }
+            i += run;
+        }
+        out
+    }
+
+    /// Reverse of `compress_bytes` / tag stripping.
+    fn expand_archived_metadata(env: &Env, payload: &Bytes) -> Bytes {
+        let mut out = Bytes::new(env);
+        if payload.len() == 0 {
+            return out;
+        }
+        let tag = payload.get(0).unwrap();
+        if tag == 0x00 {
+            // raw payload
+            for i in 1..payload.len() {
+                out.push_back(payload.get(i).unwrap());
+            }
+            return out;
+        }
+        if tag != 0x01 {
+            // unknown tag: return as-is
+            return payload.clone();
+        }
+        let mut i: u32 = 1;
+        let n = payload.len();
+        while i < n {
+            let c = payload.get(i).unwrap();
+            i += 1;
+            match c {
+                0x00 => {
+                    // escaped literal
+                    if i < n {
+                        out.push_back(payload.get(i).unwrap());
+                        i += 1;
+                    }
+                }
+                0x01 => {
+                    // run: byte, len_le16 (allowmalformed tail by stopping)
+                    if i + 3 < n {
+                        let b = payload.get(i).unwrap();
+                        let len = payload.get(i + 1).unwrap() as u32
+                            | ((payload.get(i + 2).unwrap() as u32) << 8);
+                        for _ in 0..len {
+                            out.push_back(b);
+                        }
+                        i += 3;
+                    }
+                }
+                other => {
+                    out.push_back(other);
+                }
+            }
+        }
+        out
+    }
+
+    /// Build the fully-qualified retrieval URL for an off-chain archived event:
+    /// `base_url || 64-hex-chars-of-event-id`.
+    fn build_archive_url(env: &Env, config: &ArchiveConfig, id: &BytesN<32>) -> Bytes {
+        let mut out = Bytes::new(env);
+        for i in 0..config.base_url.len() {
+            out.push_back(config.base_url.get(i).unwrap());
+        }
+        // Hex-encode the 32-byte ID (no alloc::hex dependency available in no_std).
+        const HEX: &[u8; 16] = b"0123456789abcdef";
+        for i in 0..32 {
+            let b = id.to_array()[i as usize];
+            out.push_back(HEX[((b >> 4) & 0x0f) as usize]);
+            out.push_back(HEX[(b & 0x0f) as usize]);
+        }
+        out
+    }
+
+    /// Compute the `Vec<FieldChange>` between two event snapshots.
+    fn diff_events(env: &Env, from: &Event, to: &Event) -> Vec<FieldChange> {
+        let mut changes: Vec<FieldChange> = Vec::new(env);
+        Self::push_field_change(env, &mut changes, "metadata", &bytes_field(env, &from.metadata), &bytes_field(env, &to.metadata));
+        Self::push_field_change(env, &mut changes, "event_type", &bytes_field(env, &symbol_bytes(env, &from.event_type)), &bytes_field(env, &symbol_bytes(env, &to.event_type)));
+        Self::push_field_change(env, &mut changes, "category", &bytes_field(env, &symbol_bytes(env, &from.category)), &bytes_field(env, &symbol_bytes(env, &to.category)));
+        Self::push_field_change(env, &mut changes, "submitter", &bytes_field(env, &strkey_bytes(env, &from.submitter)), &bytes_field(env, &strkey_bytes(env, &to.submitter)));
+        Self::push_field_change(env, &mut changes, "timestamp", &bytes_field(env, &Self::u64_to_bytes(env, from.timestamp)), &bytes_field(env, &Self::u64_to_bytes(env, to.timestamp)));
+        Self::push_field_change(env, &mut changes, "version", &bytes_field(env, &Self::u32_to_bytes(env, from.version)), &bytes_field(env, &Self::u32_to_bytes(env, to.version)));
+        changes
+    }
+
+    fn push_field_change(env: &Env, changes: &mut Vec<FieldChange>, field: &str, from: &Bytes, to: &Bytes) {
+        if from != to {
+            changes.push_back(FieldChange {
+                field: Symbol::new(env, field),
+                from: from.clone(),
+                to: to.clone(),
+            });
+        }
+    }
+
+    fn bytes_field(_env: &Env, b: &Bytes) -> Bytes {
+        b.clone()
+    }
+
+    fn symbol_bytes(_env: &Env, s: &Symbol) -> Bytes {
+        s.to_string().to_bytes()
+    }
+
+    fn strkey_bytes(_env: &Env, addr: &Address) -> Bytes {
+        addr.to_string().to_bytes()
+    }
+}
 
 #[cfg(test)]
 mod comprehensive_fuzz;
@@ -4828,8 +5769,17 @@ pub mod sandbox_supervision;
 pub mod sandbox_innovation;
 pub mod sandbox_graduation;
 
+// FinOps Module
+pub mod finops;
+
+#[cfg(test)]
+mod finops_tests;
+
 #[cfg(test)]
 mod supply_chain_tests;
 
 #[cfg(test)]
 mod data_retention_tests;
+
+#[cfg(test)]
+mod issue365_368_tests;

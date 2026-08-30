@@ -1,0 +1,40 @@
+# infra/k8s/service-mesh/gateway.yaml
+#
+# Istio Gateway — listens on ports 80 and 443 at the ingress gateway.
+# Port 80 redirects to HTTPS.  Port 443 terminates TLS using the
+# cert-manager-issued certificate stored in audit-ledger-api-tls.
+#
+# Issue #506 — zero-trust networking
+apiVersion: networking.istio.io/v1beta1
+kind: Gateway
+metadata:
+  name: audit-ledger-gateway
+  namespace: istio-ingress
+  labels:
+    app.kubernetes.io/part-of: audit-ledger
+spec:
+  selector:
+    istio: ingressgateway
+  servers:
+    # HTTP — redirect only
+    - port:
+        number: 80
+        name: http
+        protocol: HTTP
+      hosts:
+        - "api.audit-ledger.example"
+        - "app.audit-ledger.example"
+      tls:
+        httpsRedirect: true
+
+    # HTTPS — TLS termination at the gateway
+    - port:
+        number: 443
+        name: https
+        protocol: HTTPS
+      hosts:
+        - "api.audit-ledger.example"
+        - "app.audit-ledger.example"
+      tls:
+        mode: SIMPLE
+        credentialName: audit-ledger-api-tls   # cert-manager Secret

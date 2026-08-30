@@ -1,0 +1,43 @@
+apiVersion: runbooks.audit-ledger.io/v1
+kind: OperationalRunbook
+metadata:
+  id: RB-004-BRIDGE-FAILOVER
+  name: Cross-Chain Bridge & Relayer Automated Failover
+  version: 1.0.0
+spec:
+  type: BRIDGE_FAILOVER
+  author: Bridge Operations / Infra Team
+  description: "Leader failover from primary to standby bridge relayer with zero message loss"
+  preconditions:
+    - check: primary_relayer_stall
+      minStallSeconds: 120
+    - check: secondary_relayer_sync_lag
+      maxLagLedgers: 5
+  steps:
+    - id: 1
+      name: "Detect Stalled Relayer & Check Quorum"
+      isIdempotent: true
+      timeoutSeconds: 20
+      action: "check_heartbeat_and_backup_sync"
+    - id: 2
+      name: "Pause Primary Bridge Relayer Ingestion"
+      isIdempotent: true
+      timeoutSeconds: 25
+      action: "lock_primary_relayer_acquire_fence"
+      rollback: "unlock_primary_relayer"
+    - id: 3
+      name: "Reconcile Pending Batches & Re-sync Sequence Nonce"
+      isIdempotent: true
+      timeoutSeconds: 40
+      action: "reconcile_uncommitted_event_batches"
+    - id: 4
+      name: "Promote Secondary Relayer to Primary on Soroban Ledger"
+      isIdempotent: true
+      timeoutSeconds: 45
+      action: "soroban_execute_bridge_failover"
+      rollback: "soroban_restore_primary_relayer"
+    - id: 5
+      name: "Verify Cross-Chain State Root Attestation"
+      isIdempotent: true
+      timeoutSeconds: 30
+      action: "verify_cross_chain_state_root"

@@ -1,57 +1,21 @@
-# Gitleaks configuration for Decentralized-Audit-Transparency-Ledger
-# Docs: https://github.com/gitleaks/gitleaks?tab=readme-ov-file#configuration
-
-title = "Gitleaks config"
+title = "Audit Ledger secret scanning"
 
 [extend]
-# Use the default ruleset as the base
 useDefault = true
 
-# ── Allowlists ────────────────────────────────────────────────────────────────
-# Allowlist entries are regex patterns matched against the finding's secret value,
-# file path, or commit message.
+[[rules]]
+id = "stellar-secret-key"
+description = "Stellar secret key"
+regex = '''S[A-Z2-7]{55}'''
+tags = ["stellar", "private-key"]
 
-[[allowlists]]
-description = "Test fixtures and example values"
-regexes = [
-    # Soroban / Stellar example keys that appear in docs and tests
-    "SCZANGBA5BKPNB3PCLN4IQXNWXNX7PGZMHFQ6LAQSCFR6F",
-    "GBKGAOD2UGRHTSMZQ6ZQAVPWU3H7BCLGGF3UUQPNWRHGZ7XSCUWKMO",
-    # Generic test token patterns
-    "test[_-]?token",
-    "example[_-]?key",
-    "dummy[_-]?secret",
-    "placeholder",
-]
+[[rules]]
+id = "audit-ledger-api-token"
+description = "Audit Ledger API token"
+regex = '''(?i)audit[_-]?ledger[_-]?(api[_-]?)?token["'=: ]+[A-Za-z0-9_\-]{20,}'''
+tags = ["api", "credential"]
 
-[[allowlists]]
-description = "CI environment variable references (not actual secrets)"
-paths = [
-    '''\.env\.example$''',
-    '''docs/.*''',
-    '''README\.md$''',
-    '''CONTRIBUTING\.md$''',
-]
-regexes = [
-    '''\$\{.*\}''',      # shell/template variable placeholders
-    '''<.*>''',           # angle-bracket placeholders
-    '''your[_-].*here''', # "your_secret_here" type placeholders
-]
-
-[[allowlists]]
-description = "Cargo.lock hash fields are not secrets"
-paths = [
-    '''Cargo\.lock$''',
-]
-regexes = [
-    '''[0-9a-f]{64}''',  # SHA-256 content hashes in lockfiles
-]
-
-[[allowlists]]
-description = "package-lock.json integrity hashes"
-paths = [
-    '''package-lock\.json$''',
-]
-regexes = [
-    '''sha(256|512)-[A-Za-z0-9+/=]+''',
-]
+[allowlist]
+description = "Non-secret fixtures and documentation examples"
+paths = ['''(^|/)(node_modules|target|dist|coverage)/''', '''(^|/)\.env\.example$''']
+regexes = ['''dev-only-service-secret-change-me''']

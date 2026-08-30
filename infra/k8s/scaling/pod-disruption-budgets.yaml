@@ -1,0 +1,21 @@
+apiVersion: policy/v1
+kind: PodDisruptionBudget
+metadata:
+  name: bridge-relayer-pdb
+  namespace: audit-ledger
+spec:
+  minAvailable: 1
+  selector:
+    matchLabels:
+      app.kubernetes.io/name: bridge-relayer
+---
+apiVersion: policy/v1
+kind: PodDisruptionBudget
+metadata:
+  name: rest-api-pdb
+  namespace: audit-ledger
+spec:
+  minAvailable: 2
+  selector:
+    matchLabels:
+      app.kubernetes.io/name: rest-api

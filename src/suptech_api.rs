@@ -91,13 +91,12 @@ impl SupervisorAPI {
 
     /// Compute supervisor ID
     pub fn compute_supervisor_id(env: &Env, address: &Address) -> BytesN<32> {
-        use soroban_sdk::crypto::sha256;
-
+        
         let mut input = Bytes::new(env);
         input.append(&Bytes::from_slice(env, address.to_xdr().as_ref()));
         input.append(&Bytes::from_slice(env, b"SUPERVISOR"));
 
-        sha256(&input)
+        env.crypto().sha256(&input)
     }
 
     /// Check if supervisor has permission for operation
@@ -174,14 +173,13 @@ impl SupervisorAPI {
         executor: &Address,
         query_type: &Bytes,
     ) -> BytesN<32> {
-        use soroban_sdk::crypto::sha256;
-
+        
         let mut input = Bytes::new(env);
         input.append(&Bytes::from_slice(env, executor.to_xdr().as_ref()));
         input.append(query_type);
         input.append(&Bytes::from_slice(env, &env.ledger().timestamp().to_le_bytes()));
 
-        sha256(&input)
+        env.crypto().sha256(&input)
     }
 
     /// Create dashboard view
@@ -215,13 +213,12 @@ impl SupervisorAPI {
 
     /// Compute dashboard view ID
     pub fn compute_view_id(env: &Env, owner: &Address, name: &Bytes) -> BytesN<32> {
-        use soroban_sdk::crypto::sha256;
-
+        
         let mut input = Bytes::new(env);
         input.append(&Bytes::from_slice(env, owner.to_xdr().as_ref()));
         input.append(name);
 
-        sha256(&input)
+        env.crypto().sha256(&input)
     }
 
     /// Subscribe to alerts
@@ -249,13 +246,12 @@ impl SupervisorAPI {
 
     /// Compute alert subscription ID
     pub fn compute_alert_subscription_id(env: &Env, subscriber: &Address) -> BytesN<32> {
-        use soroban_sdk::crypto::sha256;
-
+        
         let mut input = Bytes::new(env);
         input.append(&Bytes::from_slice(env, subscriber.to_xdr().as_ref()));
         input.append(&Bytes::from_slice(env, b"ALERT_SUB"));
 
-        sha256(&input)
+        env.crypto().sha256(&input)
     }
 
     /// Deliver alert to subscriber

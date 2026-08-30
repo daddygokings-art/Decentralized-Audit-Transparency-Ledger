@@ -46,7 +46,7 @@ cd "$PROJECT_DIR"
 run_category() {
     local category="$1"
     echo "--- Running chaos category: $category ---"
-    cargo test chaos_${category} -- --nocapture
+    cargo test "chaos_${category}" -- --nocapture
     local status=$?
     if [ $status -ne 0 ]; then
         echo "FAILED: chaos category $category exited with code $status"

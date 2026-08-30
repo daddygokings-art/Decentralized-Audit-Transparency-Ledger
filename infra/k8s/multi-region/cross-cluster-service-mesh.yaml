@@ -1,0 +1,27 @@
+apiVersion: cilium.io/v2
+kind: CiliumClusterwideNetworkPolicy
+metadata:
+  name: multi-region-cross-cluster-mesh
+spec:
+  endpointSelector:
+    matchLabels:
+      app.kubernetes.io/name: audit-ledger
+  ingress:
+    - fromEndpoints:
+        - matchLabels:
+            app.kubernetes.io/name: audit-ledger
+      toPorts:
+        - ports:
+            - port: "3000"
+              protocol: TCP
+            - port: "3010"
+              protocol: TCP
+---
+apiVersion: security.istio.io/v1beta1
+kind: PeerAuthentication
+metadata:
+  name: default
+  namespace: audit-ledger
+spec:
+  mtls:
+    mode: STRICT

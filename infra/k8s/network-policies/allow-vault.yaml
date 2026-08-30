@@ -1,0 +1,127 @@
+# infra/k8s/network-policies/allow-vault.yaml
+#
+# Allow rules for the audit-ledger-secrets namespace (Vault).
+# Vault is accessed by workloads in audit-ledger for secrets injection
+# (CSI driver / Agent sidecar) and by cert-manager for PKI signing.
+#
+# Issue #506 — zero-trust networking
+
+# ── Vault ─────────────────────────────────────────────────────────────────────
+apiVersion: networking.k8s.io/v1
+kind: NetworkPolicy
+metadata:
+  name: allow-vault
+  namespace: audit-ledger-secrets
+  labels:
+    app.kubernetes.io/part-of: audit-ledger
+    app.kubernetes.io/component: vault
+spec:
+  podSelector:
+    matchLabels:
+      app.kubernetes.io/name: vault
+  policyTypes:
+    - Ingress
+    - Egress
+  ingress:
+    # Workloads (sidecar / CSI agent calls)
+    - from:
+        - namespaceSelector:
+            matchLabels:
+              kubernetes.io/metadata.name: audit-ledger
+      ports:
+        - port: 8200
+          protocol: TCP
+    # cert-manager PKI sign requests
+    - from:
+        - namespaceSelector:
+            matchLabels:
+              kubernetes.io/metadata.name: audit-ledger-certs
+      ports:
+        - port: 8200
+          protocol: TCP
+    # Prometheus scrape from monitoring namespace
+    - from:
+        - namespaceSelector:
+            matchLabels:
+              kubernetes.io/metadata.name: monitoring
+          podSelector:
+            matchLabels:
+              app.kubernetes.io/name: prometheus
+      ports:
+        - port: 8200
+          protocol: TCP
+    # Vault cluster raft replication (HA mode)
+    - from:
+        - podSelector:
+            matchLabels:
+              app.kubernetes.io/name: vault
+      ports:
+        - port: 8201
+          protocol: TCP
+  egress:
+    # Raft peer replication
+    - to:
+        - podSelector:
+            matchLabels:
+              app.kubernetes.io/name: vault
+      ports:
+        - port: 8201
+          protocol: TCP
+    - ports:
+        - port: 53
+          protocol: UDP
+        - port: 53
+          protocol: TCP
+---
+# ── cert-manager (audit-ledger-certs namespace) ───────────────────────────────
+apiVersion: networking.k8s.io/v1
+kind: NetworkPolicy
+metadata:
+  name: allow-cert-manager
+  namespace: audit-ledger-certs
+  labels:
+    app.kubernetes.io/part-of: audit-ledger
+    app.kubernetes.io/component: cert-manager
+spec:
+  podSelector:
+    matchLabels:
+      app.kubernetes.io/instance: cert-manager
+  policyTypes:
+    - Ingress
+    - Egress
+  ingress:
+    # Webhook admission controller — called by the kube-apiserver
+    - from:
+        - namespaceSelector: {}   # kube-apiserver can be in any namespace
+      ports:
+        - port: 9443
+          protocol: TCP
+  egress:
+    # Vault PKI (issue / sign certificates)
+    - to:
+        - namespaceSelector:
+            matchLabels:
+              kubernetes.io/metadata.name: audit-ledger-secrets
+          podSelector:
+            matchLabels:
+              app.kubernetes.io/name: vault
+      ports:
+        - port: 8200
+          protocol: TCP
+    # Let's Encrypt ACME HTTP-01 / DNS-01
+    - ports:
+        - port: 80
+          protocol: TCP
+        - port: 443
+          protocol: TCP
+    # Kubernetes API (CRD updates, Secret writes)
+    - ports:
+        - port: 443
+          protocol: TCP
+        - port: 6443
+          protocol: TCP
+    - ports:
+        - port: 53
+          protocol: UDP
+        - port: 53
+          protocol: TCP

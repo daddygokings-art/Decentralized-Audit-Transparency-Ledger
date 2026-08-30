@@ -4,6 +4,7 @@
 # Not meant to be executed directly.
 
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+export SCRIPT_DIR
 LOG_FILE="${LOG_FILE:-rotation-$(date +%Y%m%d-%H%M%S).log}"
 STATE_DIR="${STATE_DIR:-/var/lib/audit-ledger/rotation-state}"
 

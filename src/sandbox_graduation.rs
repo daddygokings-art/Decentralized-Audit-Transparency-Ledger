@@ -82,13 +82,12 @@ impl GraduationManager {
 
     /// Compute assessment ID
     pub fn compute_assessment_id(env: &Env, participant_id: &BytesN<32>) -> BytesN<32> {
-        use soroban_sdk::crypto::sha256;
-
+        
         let mut input = Bytes::new(env);
         input.append(&Bytes::from_slice(env, participant_id.as_ref()));
         input.append(&Bytes::from_slice(env, b"GRADUATION"));
 
-        sha256(&input)
+        env.crypto().sha256(&input)
     }
 
     /// Evaluate graduation eligibility
@@ -109,7 +108,7 @@ impl GraduationManager {
             true
         };
 
-        let financial_ok = if criteria.financial_health_assessment_required {
+        let financial_ok = if criteria.financial_health_required {
             assessment.financial_health_passed
         } else {
             true

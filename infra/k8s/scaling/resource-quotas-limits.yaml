@@ -1,0 +1,34 @@
+apiVersion: v1
+kind: ResourceQuota
+metadata:
+  name: audit-ledger-quota
+  namespace: audit-ledger
+spec:
+  hard:
+    requests.cpu: "16"
+    requests.memory: "32Gi"
+    limits.cpu: "32"
+    limits.memory: "64Gi"
+    pods: "50"
+    services: "20"
+---
+apiVersion: v1
+kind: LimitRange
+metadata:
+  name: audit-ledger-limits
+  namespace: audit-ledger
+spec:
+  limits:
+    - default:
+        cpu: "1000m"
+        memory: "1024Mi"
+      defaultRequest:
+        cpu: "100m"
+        memory: "128Mi"
+      max:
+        cpu: "4000m"
+        memory: "8192Mi"
+      min:
+        cpu: "50m"
+        memory: "64Mi"
+      type: Container
