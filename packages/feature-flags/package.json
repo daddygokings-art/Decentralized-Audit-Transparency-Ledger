@@ -1,0 +1,32 @@
+{
+  "name": "@auditledger/feature-flags",
+  "version": "1.0.0",
+  "description": "Progressive delivery, LaunchDarkly/OpenFeature flags, canary deployments, and emergency kill switches for AuditLedger",
+  "main": "dist/index.js",
+  "types": "dist/index.d.ts",
+  "scripts": {
+    "build": "tsc",
+    "test": "jest"
+  },
+  "dependencies": {
+    "@openfeature/server-sdk": "^1.14.0",
+    "ioredis": "^5.4.1",
+    "murmurhash3js": "^3.0.1",
+    "prom-client": "^15.1.3"
+  },
+  "devDependencies": {
+    "@types/node": "^20.14.0",
+    "typescript": "^5.4.5"
+  },
+  "keywords": [
+    "feature-flags",
+    "launchdarkly",
+    "progressive-delivery",
+    "canary",
+    "experimentation",
+    "kill-switch",
+    "soroban"
+  ],
+  "author": "AuditLedger Contributors",
+  "license": "MIT"
+}
