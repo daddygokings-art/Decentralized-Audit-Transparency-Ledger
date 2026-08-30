@@ -1,0 +1,135 @@
+apiVersion: kyverno.io/v1
+kind: ClusterPolicy
+metadata:
+  name: audit-ledger-verify-images
+  annotations:
+    policies.kyverno.io/title: Verify AuditLedger images
+    policies.kyverno.io/category: Supply Chain Security
+spec:
+  validationFailureAction: Enforce
+  background: false
+  webhookConfiguration:
+    failurePolicy: Fail
+  rules:
+    - name: verify-audit-ledger-images
+      match:
+        any:
+          - resources:
+              kinds:
+                - Pod
+              namespaces:
+                - audit-ledger
+      verifyImages:
+        - imageReferences:
+            - ghcr.io/daddygokings-art/audit-ledger-*
+          type: Cosign
+          mutateDigest: true
+          verifyPatches: true
+          attestors:
+            - entries:
+                - keyless:
+                    issuer: https://token.actions.githubusercontent.com
+                    subjectRegExp: https://github.com/daddygokings-art/Decentralized-Audit-Transparency-Ledger/.github/workflows/.*@refs/heads/master
+                    rekor:
+                      url: https://rekor.sigstore.dev
+---
+apiVersion: kyverno.io/v1
+kind: ClusterPolicy
+metadata:
+  name: audit-ledger-pod-baseline
+  annotations:
+    policies.kyverno.io/title: Enforce AuditLedger pod baseline
+    policies.kyverno.io/category: Pod Security
+spec:
+  validationFailureAction: Enforce
+  background: true
+  webhookConfiguration:
+    failurePolicy: Fail
+  rules:
+    - name: require-workload-labels
+      match:
+        any:
+          - resources:
+              kinds:
+                - Pod
+              namespaces:
+                - audit-ledger
+      validate:
+        message: AuditLedger pods require app and component labels.
+        pattern:
+          metadata:
+            labels:
+              app.kubernetes.io/name: "?*"
+              app.kubernetes.io/component: "?*"
+    - name: require-resource-bounds
+      match:
+        any:
+          - resources:
+              kinds:
+                - Pod
+              namespaces:
+                - audit-ledger
+      validate:
+        message: Every container must declare CPU and memory requests and limits.
+        foreach:
+          - list: request.object.spec.containers[]
+            pattern:
+              resources:
+                requests:
+                  cpu: "?*"
+                  memory: "?*"
+                limits:
+                  cpu: "?*"
+                  memory: "?*"
+    - name: require-restricted-security-context
+      match:
+        any:
+          - resources:
+              kinds:
+                - Pod
+              namespaces:
+                - audit-ledger
+      validate:
+        message: Pods must run as non-root with a read-only root filesystem and drop capabilities.
+        pattern:
+          spec:
+            securityContext:
+              runAsNonRoot: true
+            containers:
+              - securityContext:
+                  allowPrivilegeEscalation: false
+                  readOnlyRootFilesystem: true
+                  capabilities:
+                    drop:
+                      - ALL
+---
+apiVersion: kyverno.io/v1
+kind: ClusterPolicy
+metadata:
+  name: audit-ledger-require-network-policy
+  annotations:
+    policies.kyverno.io/title: Require AuditLedger network policy
+    policies.kyverno.io/category: Network Security
+spec:
+  validationFailureAction: Enforce
+  background: true
+  webhookConfiguration:
+    failurePolicy: Fail
+  rules:
+    - name: require-network-policy
+      match:
+        any:
+          - resources:
+              kinds:
+                - Deployment
+                - StatefulSet
+                - DaemonSet
+              namespaces:
+                - audit-ledger
+      validate:
+        message: AuditLedger workloads must be protected by a NetworkPolicy.
+        deny:
+          conditions:
+            - key: "{{ request.object.metadata.labels['networking.audit-ledger.io/policy'] || '' }}"
+              operator: NotEquals
+              value: enforced
