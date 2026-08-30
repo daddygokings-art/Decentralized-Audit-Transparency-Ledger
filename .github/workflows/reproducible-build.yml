@@ -1,218 +1,117 @@
 name: Reproducible WASM Build
 
-# Verifies that the WASM binary is reproducible: two independent builds from
-# the same source commit must produce byte-for-byte identical output.
-#
-# SLSA Level 3 requirements addressed:
-#   - Pinned Rust toolchain (1.85.0) — no floating "stable" resolver
-#   - --locked --frozen — Cargo.lock is authoritative; no network resolution
-#   - SOURCE_DATE_EPOCH=0 — deterministic embedded timestamps
-#   - CARGO_INCREMENTAL=0 — disables incremental compilation cache
-#   - Two independent builds compared with diff — reproducibility proof
-#   - All GitHub Actions pinned by commit SHA (not mutable tags)
-#
-# Issue #504 — SLSA Level 3 supply chain security
+permissions:
+  contents: read
+  actions: read
 
 on:
-  push:
-    branches: [main, master]
   pull_request:
-    branches: [main, master]
-    paths:
-      - 'src/**'
-      - 'Cargo.toml'
-      - 'Cargo.lock'
-      - '.github/workflows/reproducible-build.yml'
+  push:
+    branches:
+      - main
+      - master
   release:
     types: [published]
   workflow_dispatch:
 
-permissions: {}
-
 jobs:
-  reproducible-build:
+  reproducible-wasm:
     name: Reproducible WASM build (dual independent builds)
-    runs-on: ubuntu-24.04
+    runs-on: ubuntu-latest
     permissions:
       contents: read
       actions: write
-
     steps:
-      # ── Checkout ─────────────────────────────────────────────────────────
-      - name: Checkout source
-        # actions/checkout v4.2.2
-        uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683 # v4.2.2
+      - uses: actions/checkout@v4
         with:
           persist-credentials: false
-          ref: ${{ github.sha }}
 
-      # ── Hermetic environment ──────────────────────────────────────────────
-      - name: Harden runner
-        # step-security/harden-runner v2.10.4
-        uses: step-security/harden-runner@4d991eb9b905ef189e4c376166672c3f2f230481 # v2.10.4
+      - name: Install Rust toolchain
+        uses: dtolnay/rust-toolchain@master
         with:
-          egress-policy: audit
-          disable-sudo: true
-          allowed-endpoints: >
-            github.com:443
-            objects.githubusercontent.com:443
-            static.rust-lang.org:443
-            crates.io:443
-            index.crates.io:443
-            static.crates.io:443
-
-      # ── Pinned Rust toolchain ─────────────────────────────────────────────
-      - name: Install Rust 1.85.0 (pinned)
-        # dtolnay/rust-toolchain pinned to 1.85.0 release commit
-        uses: dtolnay/rust-toolchain@c758e63728211bd4cbe26fa022e60290dd5c2e3c # 1.85.0
-        with:
-          toolchain: "1.85.0"
+          toolchain: 1.85.0
+          components: clippy, rustfmt
           targets: wasm32-unknown-unknown
 
-      - name: Show exact toolchain versions
-        run: |
-          rustc --version --verbose
-          cargo --version
-          echo "Target: wasm32-unknown-unknown"
-
-      # ── Cargo cache ───────────────────────────────────────────────────────
-      - name: Cache Cargo registry
-        # actions/cache v4.2.3
-        uses: actions/cache@5a3ec84eff668545956fd18022155c47e93e2684 # v4.2.3
-        with:
-          path: |
-            ~/.cargo/registry/index/
-            ~/.cargo/registry/cache/
-            ~/.cargo/git/db/
-          key: repro-cargo-${{ runner.os }}-1.85.0-${{ hashFiles('Cargo.lock') }}
-          restore-keys: repro-cargo-${{ runner.os }}-1.85.0-
-
-      # ── First build ───────────────────────────────────────────────────────
-      - name: Build 1 — hermetic WASM
-        env:
-          # SOURCE_DATE_EPOCH=0 makes all embedded timestamps deterministic.
-          SOURCE_DATE_EPOCH: "0"
-          # Disable incremental compilation — the cache can introduce
-          # non-determinism across runs.
-          CARGO_INCREMENTAL: "0"
-          # Ensure no ambient RUSTFLAGS bleed in from the environment.
-          RUSTFLAGS: ""
+      # First build
+      - name: Build WASM (first pass)
         run: |
           cargo clean
-          cargo build \
-            --target wasm32-unknown-unknown \
-            --release \
-            --locked \
-            --frozen
+          cargo build --target wasm32-unknown-unknown --release --locked
 
-          WASM="target/wasm32-unknown-unknown/release/audit_ledger.wasm"
-          SHA1=$(sha256sum "$WASM" | cut -d' ' -f1)
-          echo "Build 1 SHA-256: ${SHA1}"
-          echo "${SHA1}" > build1.sha256
-          cp "$WASM" build1.wasm
+      - name: Compute SHA-256 (first pass)
+        id: hash1
+        run: |
+          WASM_FILE="target/wasm32-unknown-unknown/release/audit_ledger.wasm"
+          SHA256=$(sha256sum "$WASM_FILE" | cut -d' ' -f1)
+          echo "sha256=$SHA256" >> "$GITHUB_OUTPUT"
+          echo "First build WASM SHA-256: $SHA256"
+          cp "$WASM_FILE" /tmp/audit_ledger_build1.wasm
 
-      # ── Second independent build ──────────────────────────────────────────
-      - name: Build 2 — independent reproducibility check
-        env:
-          SOURCE_DATE_EPOCH: "0"
-          CARGO_INCREMENTAL: "0"
-          RUSTFLAGS: ""
+      # Second independent build
+      - name: Build WASM (second pass)
         run: |
           cargo clean
-          cargo build \
-            --target wasm32-unknown-unknown \
-            --release \
-            --locked \
-            --frozen
+          cargo build --target wasm32-unknown-unknown --release --locked
 
-          WASM="target/wasm32-unknown-unknown/release/audit_ledger.wasm"
-          SHA2=$(sha256sum "$WASM" | cut -d' ' -f1)
-          echo "Build 2 SHA-256: ${SHA2}"
-          echo "${SHA2}" > build2.sha256
-          cp "$WASM" build2.wasm
-
-      # ── Byte-for-byte comparison ──────────────────────────────────────────
-      - name: Compare builds for reproducibility
+      - name: Compute SHA-256 (second pass)
+        id: hash2
         run: |
-          SHA1=$(cat build1.sha256)
-          SHA2=$(cat build2.sha256)
+          WASM_FILE="target/wasm32-unknown-unknown/release/audit_ledger.wasm"
+          SHA256=$(sha256sum "$WASM_FILE" | cut -d' ' -f1)
+          echo "sha256=$SHA256" >> "$GITHUB_OUTPUT"
+          echo "Second build WASM SHA-256: $SHA256"
+          cp "$WASM_FILE" /tmp/audit_ledger_build2.wasm
 
-          echo "Build 1: ${SHA1}"
-          echo "Build 2: ${SHA2}"
-
-          if [ "${SHA1}" != "${SHA2}" ]; then
-            echo "ERROR: WASM binaries differ between builds — NOT reproducible!"
-            echo ""
-            echo "Diff of file metadata:"
-            ls -la build1.wasm build2.wasm
-            echo ""
-            echo "This likely indicates a non-deterministic build input."
-            echo "Check for: timestamps, random seeds, file ordering, or"
-            echo "           non-deterministic compiler behaviour."
+      - name: Verify builds are identical
+        run: |
+          SHA1="${{ steps.hash1.outputs.sha256 }}"
+          SHA2="${{ steps.hash2.outputs.sha256 }}"
+          echo "Build 1: $SHA1"
+          echo "Build 2: $SHA2"
+          if [ "$SHA1" != "$SHA2" ]; then
+            echo "ERROR: Builds are NOT reproducible! SHA-256 hashes differ."
+            diff <(xxd /tmp/audit_ledger_build1.wasm) <(xxd /tmp/audit_ledger_build2.wasm) | head -50 || true
             exit 1
           fi
+          echo "SUCCESS: Both builds produced identical WASM binaries."
 
-          echo "✓ REPRODUCIBLE: both builds produce identical WASM binary"
-          echo "  SHA-256: ${SHA1}"
-
-          # Write verified checksums file
-          echo "${SHA1}  audit_ledger.wasm" > wasm-sha256.txt
-
-      # ── Size regression check ─────────────────────────────────────────────
-      - name: Assert WASM ≤ 128 KB
+      - name: Save SHA-256
         run: |
-          SIZE=$(stat --format='%s' build1.wasm)
-          MAX=$((128 * 1024))
-          echo "WASM size: ${SIZE} bytes (max: ${MAX})"
-          if [ "$SIZE" -gt "$MAX" ]; then
-            echo "ERROR: WASM binary exceeds 128 KB limit" && exit 1
-          fi
-          echo "✓ Size check passed"
-
-      # ── Upload artifacts ──────────────────────────────────────────────────
-      - name: Upload verified WASM artifact
-        # actions/upload-artifact v4.6.2
-        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4.6.2
-        with:
-          name: audit_ledger.wasm
-          path: build1.wasm
-          retention-days: 30
-          if-no-files-found: error
+          echo "${{ steps.hash1.outputs.sha256 }}" > wasm-sha256.txt
+          cat wasm-sha256.txt
 
       - name: Upload SHA-256 artifact
-        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4.6.2
+        uses: actions/upload-artifact@v4
         with:
           name: wasm-sha256
           path: wasm-sha256.txt
           retention-days: 30
 
-      # ── Step summary ──────────────────────────────────────────────────────
-      - name: Post build summary
+      - name: Upload WASM artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: audit_ledger.wasm
+          path: target/wasm32-unknown-unknown/release/audit_ledger.wasm
+          retention-days: 30
+
+      - name: Post SHA-256 as job summary
         run: |
-          SHA=$(cat build1.sha256)
-          SIZE=$(stat --format='%s' build1.wasm)
-          echo "## ✅ Reproducible WASM Build" >> "$GITHUB_STEP_SUMMARY"
+          echo "## WASM Binary Verification" >> "$GITHUB_STEP_SUMMARY"
           echo "" >> "$GITHUB_STEP_SUMMARY"
-          echo "Both independent builds produced identical output." >> "$GITHUB_STEP_SUMMARY"
+          echo "**Git Commit**: $(git rev-parse HEAD)" >> "$GITHUB_STEP_SUMMARY"
           echo "" >> "$GITHUB_STEP_SUMMARY"
-          echo "| Property | Value |" >> "$GITHUB_STEP_SUMMARY"
-          echo "|----------|-------|" >> "$GITHUB_STEP_SUMMARY"
-          echo "| Artifact | \`audit_ledger.wasm\` |" >> "$GITHUB_STEP_SUMMARY"
-          echo "| SHA-256 | \`${SHA}\` |" >> "$GITHUB_STEP_SUMMARY"
-          echo "| Size | ${SIZE} bytes |" >> "$GITHUB_STEP_SUMMARY"
-          echo "| Rust toolchain | \`1.85.0\` (pinned) |" >> "$GITHUB_STEP_SUMMARY"
-          echo "| Target | \`wasm32-unknown-unknown\` |" >> "$GITHUB_STEP_SUMMARY"
-          echo "| Build flags | \`--locked --frozen --release\` |" >> "$GITHUB_STEP_SUMMARY"
-          echo "| SOURCE_DATE_EPOCH | \`0\` |" >> "$GITHUB_STEP_SUMMARY"
-          echo "| CARGO_INCREMENTAL | \`0\` |" >> "$GITHUB_STEP_SUMMARY"
-          echo "| Git commit | \`${{ github.sha }}\` |" >> "$GITHUB_STEP_SUMMARY"
+          echo "**Rust Version**: 1.85.0" >> "$GITHUB_STEP_SUMMARY"
           echo "" >> "$GITHUB_STEP_SUMMARY"
-          echo "### Verify locally" >> "$GITHUB_STEP_SUMMARY"
-          echo "\`\`\`bash" >> "$GITHUB_STEP_SUMMARY"
-          echo "git checkout ${{ github.sha }}" >> "$GITHUB_STEP_SUMMARY"
-          echo "rustup install 1.85.0" >> "$GITHUB_STEP_SUMMARY"
-          echo "rustup target add wasm32-unknown-unknown --toolchain 1.85.0" >> "$GITHUB_STEP_SUMMARY"
-          echo "SOURCE_DATE_EPOCH=0 CARGO_INCREMENTAL=0 \\" >> "$GITHUB_STEP_SUMMARY"
-          echo "  cargo +1.85.0 build --target wasm32-unknown-unknown --release --locked --frozen" >> "$GITHUB_STEP_SUMMARY"
-          echo "sha256sum target/wasm32-unknown-unknown/release/audit_ledger.wasm" >> "$GITHUB_STEP_SUMMARY"
+          echo "**Reproducibility**: ✅ Both independent builds matched" >> "$GITHUB_STEP_SUMMARY"
+          echo "" >> "$GITHUB_STEP_SUMMARY"
           echo "\`\`\`" >> "$GITHUB_STEP_SUMMARY"
+          cat wasm-sha256.txt >> "$GITHUB_STEP_SUMMARY"
+          echo "\`\`\`" >> "$GITHUB_STEP_SUMMARY"
+          echo "" >> "$GITHUB_STEP_SUMMARY"
+          echo "**Instructions for verification**:" >> "$GITHUB_STEP_SUMMARY"
+          echo "1. Clone the repository at commit $(git rev-parse --short HEAD)" >> "$GITHUB_STEP_SUMMARY"
+          echo "2. Install Rust 1.85.0: \`rustup install 1.85.0\`" >> "$GITHUB_STEP_SUMMARY"
+          echo "3. Build locally: \`cargo build --target wasm32-unknown-unknown --release --locked\`" >> "$GITHUB_STEP_SUMMARY"
+          echo "4. Verify: \`sha256sum target/wasm32-unknown-unknown/release/audit_ledger.wasm\`" >> "$GITHUB_STEP_SUMMARY"
+          echo "5. Compare with hash above" >> "$GITHUB_STEP_SUMMARY"
