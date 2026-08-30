@@ -1,0 +1,68 @@
+groups:
+  - name: contract_event_incidents
+    rules:
+      - alert: BridgeRelayerHalted
+        expr: bridge_relayer_processed_total == 0 and bridge_relayer_backlog > 500
+        for: 2m
+        labels:
+          severity: critical
+          incident_severity: SEV-1
+          subsystem: bridge-relayer
+        annotations:
+          summary: "Bridge relayer has halted with severe event backlog"
+          description: "Relayer is stalled with {{ $value }} pending unverified contract events."
+
+      - alert: HighEventDropRate
+        expr: rate(contract_events_dropped_total[5m]) > 5
+        for: 1m
+        labels:
+          severity: critical
+          incident_severity: SEV-1
+          subsystem: contract-ingestion
+        annotations:
+          summary: "High contract event drop rate"
+          description: "Events are dropping at {{ $value | printf \"%.2f\" }} drops/sec."
+
+      - alert: LedgerIntegrityVerificationFailure
+        expr: rate(ledger_tamper_evidence_failures_total[5m]) > 0
+        for: 30s
+        labels:
+          severity: critical
+          incident_severity: SEV-1
+          subsystem: consensus-integrity
+        annotations:
+          summary: "Cryptographic hash chain or state root mismatch"
+          description: "Tamper evidence verification failure detected on chain."
+
+      - alert: HighGasConsumptionSpike
+        expr: rate(stellar_contract_resource_fee_stroops[5m]) > 10000000
+        for: 3m
+        labels:
+          severity: warning
+          incident_severity: SEV-2
+          subsystem: soroban-engine
+        annotations:
+          summary: "Contract execution gas / fee spike detected"
+          description: "Resource fee consumption is unusually high ({{ $value }} stroops/s)."
+
+      - alert: RelayerLatencyDegraded
+        expr: histogram_quantile(0.99, sum(rate(bridge_relayer_latency_seconds_bucket[5m])) by (le)) > 15
+        for: 5m
+        labels:
+          severity: warning
+          incident_severity: SEV-2
+          subsystem: bridge-relayer
+        annotations:
+          summary: "P99 relayer delivery latency exceeds 15 seconds"
+          description: "P99 latency is currently {{ $value | printf \"%.2f\" }}s."
+
+      - alert: OnCallUnacknowledgedIncident
+        expr: incident_manager_unacknowledged_duration_seconds > 600
+        for: 1m
+        labels:
+          severity: critical
+          incident_severity: SEV-1
+          subsystem: on-call
+        annotations:
+          summary: "Incident has been unacknowledged for over 10 minutes"
+          description: "Auto-escalating incident to Tier 2."
