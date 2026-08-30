@@ -1,0 +1,7 @@
+# Copy to .npmrc for local development. CI supplies NPM_PRIVATE_REGISTRY_URL
+# when the private @audit-ledger scope is enabled.
+registry=https://registry.npmjs.org/
+@audit-ledger:registry=${NPM_PRIVATE_REGISTRY_URL}
+always-auth=true
+package-lock=true
+ignore-scripts=true
