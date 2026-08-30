@@ -43,6 +43,9 @@ pub mod esg_reporting;
 // Data retention, legal hold, GDPR erasure, and the immutable operational audit log.
 pub mod data_retention;
 
+// Operational runbook automation, validation, and execution auditing.
+pub mod runbook_automation;
+
 // Incident management, on-call rotations, escalation policies, and postmortems.
 pub mod incident_management;
 

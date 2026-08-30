@@ -1,0 +1,38 @@
+apiVersion: runbooks.audit-ledger.io/v1
+kind: OperationalRunbook
+metadata:
+  id: RB-001-CONTRACT-PAUSE
+  name: Emergency Contract Pause & Ingestion Freeze
+  version: 1.0.0
+spec:
+  type: CONTRACT_PAUSE
+  author: SecOps / Ledger Operations
+  description: "Emergency circuit-breaker to halt all new event ingestion upon anomaly detection"
+  preconditions:
+    - check: operator_governance_role
+      expected: "ADMIN | MULTISIG_SIGNER"
+    - check: rpc_health
+      expected: "HEALTHY"
+  steps:
+    - id: 1
+      name: "Pre-flight Anomaly & Auth Check"
+      isIdempotent: true
+      timeoutSeconds: 15
+      action: "verify_governance_authorization"
+    - id: 2
+      name: "Drain and Buffer In-flight Relayer Events"
+      isIdempotent: true
+      timeoutSeconds: 30
+      action: "switch_relayer_buffer_mode_queued"
+      rollback: "switch_relayer_buffer_mode_normal"
+    - id: 3
+      name: "Invoke On-Chain Pause Transaction"
+      isIdempotent: true
+      timeoutSeconds: 45
+      action: "soroban_contract_pause"
+      rollback: "soroban_contract_unpause"
+    - id: 4
+      name: "Verify Paused State & Broadcast Alert"
+      isIdempotent: true
+      timeoutSeconds: 20
+      action: "query_and_broadcast_pause"
