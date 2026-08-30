@@ -1,0 +1,63 @@
+{
+  "consumer": {
+    "name": "AuditLedgerSDK"
+  },
+  "provider": {
+    "name": "AuditLedgerRestAPI"
+  },
+  "interactions": [
+    {
+      "description": "a request to query contract events by type",
+      "providerState": "events exist in the ledger",
+      "request": {
+        "method": "GET",
+        "path": "/events/type/anti_corruption"
+      },
+      "response": {
+        "status": 200,
+        "headers": {
+          "Content-Type": "application/json; charset=utf-8"
+        },
+        "body": {
+          "type": "anti_corruption",
+          "events": [
+            {
+              "index": 0,
+              "contract_id": "CA3D5KRYMCMUZ5AFQIBIIYA5T3W6U6R6N2P7Z5K4A5M7X5SLLM",
+              "topic": "anti_corruption",
+              "payload": {
+                "action": "incident_reported",
+                "severity": "CRITICAL"
+              },
+              "timestamp": "2026-08-28T10:00:00Z"
+            }
+          ],
+          "count": 1
+        }
+      }
+    },
+    {
+      "description": "a request for readiness probe",
+      "providerState": "system is healthy and operational",
+      "request": {
+        "method": "GET",
+        "path": "/readyz"
+      },
+      "response": {
+        "status": 200,
+        "headers": {
+          "Content-Type": "application/json; charset=utf-8"
+        },
+        "body": {
+          "status": "ready",
+          "database": "connected"
+        }
+      }
+    }
+  ],
+  "metadata": {
+    "pactSpecification": {
+      "version": "2.0.0"
+    }
+  }
+}

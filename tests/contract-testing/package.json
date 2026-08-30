@@ -1,0 +1,38 @@
+{
+  "name": "@audit-ledger/contract-testing",
+  "version": "1.0.0",
+  "description": "Consumer-Driven API Contract Testing with Pact for Decentralized Audit Ledger",
+  "main": "dist/index.js",
+  "scripts": {
+    "build": "tsc",
+    "test:consumers": "ts-node consumers/run-consumers.ts",
+    "test:provider": "ts-node provider/verify-provider.ts",
+    "test:all": "npm run test:consumers && npm run test:provider",
+    "pact:publish": "ts-node scripts/publish-pacts.ts",
+    "pact:can-i-deploy": "ts-node scripts/can-i-deploy.ts",
+    "pact:record-deployment": "ts-node scripts/record-deployment.ts"
+  },
+  "dependencies": {
+    "@pact-foundation/pact": "^12.5.1",
+    "axios": "^1.6.8",
+    "cors": "^2.8.5",
+    "dotenv": "^16.4.5",
+    "express": "^4.19.2"
+  },
+  "devDependencies": {
+    "@types/cors": "^2.8.17",
+    "@types/express": "^4.17.21",
+    "@types/node": "^20.11.0",
+    "ts-node": "^10.9.2",
+    "typescript": "^5.3.3"
+  },
+  "keywords": [
+    "pact",
+    "contract-testing",
+    "cdc",
+    "consumer-driven-contracts",
+    "api-testing",
+    "pact-broker"
+  ],
+  "license": "Apache-2.0"
+}

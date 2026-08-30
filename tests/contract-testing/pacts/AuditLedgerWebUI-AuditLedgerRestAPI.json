@@ -1,0 +1,124 @@
+{
+  "consumer": {
+    "name": "AuditLedgerWebUI"
+  },
+  "provider": {
+    "name": "AuditLedgerRestAPI"
+  },
+  "interactions": [
+    {
+      "description": "a request to get the health status of the API",
+      "providerState": "system is healthy and operational",
+      "request": {
+        "method": "GET",
+        "path": "/healthz"
+      },
+      "response": {
+        "status": 200,
+        "headers": {
+          "Content-Type": "application/json; charset=utf-8"
+        },
+        "body": {
+          "status": "ok",
+          "version": "1.0.0"
+        }
+      }
+    },
+    {
+      "description": "a request to fetch paginated contract events",
+      "providerState": "events exist in the ledger",
+      "request": {
+        "method": "GET",
+        "path": "/events",
+        "query": "limit=10"
+      },
+      "response": {
+        "status": 200,
+        "headers": {
+          "Content-Type": "application/json; charset=utf-8"
+        },
+        "body": {
+          "events": [
+            {
+              "index": 0,
+              "contract_id": "CA3D5KRYMCMUZ5AFQIBIIYA5T3W6U6R6N2P7Z5K4A5M7X5SLLM",
+              "topic": "anti_corruption",
+              "payload": {
+                "action": "incident_reported",
+                "severity": "CRITICAL"
+              },
+              "timestamp": "2026-08-28T10:00:00Z"
+            }
+          ],
+          "total": 1,
+          "has_more": false
+        }
+      }
+    },
+    {
+      "description": "a request to fetch a contract event by index",
+      "providerState": "event with ID 0 exists",
+      "request": {
+        "method": "GET",
+        "path": "/events/0"
+      },
+      "response": {
+        "status": 200,
+        "headers": {
+          "Content-Type": "application/json; charset=utf-8"
+        },
+        "body": {
+          "index": 0,
+          "contract_id": "CA3D5KRYMCMUZ5AFQIBIIYA5T3W6U6R6N2P7Z5K4A5M7X5SLLM",
+          "topic": "anti_corruption",
+          "payload": {
+            "action": "incident_reported",
+            "severity": "CRITICAL"
+          },
+          "timestamp": "2026-08-28T10:00:00Z"
+        }
+      }
+    },
+    {
+      "description": "a request for a non-existent contract event",
+      "providerState": "no events match query criteria",
+      "request": {
+        "method": "GET",
+        "path": "/events/999999"
+      },
+      "response": {
+        "status": 404,
+        "headers": {
+          "Content-Type": "application/json; charset=utf-8"
+        },
+        "body": {
+          "error": "Event not found"
+        }
+      }
+    },
+    {
+      "description": "a request to fetch ledger statistics",
+      "providerState": "events exist in the ledger",
+      "request": {
+        "method": "GET",
+        "path": "/stats"
+      },
+      "response": {
+        "status": 200,
+        "headers": {
+          "Content-Type": "application/json; charset=utf-8"
+        },
+        "body": {
+          "total_events": 1,
+          "active_contracts": 1,
+          "uptime_seconds": 3600
+        }
+      }
+    }
+  ],
+  "metadata": {
+    "pactSpecification": {
+      "version": "2.0.0"
+    }
+  }
+}
