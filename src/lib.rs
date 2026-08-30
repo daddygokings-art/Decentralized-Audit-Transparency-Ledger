@@ -43,6 +43,9 @@ pub mod esg_reporting;
 // Data retention, legal hold, GDPR erasure, and the immutable operational audit log.
 pub mod data_retention;
 
+// Predictive capacity planning, ML forecasting, and auto-scaling.
+pub mod capacity_planning;
+
 // Operational runbook automation, validation, and execution auditing.
 pub mod runbook_automation;
 
