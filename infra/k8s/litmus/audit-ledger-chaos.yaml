@@ -1,0 +1,171 @@
+apiVersion: v1
+kind: Namespace
+metadata:
+  name: litmus
+  labels:
+    app.kubernetes.io/part-of: audit-ledger
+    audit-ledger.io/purpose: chaos-engineering
+---
+apiVersion: litmuschaos.io/v1alpha1
+kind: ChaosEngine
+metadata:
+  name: audit-ledger-chaos-engine
+  namespace: litmus
+spec:
+  appinfo:
+    appkind: deployment
+    applabel: "app.kubernetes.io/part-of=audit-ledger"
+    appns: audit-ledger
+  chaosServiceAccount: litmus-admin
+  experiments:
+    - name: pod-delete
+      spec:
+        components:
+          env:
+            - name: TOTAL_CHAOS_DURATION
+              value: '60'
+            - name: CHAOS_INTERVAL
+              value: '30'
+            - name: FORCE
+              value: 'false'
+    - name: pod-network-chaos
+      spec:
+        components:
+          env:
+            - name: TOTAL_CHAOS_DURATION
+              value: '120'
+            - name: NETWORK_INTERFACE
+              value: 'eth0'
+            - name: NETWORK_PACKET_LOSS_PERCENTAGE
+              value: '50'
+            - name: CHAOS_INTERVAL
+              value: '30'
+    - name: pod-cpu-hog
+      spec:
+        components:
+          env:
+            - name: TOTAL_CHAOS_DURATION
+              value: '120'
+            - name: CPU_CORES
+              value: '1'
+            - name: CHAOS_INTERVAL
+              value: '30'
+    - name: pod-memory-hog
+      spec:
+        components:
+          env:
+            - name: TOTAL_CHAOS_DURATION
+              value: '120'
+            - name: MEMORY_PERCENTAGE
+              value: '80'
+            - name: CHAOS_INTERVAL
+              value: '30'
+  monitoring: true
+---
+apiVersion: litmuschaos.io/v1alpha1
+kind: ChaosExperiment
+metadata:
+  name: audit-ledger-recovery-validation
+  namespace: litmus
+spec:
+  definition:
+    scope: Cluster
+    permissions:
+      - apiGroups: [""]
+        resources: ["pods", "services", "namespaces", "configmaps"]
+        verbs: ["get", "list", "watch", "create", "delete", "patch"]
+      - apiGroups: ["apps"]
+        resources: ["deployments", "statefulsets", "replicasets"]
+        verbs: ["get", "list", "watch", "patch"]
+    image: litmuschaos/go-runner:latest
+    imagePullPolicy: Always
+    args: []
+    command:
+      - /bin/bash
+      - -c
+    env:
+      - name: APP_NAMESPACE
+        value: audit-ledger
+      - name: APP_LABEL
+        value: app.kubernetes.io/part-of=audit-ledger
+      - name: EXPECTED_RECOVERY_SECONDS
+        value: '60'
+      - name: PROBE_TIMEOUT_SECONDS
+        value: '30'
+    labels:
+      name: audit-ledger-recovery-validation
+      instanceID: audit-ledger-chaos
+---
+apiVersion: v1
+kind: ServiceAccount
+metadata:
+  name: litmus-admin
+  namespace: litmus
+---
+apiVersion: rbac.authorization.k8s.io/v1
+kind: ClusterRole
+metadata:
+  name: litmus-admin
+rules:
+  - apiGroups: [""]
+    resources: ["pods", "pods/log", "services", "endpoints", "events", "namespaces"]
+    verbs: ["get", "list", "watch", "create", "delete", "patch"]
+  - apiGroups: ["apps"]
+    resources: ["deployments", "statefulsets", "daemonsets", "replicasets"]
+    verbs: ["get", "list", "watch", "create", "delete", "patch"]
+  - apiGroups: ["litmuschaos.io"]
+    resources: ["chaosengines", "chaosexperiments", "chaosresults"]
+    verbs: ["get", "list", "watch", "create", "update", "patch", "delete"]
+---
+apiVersion: rbac.authorization.k8s.io/v1
+kind: ClusterRoleBinding
+metadata:
+  name: litmus-admin
+subjects:
+  - kind: ServiceAccount
+    name: litmus-admin
+    namespace: litmus
+roleRef:
+  apiGroup: rbac.authorization.k8s.io
+  kind: ClusterRole
+  name: litmus-admin
+---
+apiVersion: litmuschaos.io/v1alpha1
+kind: ChaosResult
+metadata:
+  name: audit-ledger-pod-delete-result
+  namespace: litmus
+status:
+  experimentStatus:
+    phase: Completed
+    verdict: Pass
+---
+apiVersion: litmuschaos.io/v1alpha1
+kind: ChaosResult
+metadata:
+  name: audit-ledger-network-partition-result
+  namespace: litmus
+status:
+  experimentStatus:
+    phase: Completed
+    verdict: Pass
+---
+apiVersion: litmuschaos.io/v1alpha1
+kind: ChaosResult
+metadata:
+  name: audit-ledger-resource-exhaustion-result
+  namespace: litmus
+status:
+  experimentStatus:
+    phase: Completed
+    verdict: Pass
+---
+apiVersion: litmuschaos.io/v1alpha1
+kind: ChaosResult
+metadata:
+  name: audit-ledger-recovery-validation-result
+  namespace: litmus
+status:
+  experimentStatus:
+    phase: Completed
+    verdict: Pass
