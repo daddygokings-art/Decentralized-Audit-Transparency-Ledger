@@ -14,6 +14,10 @@ specification. Changelogs for each release are generated automatically via
 ## [Unreleased]
 
 ### Added
+- Kubernetes runtime security monitoring with Falco (`infra/k8s/falco/`).
+- Custom Falco rules for contract-specific threats (`monitoring/falco/rules.d/audit-ledger-workloads.yaml`).
+- Falco PrometheusRule alerts for privilege escalation, crypto mining, container escape, reverse shell, and signing-key tampering.
+- Alertmanager routing and in-cluster incident-response webhook integration.
 - Automated changelog generation via git-cliff (`cliff.toml`).
 - Release workflow (`.github/workflows/release.yml`) that creates GitHub Releases on `v*` tags.
 - Release notes template (`docs/release-notes-template.md`).

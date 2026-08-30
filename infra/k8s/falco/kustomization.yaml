@@ -1,0 +1,25 @@
+apiVersion: kustomize.config.k8s.io/v1beta1
+kind: Kustomization
+namespace: audit-ledger-security
+
+resources:
+  - namespace.yaml
+  - rbac.yaml
+  - falco-daemonset.yaml
+  - falco-service.yaml
+  - falco-prometheusrule.yaml
+  - alertmanager-config.yaml
+  - incident-response.yaml
+
+# Ships the canonical Falco rules (monitoring/falco/rules.d/audit-ledger-workloads.yaml)
+# into the cluster as a ConfigMap so the daemonset can mount them without
+# duplicating rule content into YAML by hand. Regenerates (with a content
+# hash suffix) whenever the rules change, so the daemonset automatically picks
+# up new rules on the next apply.
+configMapGenerator:
+  - name: falco-rules
+    files:
+      - ../../../monitoring/falco/rules.d/audit-ledger-workloads.yaml
+
+generatorOptions:
+  disableNameSuffixHash: false

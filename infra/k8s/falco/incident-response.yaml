@@ -1,0 +1,100 @@
+# Incident Response integration for the AuditLedger runtime-security stack.
+#
+# Alertmanager (see alertmanager-config.yaml) routes security-critical Falco
+# alerts to this in-cluster receiver:
+#   POST /incidents    (critical: escalation, crypto miner, escape, reverse shell ...)
+#   POST /investigate  (warning: sensitive file/env access, unusual egress ...)
+#
+# The receiver logs each incident and forwards to an external incident tool via
+# the INCIDENT_FORWARD_URL environment variable (e.g. Slack / PagerDuty /
+# generic webhook). Build the image with:
+#   docker build -f services/incident-response/Dockerfile -t audit-ledger-incident-response .
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: incident-response
+  namespace: audit-ledger-security
+  labels:
+    app.kubernetes.io/name: incident-response
+    app.kubernetes.io/part-of: audit-ledger
+    app.kubernetes.io/component: runtime-security
+spec:
+  replicas: 1
+  selector:
+    matchLabels:
+      app.kubernetes.io/name: incident-response
+      app.kubernetes.io/part-of: audit-ledger
+  template:
+    metadata:
+      labels:
+        app.kubernetes.io/name: incident-response
+        app.kubernetes.io/part-of: audit-ledger
+        app.kubernetes.io/component: runtime-security
+      annotations:
+        prometheus.io/scrape: "true"
+        prometheus.io/port: "8080"
+        prometheus.io/path: "/metrics"
+    spec:
+      securityContext:
+        runAsNonRoot: true
+        runAsUser: 65534
+      containers:
+        - name: incident-response
+          image: audit-ledger-incident-response:latest
+          imagePullPolicy: IfNotPresent
+          args:
+            - npx
+            - ts-node
+            - server.ts
+          ports:
+            - name: http
+              containerPort: 8080
+          env:
+            - name: INCIDENT_PORT
+              value: "8080"
+            # Point at the audit-ledger notifier webhook / external incident
+            # tooling. Left empty by default so the receiver still works as a
+            # local logger; set to Slack/PagerDuty/webhook URL to enable
+            # forwarding.
+            - name: INCIDENT_FORWARD_URL
+              value: ""
+            - name: INCIDENT_TEMPLATE
+              value: "AuditLedger runtime security incident: {{alertname}} ({{severity}}) on pod {{pod}} in {{namespace}}"
+          readinessProbe:
+            httpGet:
+              path: /healthz
+              port: http
+            initialDelaySeconds: 5
+            periodSeconds: 10
+          livenessProbe:
+            httpGet:
+              path: /healthz
+              port: http
+            initialDelaySeconds: 10
+            periodSeconds: 20
+          resources:
+            requests:
+              cpu: 50m
+              memory: 64Mi
+            limits:
+              cpu: 250m
+              memory: 256Mi
+---
+apiVersion: v1
+kind: Service
+metadata:
+  name: incident-response
+  namespace: audit-ledger-security
+  labels:
+    app.kubernetes.io/name: incident-response
+    app.kubernetes.io/part-of: audit-ledger
+    app.kubernetes.io/component: runtime-security
+spec:
+  selector:
+    app.kubernetes.io/name: incident-response
+    app.kubernetes.io/part-of: audit-ledger
+  ports:
+    - name: http
+      port: 8080
+      targetPort: http
+      protocol: TCP
