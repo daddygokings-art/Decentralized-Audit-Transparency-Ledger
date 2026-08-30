@@ -1,0 +1,343 @@
+name: Security Policy Gate & Reporting
+
+# Resolves: #484 (security scanning in CI/CD)
+# Also related to: #481 (disaster recovery), #482 (backup/restore), #483 (capacity planning)
+#
+# This workflow acts as the top-level security quality gate for the project.
+# It:
+#   1. Aggregates results from all security scan workflows
+#   2. Generates a unified security report (JSON + Markdown)
+#   3. Enforces pass/fail policy before a PR can be merged
+#   4. Publishes the security posture summary as a PR comment
+#   5. On schedule: generates a weekly security status report and
+#      opens/updates a GitHub issue if the overall posture degrades
+
+permissions: {}
+
+on:
+  push:
+    branches: [master, main]
+  pull_request:
+    branches: [master, main]
+  schedule:
+    # Weekly report — Sunday 08:00 UTC
+    - cron: "0 8 * * 0"
+  workflow_dispatch:
+    inputs:
+      force_report:
+        description: "Force security report generation"
+        required: false
+        type: boolean
+        default: false
+
+jobs:
+  # ── Aggregate scan status ─────────────────────────────────────────────────
+  security-gate:
+    name: Security policy gate
+    runs-on: ubuntu-latest
+    permissions:
+      contents: read
+      security-events: read
+      pull-requests: write
+      checks: write
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          persist-credentials: false
+
+      - name: Install dependencies
+        run: |
+          sudo apt-get update -y -qq
+          sudo apt-get install -y -qq jq curl
+
+      - name: Collect workflow run statuses
+        id: status
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: |
+          REPO="${{ github.repository }}"
+          REF="${{ github.sha }}"
+
+          echo "Checking security workflow statuses for $REPO @ $REF"
+
+          # We check the most recent runs of each security workflow
+          get_status() {
+            local workflow="$1"
+            gh run list \
+              --workflow="$workflow" \
+              --limit=1 \
+              --json status,conclusion \
+              --jq '.[0].conclusion // "unknown"' 2>/dev/null || echo "unknown"
+          }
+
+          SAST=$(get_status "sast.yml")
+          DEP_SCAN=$(get_status "dependency-scan.yml")
+          SECRET_SCAN=$(get_status "secret-scan.yml")
+          CONTAINER=$(get_status "container-security.yml")
+          DAST=$(get_status "dast.yml")
+          LICENSE=$(get_status "license-compliance.yml")
+
+          echo "sast=$SAST"           >> "$GITHUB_OUTPUT"
+          echo "dep_scan=$DEP_SCAN"   >> "$GITHUB_OUTPUT"
+          echo "secret=$SECRET_SCAN"  >> "$GITHUB_OUTPUT"
+          echo "container=$CONTAINER" >> "$GITHUB_OUTPUT"
+          echo "dast=$DAST"           >> "$GITHUB_OUTPUT"
+          echo "license=$LICENSE"     >> "$GITHUB_OUTPUT"
+
+          echo "=== Security Scan Status ==="
+          echo "SAST:                $SAST"
+          echo "Dependency Scanning: $DEP_SCAN"
+          echo "Secret Scanning:     $SECRET_SCAN"
+          echo "Container Scanning:  $CONTAINER"
+          echo "DAST:                $DAST"
+          echo "License Compliance:  $LICENSE"
+
+      - name: Generate security report
+        id: report
+        run: |
+          cat > security-report.json <<EOF
+          {
+            "generated_at": "$(date -u +%Y-%m-%dT%H:%M:%SZ)",
+            "repository": "${{ github.repository }}",
+            "ref": "${{ github.sha }}",
+            "event": "${{ github.event_name }}",
+            "scans": {
+              "sast": "${{ steps.status.outputs.sast }}",
+              "dependency_scanning": "${{ steps.status.outputs.dep_scan }}",
+              "secret_scanning": "${{ steps.status.outputs.secret }}",
+              "container_scanning": "${{ steps.status.outputs.container }}",
+              "dast": "${{ steps.status.outputs.dast }}",
+              "license_compliance": "${{ steps.status.outputs.license }}"
+            },
+            "policy": {
+              "block_on_sast_failure": true,
+              "block_on_critical_deps": true,
+              "block_on_secrets": true,
+              "block_on_critical_containers": true,
+              "dast_advisory_only": true,
+              "block_on_license_violation": true
+            }
+          }
+          EOF
+
+          # Generate Markdown report
+          cat > security-report.md <<'MDEOF'
+          # Security Scan Report
+
+          | Scan Type              | Status |
+          |------------------------|--------|
+          | SAST (CodeQL + Semgrep)| ${{ steps.status.outputs.sast == 'success' && '✅ Pass' || steps.status.outputs.sast == 'failure' && '❌ Fail' || '⏳ Pending/Unknown' }} |
+          | Dependency Scanning    | ${{ steps.status.outputs.dep_scan == 'success' && '✅ Pass' || steps.status.outputs.dep_scan == 'failure' && '❌ Fail' || '⏳ Pending/Unknown' }} |
+          | Secret Scanning        | ${{ steps.status.outputs.secret == 'success' && '✅ Pass' || steps.status.outputs.secret == 'failure' && '❌ Fail' || '⏳ Pending/Unknown' }} |
+          | Container Scanning     | ${{ steps.status.outputs.container == 'success' && '✅ Pass' || steps.status.outputs.container == 'failure' && '❌ Fail' || '⏳ Pending/Unknown' }} |
+          | DAST (ZAP + Nuclei)    | ${{ steps.status.outputs.dast == 'success' && '✅ Pass' || steps.status.outputs.dast == 'failure' && '⚠️ Advisory' || '⏳ Pending/Unknown' }} |
+          | License Compliance     | ${{ steps.status.outputs.license == 'success' && '✅ Pass' || steps.status.outputs.license == 'failure' && '❌ Fail' || '⏳ Pending/Unknown' }} |
+
+          > Reports available in workflow artifacts. SARIF findings in **Security → Code scanning**.
+          MDEOF
+
+          echo "Report generated."
+          cat security-report.json
+
+      - name: Post PR comment with security summary
+        if: github.event_name == 'pull_request'
+        uses: actions/github-script@v7
+        with:
+          script: |
+            const fs = require('fs');
+            const report = JSON.parse(fs.readFileSync('security-report.json', 'utf8'));
+            const scans = report.scans;
+
+            const icon = (s) => s === 'success' ? '✅' : s === 'failure' ? '❌' : '⏳';
+
+            const body = [
+              '## 🔐 Security Scan Summary',
+              '',
+              '| Scan | Status |',
+              '|------|--------|',
+              `| SAST (CodeQL + Semgrep + Clippy) | ${icon(scans.sast)} ${scans.sast} |`,
+              `| Dependency Scanning              | ${icon(scans.dependency_scanning)} ${scans.dependency_scanning} |`,
+              `| Secret Scanning (Gitleaks + TruffleHog) | ${icon(scans.secret_scanning)} ${scans.secret_scanning} |`,
+              `| Container Scanning (Trivy + Grype + Dockle) | ${icon(scans.container_scanning)} ${scans.container_scanning} |`,
+              `| DAST (ZAP + Nuclei)              | ${icon(scans.dast)} ${scans.dast} _(advisory)_ |`,
+              `| License Compliance               | ${icon(scans.license_compliance)} ${scans.license_compliance} |`,
+              '',
+              `_Generated at ${report.generated_at} · Commit \`${report.ref.substring(0,8)}\`_`,
+              '',
+              '> 📊 Full SARIF findings → **Security → Code scanning** tab',
+              '> 📁 Raw reports → **Actions → Artifacts**',
+            ].join('\n');
+
+            // Find existing comment
+            const { data: comments } = await github.rest.issues.listComments({
+              owner: context.repo.owner,
+              repo: context.repo.repo,
+              issue_number: context.issue.number,
+            });
+
+            const existing = comments.find(c =>
+              c.user.login === 'github-actions[bot]' &&
+              c.body.includes('🔐 Security Scan Summary')
+            );
+
+            if (existing) {
+              await github.rest.issues.updateComment({
+                owner: context.repo.owner,
+                repo: context.repo.repo,
+                comment_id: existing.id,
+                body,
+              });
+            } else {
+              await github.rest.issues.createComment({
+                owner: context.repo.owner,
+                repo: context.repo.repo,
+                issue_number: context.issue.number,
+                body,
+              });
+            }
+
+      - name: Upload security report
+        uses: actions/upload-artifact@v4
+        with:
+          name: security-report
+          path: |
+            security-report.json
+            security-report.md
+          retention-days: 90
+
+      - name: Enforce security policy gate
+        run: |
+          SAST="${{ steps.status.outputs.sast }}"
+          DEP="${{ steps.status.outputs.dep_scan }}"
+          SECRET="${{ steps.status.outputs.secret }}"
+          CONTAINER="${{ steps.status.outputs.container }}"
+          LICENSE="${{ steps.status.outputs.license }}"
+
+          FAILED=0
+
+          # Gate: SAST must pass
+          if [[ "$SAST" == "failure" ]]; then
+            echo "❌ GATE FAILED: SAST scan reported failures."
+            FAILED=1
+          fi
+
+          # Gate: Dependency scan must pass (critical/high CVEs blocked)
+          if [[ "$DEP" == "failure" ]]; then
+            echo "❌ GATE FAILED: Dependency scan found critical vulnerabilities or license violations."
+            FAILED=1
+          fi
+
+          # Gate: No secrets in repository
+          if [[ "$SECRET" == "failure" ]]; then
+            echo "❌ GATE FAILED: Secret scanning detected committed secrets."
+            FAILED=1
+          fi
+
+          # Gate: Container scan (critical/high CVEs)
+          if [[ "$CONTAINER" == "failure" ]]; then
+            echo "❌ GATE FAILED: Container scan found critical/high CVEs."
+            FAILED=1
+          fi
+
+          # Gate: License compliance
+          if [[ "$LICENSE" == "failure" ]]; then
+            echo "❌ GATE FAILED: License compliance violations detected."
+            FAILED=1
+          fi
+
+          # DAST is advisory only — does not block
+
+          if [[ "$FAILED" -eq 1 ]]; then
+            echo ""
+            echo "One or more blocking security checks failed."
+            echo "Review the Security → Code scanning tab and workflow artifacts."
+            exit 1
+          fi
+
+          echo "✅ All security policy gates passed."
+
+  # ── Weekly security posture report ────────────────────────────────────────
+  weekly-posture-report:
+    name: Weekly security posture report
+    runs-on: ubuntu-latest
+    if: github.event_name == 'schedule' || github.event.inputs.force_report == 'true'
+    permissions:
+      contents: read
+      issues: write
+      security-events: read
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          persist-credentials: false
+
+      - name: Generate weekly posture report
+        uses: actions/github-script@v7
+        with:
+          script: |
+            const date = new Date().toISOString().split('T')[0];
+            const title = `Security Posture Report — ${date}`;
+
+            const body = [
+              `## Weekly Security Posture Report`,
+              ``,
+              `**Date:** ${date}`,
+              `**Repository:** ${{ github.repository }}`,
+              ``,
+              `### Scan Coverage`,
+              ``,
+              `| Scan Type | Tooling | Schedule |`,
+              `|-----------|---------|----------|`,
+              `| SAST | CodeQL, Semgrep, Clippy | Every push/PR + weekly |`,
+              `| Dependency Scanning | cargo-audit, cargo-deny, npm audit, pip-audit | Every push/PR + daily |`,
+              `| Secret Scanning | Gitleaks, TruffleHog | Every push/PR + daily |`,
+              `| Container Scanning | Trivy, Grype, Dockle | Every push (docker paths) + nightly |`,
+              `| DAST | OWASP ZAP, Nuclei | Every push (api paths) + weekly |`,
+              `| License Compliance | cargo-license, license-checker, pip-licenses | Every push + weekly |`,
+              ``,
+              `### Policy`,
+              ``,
+              `- **Blocking:** SAST failures, critical/high dependency CVEs, committed secrets, container CRITICAL/HIGH, license violations`,
+              `- **Advisory:** DAST findings (promoted to blocking once baseline is established)`,
+              ``,
+              `### Remediation SLA`,
+              ``,
+              `| Severity | SLA |`,
+              `|----------|-----|`,
+              `| Critical | 24 hours |`,
+              `| High | 7 days |`,
+              `| Medium | 30 days |`,
+              `| Low | 90 days |`,
+              ``,
+              `_See \`docs/security/vulnerability-management.md\` for the full SLA policy._`,
+              ``,
+              `_Auto-generated by the Security Policy Gate & Reporting workflow._`,
+            ].join('\n');
+
+            // Check for existing open report issue
+            const { data: issues } = await github.rest.issues.listForRepo({
+              owner: context.repo.owner,
+              repo: context.repo.repo,
+              state: 'open',
+              labels: 'security-report',
+              per_page: 5,
+            });
+
+            const week = new Date().toISOString().substring(0, 7); // YYYY-MM
+            const existing = issues.find(i => i.title.includes(week));
+
+            if (existing) {
+              await github.rest.issues.createComment({
+                owner: context.repo.owner,
+                repo: context.repo.repo,
+                issue_number: existing.number,
+                body: `Updated report:\n\n${body}`,
+              });
+            } else {
+              await github.rest.issues.create({
+                owner: context.repo.owner,
+                repo: context.repo.repo,
+                title,
+                body,
+                labels: ['security-report', 'security'],
+              });
+            }

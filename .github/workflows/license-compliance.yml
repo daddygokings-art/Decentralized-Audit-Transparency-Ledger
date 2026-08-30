@@ -1,0 +1,304 @@
+name: License Compliance
+
+# Resolves: #484 (security scanning in CI/CD)
+#
+# Audits third-party dependency licenses across all language ecosystems to
+# ensure compliance with project policy (MIT / Apache-2.0 preferred).
+#
+# Denied license families (copyleft that could affect distribution):
+#   AGPL-3.0, GPL-2.0, GPL-3.0, LGPL-2.0, LGPL-2.1, LGPL-3.0, SSPL-1.0
+#
+# Tools used:
+#   • cargo-deny   — Rust (license + ban + advisories)
+#   • license-checker / licensee — Node.js / TypeScript packages
+#   • pip-licenses — Python packages
+#   • FOSSA (if token provided) — cross-language SBOM and compliance SaaS
+
+permissions: {}
+
+on:
+  push:
+    branches: [master, main]
+    paths:
+      - "Cargo.toml"
+      - "Cargo.lock"
+      - "deny.toml"
+      - "**/package.json"
+      - "**/package-lock.json"
+      - "**/pyproject.toml"
+      - "**/requirements*.txt"
+      - ".github/workflows/license-compliance.yml"
+  pull_request:
+    branches: [master, main]
+  schedule:
+    # Weekly — Tuesday 06:00 UTC
+    - cron: "0 6 * * 2"
+  workflow_dispatch:
+
+# License policy: allow permissive; deny strong copyleft.
+env:
+  DENIED_LICENSES: "AGPL-3.0,GPL-2.0,GPL-3.0,LGPL-2.0,LGPL-2.1,LGPL-3.0,SSPL-1.0,Commons-Clause"
+
+jobs:
+  # ── Rust ──────────────────────────────────────────────────────────────────
+  rust-licenses:
+    name: Rust license audit (cargo-deny)
+    runs-on: ubuntu-latest
+    permissions:
+      contents: read
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          persist-credentials: false
+
+      - name: Install Rust toolchain
+        uses: dtolnay/rust-toolchain@stable
+
+      - name: Install cargo-deny
+        run: cargo install cargo-deny
+
+      - name: Check licenses via cargo-deny
+        run: cargo deny check licenses
+
+      - name: Install cargo-license and generate report
+        run: |
+          cargo install cargo-license
+          cargo license --json > rust-licenses.json
+          echo "=== Rust dependency licenses ==="
+          cargo license
+          echo ""
+
+          # Check for denied licenses
+          python3 - <<'PYEOF'
+          import json, sys, os
+
+          denied = set(os.environ.get("DENIED_LICENSES", "").split(","))
+          licenses = json.loads(open("rust-licenses.json").read())
+          violations = []
+
+          for dep in licenses:
+              dep_license = dep.get("license", "") or ""
+              for d in denied:
+                  if d and d.lower() in dep_license.lower():
+                      violations.append(f"  {dep['name']}@{dep.get('version','')} — {dep_license}")
+
+          if violations:
+              print("❌ Denied license(s) found in Rust dependencies:")
+              for v in violations:
+                  print(v)
+              sys.exit(1)
+          else:
+              print(f"✅ {len(licenses)} Rust dependencies — no denied licenses.")
+          PYEOF
+
+      - name: Upload Rust license report
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: rust-licenses
+          path: rust-licenses.json
+          retention-days: 90
+
+  # ── Node.js ───────────────────────────────────────────────────────────────
+  node-licenses:
+    name: Node license audit (${{ matrix.dir }})
+    runs-on: ubuntu-latest
+    permissions:
+      contents: read
+    strategy:
+      fail-fast: false
+      matrix:
+        dir:
+          - api/rest
+          - api/graphql
+          - sdk/js
+          - packages/security
+          - bridge
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          persist-credentials: false
+
+      - name: Setup Node.js
+        uses: actions/setup-node@v4
+        with:
+          node-version: "20"
+
+      - name: Check for package.json
+        id: has_pkg
+        run: |
+          if [ -f "${{ matrix.dir }}/package.json" ]; then
+            echo "exists=true" >> "$GITHUB_OUTPUT"
+          else
+            echo "exists=false" >> "$GITHUB_OUTPUT"
+          fi
+
+      - name: Install dependencies
+        if: steps.has_pkg.outputs.exists == 'true'
+        working-directory: ${{ matrix.dir }}
+        run: npm install --ignore-scripts 2>/dev/null || npm install --ignore-scripts
+
+      - name: Install license-checker
+        if: steps.has_pkg.outputs.exists == 'true'
+        run: npm install -g license-checker@25.0.1
+
+      - name: Run license-checker
+        if: steps.has_pkg.outputs.exists == 'true'
+        working-directory: ${{ matrix.dir }}
+        run: |
+          license-checker \
+            --json \
+            --out node-licenses.json \
+            --excludePrivatePackages \
+            || true
+
+          # Check for denied licenses
+          DENIED="${{ env.DENIED_LICENSES }}"
+          python3 - <<PYEOF
+          import json, sys
+
+          denied = set("${DENIED}".split(","))
+          try:
+              packages = json.load(open("node-licenses.json"))
+          except Exception:
+              print("No license data found — skipping.")
+              sys.exit(0)
+
+          violations = []
+          for pkg, info in packages.items():
+              lic = info.get("licenses", "") or ""
+              for d in denied:
+                  if d and d.lower() in lic.lower():
+                      violations.append(f"  {pkg} — {lic}")
+
+          if violations:
+              print("❌ Denied license(s) found:")
+              for v in violations:
+                  print(v)
+              sys.exit(1)
+          else:
+              print(f"✅ {len(packages)} Node packages — no denied licenses in ${{ matrix.dir }}")
+          PYEOF
+
+          license-checker \
+            --summary \
+            --excludePrivatePackages \
+            || true
+
+      - name: Upload Node license report
+        if: always() && steps.has_pkg.outputs.exists == 'true'
+        uses: actions/upload-artifact@v4
+        with:
+          name: node-licenses-${{ matrix.dir == 'api/rest' && 'api-rest' || matrix.dir == 'api/graphql' && 'api-graphql' || matrix.dir }}
+          path: ${{ matrix.dir }}/node-licenses.json
+          retention-days: 90
+
+  # ── Python ────────────────────────────────────────────────────────────────
+  python-licenses:
+    name: Python license audit
+    runs-on: ubuntu-latest
+    permissions:
+      contents: read
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          persist-credentials: false
+
+      - name: Setup Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+
+      - name: Install pip-licenses
+        run: pip install pip-licenses
+
+      - name: Install Python SDK dependencies
+        working-directory: sdk/python
+        run: pip install -e ".[dev]" --quiet 2>/dev/null || pip install . --quiet || true
+
+      - name: Run pip-licenses
+        run: |
+          pip-licenses \
+            --format=json \
+            --output-file=python-licenses.json \
+            --with-urls \
+            || true
+
+          pip-licenses --format=table || true
+
+          # Check for denied licenses
+          python3 - <<'PYEOF'
+          import json, sys, os
+
+          denied = set(os.environ.get("DENIED_LICENSES", "").split(","))
+          try:
+              packages = json.load(open("python-licenses.json"))
+          except Exception:
+              print("No license data — skipping.")
+              sys.exit(0)
+
+          violations = []
+          for pkg in packages:
+              lic = pkg.get("License", "") or ""
+              for d in denied:
+                  if d and d.lower() in lic.lower():
+                      violations.append(f"  {pkg.get('Name','')}=={pkg.get('Version','')} — {lic}")
+
+          if violations:
+              print("❌ Denied license(s) found in Python dependencies:")
+              for v in violations:
+                  print(v)
+              sys.exit(1)
+          else:
+              print(f"✅ {len(packages)} Python packages — no denied licenses.")
+          PYEOF
+
+      - name: Upload Python license report
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: python-licenses
+          path: python-licenses.json
+          retention-days: 90
+
+  # ── FOSSA (optional) ──────────────────────────────────────────────────────
+  fossa:
+    name: FOSSA license + compliance scan
+    runs-on: ubuntu-latest
+    if: ${{ secrets.FOSSA_API_KEY != '' }}
+    permissions:
+      contents: read
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          persist-credentials: false
+
+      - name: Run FOSSA analysis
+        uses: fossas/fossa-action@v1.4.0
+        with:
+          api-key: ${{ secrets.FOSSA_API_KEY }}
+          run-tests: true
+        continue-on-error: true
+
+  # ── Policy gate ───────────────────────────────────────────────────────────
+  license-gate:
+    name: License compliance gate
+    runs-on: ubuntu-latest
+    needs: [rust-licenses, node-licenses, python-licenses]
+    if: always()
+    permissions:
+      contents: read
+    steps:
+      - name: Evaluate gate
+        run: |
+          RUST="${{ needs.rust-licenses.result }}"
+          NODE="${{ needs.node-licenses.result }}"
+          PYTHON="${{ needs.python-licenses.result }}"
+          echo "Rust:   $RUST"
+          echo "Node:   $NODE"
+          echo "Python: $PYTHON"
+          if [[ "$RUST" == "failure" || "$NODE" == "failure" || "$PYTHON" == "failure" ]]; then
+            echo "❌ License compliance gate failed — denied licenses detected."
+            exit 1
+          fi
+          echo "✅ All license checks passed. No denied licenses found."

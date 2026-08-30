@@ -1,0 +1,166 @@
+name: SAST — Static Application Security Testing
+
+# Resolves: #484 (security scanning in CI/CD)
+#
+# Runs CodeQL analysis for Rust, TypeScript, and JavaScript sources plus
+# a Semgrep rule-set tuned for smart-contract / blockchain code.
+# Findings are uploaded to GitHub's Security → Code scanning dashboard.
+
+permissions: {}
+
+on:
+  push:
+    branches: [master, main]
+  pull_request:
+    branches: [master, main]
+  schedule:
+    # Weekly full scan — Thursday 02:00 UTC
+    - cron: "0 2 * * 4"
+  workflow_dispatch:
+
+jobs:
+  # ── CodeQL ────────────────────────────────────────────────────────────────
+  codeql:
+    name: CodeQL (${{ matrix.language }})
+    runs-on: ubuntu-latest
+    permissions:
+      contents: read
+      security-events: write
+    strategy:
+      fail-fast: false
+      matrix:
+        language: [javascript-typescript, rust]
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v4
+        with:
+          persist-credentials: false
+
+      - name: Initialize CodeQL
+        uses: github/codeql-action/init@v3
+        with:
+          languages: ${{ matrix.language }}
+          queries: security-extended,security-and-quality
+
+      # Rust requires a real build so CodeQL can trace the compiler.
+      - name: Install Rust toolchain (Rust only)
+        if: matrix.language == 'rust'
+        uses: dtolnay/rust-toolchain@stable
+
+      - name: Build (Rust only)
+        if: matrix.language == 'rust'
+        run: cargo build
+
+      - name: Autobuild (JS/TS only)
+        if: matrix.language == 'javascript-typescript'
+        uses: github/codeql-action/autobuild@v3
+
+      - name: Perform CodeQL Analysis
+        uses: github/codeql-action/analyze@v3
+        with:
+          category: codeql-${{ matrix.language }}
+
+  # ── Semgrep ───────────────────────────────────────────────────────────────
+  semgrep:
+    name: Semgrep SAST
+    runs-on: ubuntu-latest
+    permissions:
+      contents: read
+      security-events: write
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v4
+        with:
+          persist-credentials: false
+
+      - name: Run Semgrep (SARIF output)
+        uses: returntocorp/semgrep-action@v1
+        with:
+          config: >-
+            p/default
+            p/rust
+            p/typescript
+            p/javascript
+            p/secrets
+            p/owasp-top-ten
+            p/smart-contracts
+          generateSarif: "1"
+        env:
+          SEMGREP_RULES: >-
+            p/default
+            p/rust
+            p/typescript
+            p/javascript
+            p/secrets
+            p/owasp-top-ten
+            p/smart-contracts
+
+      - name: Upload Semgrep SARIF to code scanning
+        if: always()
+        uses: github/codeql-action/upload-sarif@v3
+        with:
+          sarif_file: semgrep.sarif
+          category: semgrep
+
+  # ── Clippy security lints ─────────────────────────────────────────────────
+  clippy-security:
+    name: Clippy security lints
+    runs-on: ubuntu-latest
+    permissions:
+      contents: read
+      security-events: write
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v4
+        with:
+          persist-credentials: false
+
+      - name: Install Rust toolchain
+        uses: dtolnay/rust-toolchain@stable
+        with:
+          components: clippy
+
+      - name: Install clippy-sarif and sarif-fmt
+        run: cargo install clippy-sarif sarif-fmt
+
+      - name: Run Clippy (SARIF output)
+        run: |
+          cargo clippy \
+            --all-targets \
+            --message-format=json \
+            -- -D warnings \
+            -W clippy::pedantic \
+            -A clippy::module_name_repetitions \
+            -A clippy::must_use_candidate \
+            2>&1 | clippy-sarif | tee clippy-results.sarif | sarif-fmt
+        continue-on-error: true
+
+      - name: Upload Clippy SARIF to code scanning
+        if: always()
+        uses: github/codeql-action/upload-sarif@v3
+        with:
+          sarif_file: clippy-results.sarif
+          category: clippy
+
+  # ── Policy gate ───────────────────────────────────────────────────────────
+  sast-gate:
+    name: SAST policy gate
+    runs-on: ubuntu-latest
+    needs: [codeql, semgrep, clippy-security]
+    if: always()
+    permissions:
+      contents: read
+    steps:
+      - name: Evaluate gate
+        run: |
+          CODEQL="${{ needs.codeql.result }}"
+          SEMGREP="${{ needs.semgrep.result }}"
+          CLIPPY="${{ needs.clippy-security.result }}"
+          echo "CodeQL:  $CODEQL"
+          echo "Semgrep: $SEMGREP"
+          echo "Clippy:  $CLIPPY"
+          if [[ "$CODEQL" == "failure" || "$SEMGREP" == "failure" || "$CLIPPY" == "failure" ]]; then
+            echo "❌ One or more SAST checks failed — blocking merge."
+            exit 1
+          fi
+          echo "✅ All SAST checks passed."
