@@ -1,0 +1,61 @@
+{
+  "annotations": { "list": [] },
+  "editable": true,
+  "fiscalYearStartMonth": 0,
+  "graphTooltip": 1,
+  "id": null,
+  "links": [],
+  "liveNow": false,
+  "panels": [
+    {
+      "collapsed": false,
+      "gridPos": { "h": 8, "w": 12, "x": 0, "y": 0 },
+      "id": 1,
+      "title": "Online Feature Retrieval Latency (p50, p95, p99 ms)",
+      "type": "timeseries",
+      "targets": [
+        {
+          "expr": "histogram_quantile(0.99, sum(rate(audit_ledger_feature_retrieval_duration_ms_bucket[5m])) by (le))",
+          "legendFormat": "p99 Latency (ms)"
+        },
+        {
+          "expr": "histogram_quantile(0.95, sum(rate(audit_ledger_feature_retrieval_duration_ms_bucket[5m])) by (le))",
+          "legendFormat": "p95 Latency (ms)"
+        },
+        {
+          "expr": "histogram_quantile(0.50, sum(rate(audit_ledger_feature_retrieval_duration_ms_bucket[5m])) by (le))",
+          "legendFormat": "p50 Latency (ms)"
+        }
+      ]
+    },
+    {
+      "collapsed": false,
+      "gridPos": { "h": 8, "w": 12, "x": 12, "y": 0 },
+      "id": 2,
+      "title": "Feature Drift Alerts (PSI > 0.2)",
+      "type": "stat",
+      "targets": [
+        {
+          "expr": "sum(audit_ledger_feature_drift_alerts_total)",
+          "legendFormat": "Active Drift Alerts"
+        }
+      ]
+    },
+    {
+      "collapsed": false,
+      "gridPos": { "h": 8, "w": 24, "x": 0, "y": 8 },
+      "id": 3,
+      "title": "Feature Serving Request Throughput",
+      "type": "timeseries",
+      "targets": [
+        {
+          "expr": "sum(rate(audit_ledger_online_feature_requests_total[1m])) by (feature_view)",
+          "legendFormat": "{{feature_view}}"
+        }
+      ]
+    }
+  ],
+  "schemaVersion": 38,
+  "title": "Contract Event ML Feature Store",
+  "uid": "audit-ledger-ml-feature-store"
+}
