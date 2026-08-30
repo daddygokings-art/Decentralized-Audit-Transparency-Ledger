@@ -43,6 +43,9 @@ pub mod esg_reporting;
 // Data retention, legal hold, GDPR erasure, and the immutable operational audit log.
 pub mod data_retention;
 
+// Multi-region high-availability, replication, and disaster recovery.
+pub mod multi_region;
+
 // Predictive capacity planning, ML forecasting, and auto-scaling.
 pub mod capacity_planning;
 
