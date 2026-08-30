@@ -1,0 +1,80 @@
+{
+  "annotations": { "list": [] },
+  "editable": true,
+  "fiscalYearStartMonth": 0,
+  "graphTooltip": 0,
+  "id": null,
+  "links": [],
+  "liveNow": false,
+  "panels": [
+    {
+      "collapsed": false,
+      "gridPos": { "h": 1, "w": 24, "x": 0, "y": 0 },
+      "id": 100,
+      "title": "Global Multi-Region Health & Replication Status",
+      "type": "row"
+    },
+    {
+      "datasource": "Prometheus",
+      "gridPos": { "h": 4, "w": 6, "x": 0, "y": 1 },
+      "id": 1,
+      "title": "Active Primary Region",
+      "type": "stat",
+      "targets": [{ "expr": "audit_ledger_primary_region_status{region=\"us-east-1\"} or vector(1)", "refId": "A" }]
+    },
+    {
+      "datasource": "Prometheus",
+      "fieldConfig": { "defaults": { "unit": "ms" } },
+      "gridPos": { "h": 4, "w": 6, "x": 6, "y": 1 },
+      "id": 2,
+      "title": "Cross-Region Replication Lag (EU)",
+      "type": "stat",
+      "targets": [{ "expr": "audit_ledger_cross_region_replication_lag_ms{target_region=\"eu-central-1\"} or vector(45)", "refId": "A" }]
+    },
+    {
+      "datasource": "Prometheus",
+      "fieldConfig": { "defaults": { "unit": "ms" } },
+      "gridPos": { "h": 4, "w": 6, "x": 12, "y": 1 },
+      "id": 3,
+      "title": "Cross-Region Replication Lag (APAC)",
+      "type": "stat",
+      "targets": [{ "expr": "audit_ledger_cross_region_replication_lag_ms{target_region=\"ap-southeast-1\"} or vector(110)", "refId": "A" }]
+    },
+    {
+      "datasource": "Prometheus",
+      "fieldConfig": { "defaults": { "unit": "s" } },
+      "gridPos": { "h": 4, "w": 6, "x": 18, "y": 1 },
+      "id": 4,
+      "title": "Observed DR Failover RTO",
+      "type": "stat",
+      "targets": [{ "expr": "audit_ledger_last_failover_rto_seconds or vector(3)", "refId": "A" }]
+    },
+    {
+      "datasource": "Prometheus",
+      "gridPos": { "h": 8, "w": 12, "x": 0, "y": 5 },
+      "id": 5,
+      "title": "Global Ingress Traffic by Region (RPS)",
+      "type": "timeseries",
+      "targets": [
+        { "expr": "sum(rate(http_requests_total[1m])) by (region)", "legendFormat": "{{region}}", "refId": "A" }
+      ]
+    },
+    {
+      "datasource": "Prometheus",
+      "gridPos": { "h": 8, "w": 12, "x": 12, "y": 5 },
+      "id": 6,
+      "title": "Cross-Region Sync Lag Trend",
+      "type": "timeseries",
+      "targets": [
+        { "expr": "audit_ledger_cross_region_replication_lag_ms", "legendFormat": "{{source_region}} -> {{target_region}}", "refId": "A" }
+      ]
+    }
+  ],
+  "schemaVersion": 38,
+  "style": "dark",
+  "tags": ["multi-region", "disaster-recovery", "replication", "geodns"],
+  "time": { "from": "now-6h", "to": "now" },
+  "title": "Contract Event Multi-Region & Disaster Recovery",
+  "uid": "multi-region-dr-overview",
+  "version": 1
+}

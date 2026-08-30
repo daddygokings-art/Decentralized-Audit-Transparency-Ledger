@@ -1,0 +1,24 @@
+{
+  "name": "@audit-ledger/runbooks",
+  "version": "1.0.0",
+  "description": "Contract event runbook automation, validation, execution, and rollback engine",
+  "main": "dist/cli.js",
+  "bin": {
+    "runbook-cli": "dist/cli.js"
+  },
+  "scripts": {
+    "build": "tsc",
+    "cli": "node dist/cli.js"
+  },
+  "dependencies": {
+    "commander": "^12.1.0",
+    "js-yaml": "^4.1.0",
+    "zod": "^3.23.8",
+    "axios": "^1.7.2"
+  },
+  "devDependencies": {
+    "@types/node": "^20.14.9",
+    "@types/js-yaml": "^4.0.9",
+    "typescript": "^5.5.2"
+  }
+}

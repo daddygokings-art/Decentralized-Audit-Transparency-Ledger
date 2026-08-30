@@ -1,0 +1,176 @@
+{
+  "annotations": {
+    "list": [
+      {
+        "builtIn": 1,
+        "datasource": "-- Grafana --",
+        "enable": true,
+        "hide": true,
+        "name": "Annotations & Alerts",
+        "type": "dashboard"
+      }
+    ]
+  },
+  "editable": true,
+  "fiscalYearStartMonth": 0,
+  "graphTooltip": 1,
+  "id": null,
+  "links": [],
+  "liveNow": false,
+  "panels": [
+    {
+      "collapsed": false,
+      "gridPos": { "h": 1, "w": 24, "x": 0, "y": 0 },
+      "id": 100,
+      "title": "RED Overview (Rate, Errors, Duration)",
+      "type": "row"
+    },
+    {
+      "datasource": "Prometheus",
+      "fieldConfig": {
+        "defaults": {
+          "color": { "mode": "palette-classic" },
+          "custom": { "axisCenteredZero": false, "drawStyle": "line", "fillOpacity": 15 },
+          "unit": "reqps"
+        }
+      },
+      "gridPos": { "h": 7, "w": 8, "x": 0, "y": 1 },
+      "id": 1,
+      "title": "Event Ingestion Rate (Rate)",
+      "type": "timeseries",
+      "targets": [
+        {
+          "expr": "sum(rate(audit_event_ingestion_total[1m])) by (event_type)",
+          "legendFormat": "{{event_type}}"
+        }
+      ]
+    },
+    {
+      "datasource": "Prometheus",
+      "fieldConfig": {
+        "defaults": {
+          "color": { "mode": "palette-classic" },
+          "custom": { "axisCenteredZero": false, "drawStyle": "line", "fillOpacity": 25 },
+          "unit": "short"
+        }
+      },
+      "gridPos": { "h": 7, "w": 8, "x": 8, "y": 1 },
+      "id": 2,
+      "title": "Error Rate & Breakdown (Errors)",
+      "type": "timeseries",
+      "targets": [
+        {
+          "expr": "sum(rate(audit_errors_total[1m])) by (component, error_type)",
+          "legendFormat": "{{component}} - {{error_type}}"
+        }
+      ]
+    },
+    {
+      "datasource": "Prometheus",
+      "fieldConfig": {
+        "defaults": {
+          "color": { "mode": "palette-classic" },
+          "custom": { "axisCenteredZero": false, "drawStyle": "line", "fillOpacity": 15 },
+          "unit": "s"
+        }
+      },
+      "gridPos": { "h": 7, "w": 8, "x": 16, "y": 1 },
+      "id": 3,
+      "title": "Ingestion Latency Percentiles (Duration)",
+      "type": "timeseries",
+      "targets": [
+        {
+          "expr": "histogram_quantile(0.99, sum(rate(audit_event_ingestion_duration_seconds_bucket[5m])) by (le))",
+          "legendFormat": "p99 Latency"
+        },
+        {
+          "expr": "histogram_quantile(0.95, sum(rate(audit_event_ingestion_duration_seconds_bucket[5m])) by (le))",
+          "legendFormat": "p95 Latency"
+        },
+        {
+          "expr": "histogram_quantile(0.50, sum(rate(audit_event_ingestion_duration_seconds_bucket[5m])) by (le))",
+          "legendFormat": "p50 Latency"
+        }
+      ]
+    },
+    {
+      "collapsed": false,
+      "gridPos": { "h": 1, "w": 24, "x": 0, "y": 8 },
+      "id": 101,
+      "title": "Cross-Chain Relayer & Bridge Telemetry",
+      "type": "row"
+    },
+    {
+      "datasource": "Prometheus",
+      "fieldConfig": {
+        "defaults": {
+          "color": { "mode": "palette-classic" },
+          "unit": "ops"
+        }
+      },
+      "gridPos": { "h": 7, "w": 12, "x": 0, "y": 9 },
+      "id": 4,
+      "title": "Relayed Events & Verifications",
+      "type": "timeseries",
+      "targets": [
+        {
+          "expr": "sum(rate(audit_bridge_relayed_events_total[1m])) by (target_chain, status)",
+          "legendFormat": "Relayed: {{target_chain}} ({{status}})"
+        },
+        {
+          "expr": "sum(rate(audit_event_verification_total[1m])) by (chain, status)",
+          "legendFormat": "Verified: {{chain}} ({{status}})"
+        }
+      ]
+    },
+    {
+      "datasource": "Prometheus",
+      "fieldConfig": {
+        "defaults": {
+          "color": { "mode": "palette-classic" },
+          "unit": "short"
+        }
+      },
+      "gridPos": { "h": 7, "w": 12, "x": 12, "y": 9 },
+      "id": 5,
+      "title": "Pipeline Health & Queue Depth",
+      "type": "timeseries",
+      "targets": [
+        {
+          "expr": "audit_ingestion_lag_ledgers",
+          "legendFormat": "Ingestion Lag (Ledgers)"
+        },
+        {
+          "expr": "audit_dead_letter_queue_size",
+          "legendFormat": "Dead Letter Queue Size"
+        }
+      ]
+    },
+    {
+      "collapsed": false,
+      "gridPos": { "h": 1, "w": 24, "x": 0, "y": 16 },
+      "id": 102,
+      "title": "Correlated Logs (Loki) & Distributed Traces (Tempo)",
+      "type": "row"
+    },
+    {
+      "datasource": "Loki",
+      "gridPos": { "h": 10, "w": 24, "x": 0, "y": 17 },
+      "id": 6,
+      "title": "Live Structured Log Stream (with trace_id links to Tempo)",
+      "type": "logs",
+      "targets": [
+        {
+          "expr": "{service=~\"audit-.+\"} | json",
+          "legendFormat": "{{service}} - {{level}}"
+        }
+      ]
+    }
+  ],
+  "schemaVersion": 38,
+  "style": "dark",
+  "tags": ["audit-ledger", "observability", "opentelemetry", "prometheus", "loki", "tempo"],
+  "time": { "from": "now-6h", "to": "now" },
+  "title": "Audit Ledger - Unified Observability Stack",
+  "uid": "audit-ledger-unified-observability"
+}
