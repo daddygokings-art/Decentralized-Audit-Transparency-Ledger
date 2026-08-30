@@ -1,0 +1,48 @@
+name: Performance
+
+on:
+  push:
+    branches: [master, main]
+  pull_request:
+  workflow_dispatch:
+
+jobs:
+  k6:
+    name: k6 performance checks
+    runs-on: ubuntu-latest
+    timeout-minutes: 25
+    steps:
+      - name: Check out repository
+        uses: actions/checkout@v4
+
+      - name: Start local stack
+        run: docker compose up -d --wait rest relayer metrics-exporter
+
+      - name: API performance smoke test
+        uses: grafana/k6-action@v0.3.1
+        with:
+          filename: performance/k6/api.js
+          args: --vus 10 --duration 30s
+        env:
+          API_BASE_URL: http://localhost:3002
+
+      - name: Contract RPC performance check
+        uses: grafana/k6-action@v0.3.1
+        with:
+          filename: performance/k6/contract.js
+          args: --vus 5 --duration 20s
+        env:
+          CONTRACT_RPC_URL: https://soroban-testnet.stellar.org
+
+      - name: Bridge performance validation
+        uses: grafana/k6-action@v0.3.1
+        with:
+          filename: performance/k6/bridge.js
+          args: --vus 8 --duration 30s
+        env:
+          RELAYER_URL: http://localhost:8080
+          METRICS_URL: http://localhost:8000
+
+      - name: Stop local stack
+        if: always()
+        run: docker compose down -v
