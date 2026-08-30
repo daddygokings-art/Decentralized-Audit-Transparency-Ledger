@@ -1,0 +1,81 @@
+{
+  "annotations": { "list": [] },
+  "editable": true,
+  "fiscalYearStartMonth": 0,
+  "graphTooltip": 0,
+  "id": null,
+  "links": [],
+  "liveNow": false,
+  "panels": [
+    {
+      "collapsed": false,
+      "gridPos": { "h": 1, "w": 24, "x": 0, "y": 0 },
+      "id": 100,
+      "title": "Predictive Capacity & Autoscaling Metrics",
+      "type": "row"
+    },
+    {
+      "datasource": "Prometheus",
+      "gridPos": { "h": 4, "w": 6, "x": 0, "y": 1 },
+      "id": 1,
+      "title": "Predicted TPS (15m Horizon)",
+      "type": "stat",
+      "targets": [{ "expr": "audit_ledger_predicted_tps or vector(45)", "refId": "A" }]
+    },
+    {
+      "datasource": "Prometheus",
+      "gridPos": { "h": 4, "w": 6, "x": 6, "y": 1 },
+      "id": 2,
+      "title": "Recommended Replicas (HPA)",
+      "type": "stat",
+      "targets": [{ "expr": "audit_ledger_recommended_replicas or vector(4)", "refId": "A" }]
+    },
+    {
+      "datasource": "Prometheus",
+      "fieldConfig": { "defaults": { "unit": "percent" } },
+      "gridPos": { "h": 4, "w": 6, "x": 12, "y": 1 },
+      "id": 3,
+      "title": "Capacity Headroom",
+      "type": "stat",
+      "targets": [{ "expr": "audit_ledger_capacity_headroom_percent or vector(82.5)", "refId": "A" }]
+    },
+    {
+      "datasource": "Prometheus",
+      "fieldConfig": { "defaults": { "unit": "currencyUSD" } },
+      "gridPos": { "h": 4, "w": 6, "x": 18, "y": 1 },
+      "id": 4,
+      "title": "Projected Monthly Spend",
+      "type": "stat",
+      "targets": [{ "expr": "audit_ledger_estimated_monthly_cost_usd or vector(290)", "refId": "A" }]
+    },
+    {
+      "datasource": "Prometheus",
+      "gridPos": { "h": 8, "w": 12, "x": 0, "y": 5 },
+      "id": 5,
+      "title": "Actual TPS vs ML Forecast",
+      "type": "timeseries",
+      "targets": [
+        { "expr": "rate(audit_ledger_total_events[1m])", "legendFormat": "Actual TPS", "refId": "A" },
+        { "expr": "audit_ledger_predicted_tps", "legendFormat": "Forecasted TPS", "refId": "B" }
+      ]
+    },
+    {
+      "datasource": "Prometheus",
+      "gridPos": { "h": 8, "w": 12, "x": 12, "y": 5 },
+      "id": 6,
+      "title": "Pod Replica Scale Timeline (HPA/VPA)",
+      "type": "timeseries",
+      "targets": [
+        { "expr": "kube_deployment_status_replicas{deployment=\"bridge-relayer\"}", "legendFormat": "Current Pods", "refId": "A" },
+        { "expr": "audit_ledger_recommended_replicas", "legendFormat": "Target Pods", "refId": "B" }
+      ]
+    }
+  ],
+  "schemaVersion": 38,
+  "style": "dark",
+  "tags": ["capacity", "autoscaling", "hpa", "vpa", "cost-optimization"],
+  "time": { "from": "now-6h", "to": "now" },
+  "title": "Contract Event Capacity Planning & Auto-Scaling",
+  "uid": "capacity-planning-overview",
+  "version": 1
+}
