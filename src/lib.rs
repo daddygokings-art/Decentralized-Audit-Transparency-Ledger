@@ -63,6 +63,12 @@ pub mod privacy_preserving_analytics;
 // Contract event data governance and catalog (issue #527)
 pub mod data_governance;
 
+// Green computing and carbon tracking (issue #508)
+pub mod green_computing;
+
+#[cfg(test)]
+mod green_computing_tests;
+
 /// Zero/invalid Stellar address (all zeroes) used to reject `NewOwnerIsZero`.
 const NULL_ACCOUNT: &str = "GAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAWHF";
 
