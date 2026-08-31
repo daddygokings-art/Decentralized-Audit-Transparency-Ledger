@@ -3212,6 +3212,83 @@ fn test_metadata_schema_per_type_isolation() {
     assert_eq!(client.total_events(), 2);
 }
 
+#[test]
+fn test_schema_registry_supports_versioned_validation() {
+    let (env, owner, client) = create_ledger();
+    let event_type = symbol_short!("payment");
+    let schema = Schema {
+        format: SchemaFormat::JsonSchemaDraft7,
+        version: 1,
+        definition: Bytes::from_slice(&env, br#"{"type":"object","required":["amount"],"properties":{"amount":{"type":"number"}}}"#),
+        compatibility: SchemaCompatibility::Backward,
+    };
+    env.mock_all_auths();
+    client.register_schema(&owner, &event_type, &schema, &1);
+    let stored = client.get_schema(&event_type, &1);
+    assert!(stored.is_some());
+    assert_eq!(stored.unwrap().version, 1);
+
+    let versions = client.list_schemas(&event_type);
+    assert_eq!(versions.len(), 1);
+    assert_eq!(versions.get(0).unwrap(), 1);
+}
+
+#[test]
+fn test_schema_compatibility_detects_breaking_change() {
+    let (env, owner, client) = create_ledger();
+    let event_type = symbol_short!("payment");
+    let v1 = Schema {
+        format: SchemaFormat::JsonSchemaDraft7,
+        version: 1,
+        definition: Bytes::from_slice(&env, br#"{"type":"object","required":["amount"],"properties":{"amount":{"type":"number"}}}"#),
+        compatibility: SchemaCompatibility::Backward,
+    };
+    let v2 = Schema {
+        format: SchemaFormat::JsonSchemaDraft7,
+        version: 2,
+        definition: Bytes::from_slice(&env, br#"{"type":"object","required":["currency"],"properties":{"currency":{"type":"string"}}}"#),
+        compatibility: SchemaCompatibility::Breaking,
+    };
+    env.mock_all_auths();
+    client.register_schema(&owner, &event_type, &v1, &1);
+    client.register_schema(&owner, &event_type, &v2, &2);
+    let compatibility = client.check_schema_compatibility(&v1, &v2);
+    assert_eq!(compatibility, SchemaCompatibility::Breaking);
+    assert!(client.is_backward_compatible(&v1, &v2) == false);
+    assert!(client.is_forward_compatible(&v1, &v2) == false);
+}
+
+#[test]
+fn test_schema_migration_registers_migration_path() {
+    let (env, owner, client) = create_ledger();
+    let event_type = symbol_short!("payment");
+    let v1 = Schema {
+        format: SchemaFormat::JsonSchemaDraft7,
+        version: 1,
+        definition: Bytes::from_slice(&env, br#"{"type":"object","required":["amount"],"properties":{"amount":{"type":"number"}}}"#),
+        compatibility: SchemaCompatibility::Backward,
+    };
+    let v2 = Schema {
+        format: SchemaFormat::JsonSchemaDraft7,
+        version: 2,
+        definition: Bytes::from_slice(&env, br#"{"type":"object","required":["amount","currency"],"properties":{"amount":{"type":"number"},"currency":{"type":"string"}}}"#),
+        compatibility: SchemaCompatibility::Backward,
+    };
+    let migration = MigrationFunction {
+        from_version: 1,
+        to_version: 2,
+        name: symbol_short!("add_currency"),
+        body: Bytes::from_slice(&env, b"add_currency"),
+    };
+    env.mock_all_auths();
+    client.register_schema(&owner, &event_type, &v1, &1);
+    client.register_schema(&owner, &event_type, &v2, &2);
+    client.migrate_event_metadata(&owner, &event_type, &1, &2, &migration);
+    let stored = client.get_migration_function(&event_type, &1, &2);
+    assert!(stored.is_some());
+    assert_eq!(stored.unwrap().to_version, 2);
+}
+
 // ── TTL auto-cleanup (#200) ───────────────────────────────────────────────────
 
 /// cleanup_expired_events returns 0 when TTL is disabled (ttl = 0).

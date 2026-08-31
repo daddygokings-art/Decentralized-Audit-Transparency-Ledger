@@ -75,6 +75,46 @@ const MAX_CATEGORY_LEN: u32 = 18;
 /// Maximum acceptable drift for ledger timestamps when logging new events.
 const MAX_TIMESTAMP_DRIFT_SECONDS: u64 = 3600;
 
+/// Supported schema definition formats for event metadata.
+#[contracttype]
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub enum SchemaFormat {
+    JsonSchemaDraft7,
+    JsonSchema201909,
+    Protobuf,
+}
+
+/// Compatibility classification for schema evolution.
+#[contracttype]
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub enum SchemaCompatibility {
+    Full,
+    Backward,
+    Forward,
+    Breaking,
+    Unknown,
+}
+
+/// Versioned metadata schema descriptor for an event type.
+#[contracttype]
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct Schema {
+    pub format: SchemaFormat,
+    pub version: u32,
+    pub definition: Bytes,
+    pub compatibility: SchemaCompatibility,
+}
+
+/// Migration function used to transform metadata between schema versions.
+#[contracttype]
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct MigrationFunction {
+    pub from_version: u32,
+    pub to_version: u32,
+    pub name: Symbol,
+    pub body: Bytes,
+}
+
 /// An audit event stored on-chain.
 ///
 /// # ID scheme (issue #70)
@@ -193,6 +233,12 @@ pub enum DataKey {
     GlobalMetadataMaxSize,
     /// Per-event-type metadata validation schema (issue #202). Absent = no schema constraint.
     MetadataSchema(Symbol),
+    /// Versioned schema registry entry for a specific event type and schema version.
+    EventSchema(Symbol, u32),
+    /// Registered schema versions keyed by event type.
+    SchemaVersions(Symbol),
+    /// Migration function for metadata updates between schema versions.
+    EventSchemaMigration(Symbol, u32, u32),
     /// Cached full runtime state for fast reads.
     RuntimeState,
     /// Signature stored for an event (issue #69): (pubkey, signature).
@@ -4043,6 +4089,137 @@ impl AuditLedger {
             .unwrap_or_else(|| Bytes::new(&env))
     }
 
+    /// Register or replace a versioned schema for an event type.
+    pub fn register_schema(env: Env, caller: Address, event_type: Symbol, schema: Schema, version: u32) {
+        Self::require_initialized(&env);
+        caller.require_auth();
+        if let Some(true) = env.storage().instance().get::<_, bool>(&DataKey::Paused) {
+            panic_with_error!(&env, ContractError::ContractPaused);
+        }
+        Self::require_owner_or_multisig(&env, &caller);
+        if version == 0 || schema.version != version {
+            panic_with_error!(&env, ContractError::InvalidVersion);
+        }
+        let mut versions: Vec<u32> = env
+            .storage()
+            .instance()
+            .get(&DataKey::SchemaVersions(event_type.clone()))
+            .unwrap_or_else(|| Vec::new(&env));
+        if !Self::contains_u32(&versions, version) {
+            Self::insert_u32_sorted(&mut versions, version);
+            env.storage().instance().set(&DataKey::SchemaVersions(event_type.clone()), &versions);
+        }
+        env.storage()
+            .instance()
+            .set(&DataKey::EventSchema(event_type.clone(), version), &schema);
+        env.events().publish(
+            (Symbol::new(&env, "governance"), Symbol::new(&env, "register_schema")),
+            (caller, event_type, version),
+        );
+    }
+
+    /// Return the schema for an event type and version, if present.
+    pub fn get_schema(env: Env, event_type: Symbol, version: u32) -> Option<Schema> {
+        Self::require_initialized(&env);
+        env.storage().instance().get(&DataKey::EventSchema(event_type, version))
+    }
+
+    /// Return all schema versions registered for an event type.
+    pub fn list_schemas(env: Env, event_type: Symbol) -> Vec<u32> {
+        Self::require_initialized(&env);
+        env.storage()
+            .instance()
+            .get(&DataKey::SchemaVersions(event_type))
+            .unwrap_or_else(|| Vec::new(&env))
+    }
+
+    /// Record a migration path between two schema versions.
+    pub fn migrate_event_metadata(
+        env: Env,
+        caller: Address,
+        event_type: Symbol,
+        from_version: u32,
+        to_version: u32,
+        migration_fn: MigrationFunction,
+    ) {
+        Self::require_initialized(&env);
+        caller.require_auth();
+        if let Some(true) = env.storage().instance().get::<_, bool>(&DataKey::Paused) {
+            panic_with_error!(&env, ContractError::ContractPaused);
+        }
+        Self::require_owner_or_multisig(&env, &caller);
+        if from_version == 0 || to_version == 0 || from_version == to_version {
+            panic_with_error!(&env, ContractError::InvalidVersion);
+        }
+        if migration_fn.from_version != from_version || migration_fn.to_version != to_version {
+            panic_with_error!(&env, ContractError::InvalidVersion);
+        }
+        env.storage().instance().set(
+            &DataKey::EventSchemaMigration(event_type.clone(), from_version, to_version),
+            &migration_fn,
+        );
+        env.events().publish(
+            (Symbol::new(&env, "governance"), Symbol::new(&env, "migrate_event_metadata")),
+            (caller, event_type, from_version, to_version),
+        );
+    }
+
+    /// Return the migration function registered between two schema versions.
+    pub fn get_migration_function(
+        env: Env,
+        event_type: Symbol,
+        from_version: u32,
+        to_version: u32,
+    ) -> Option<MigrationFunction> {
+        Self::require_initialized(&env);
+        env.storage()
+            .instance()
+            .get(&DataKey::EventSchemaMigration(event_type, from_version, to_version))
+    }
+
+    /// Check compatibility for a schema evolution.
+    pub fn check_schema_compatibility(env: Env, left: Schema, right: Schema) -> SchemaCompatibility {
+        Self::require_initialized(&env);
+        if left.format != right.format {
+            return SchemaCompatibility::Breaking;
+        }
+        if left.definition == right.definition && left.version == right.version {
+            return SchemaCompatibility::Full;
+        }
+        let left_required = Self::required_fields(&env, &left.definition);
+        let right_required = Self::required_fields(&env, &right.definition);
+        if left_required == right_required {
+            return SchemaCompatibility::Full;
+        }
+        if Self::contains_all(&left_required, &right_required) && !Self::contains_all(&right_required, &left_required) {
+            return SchemaCompatibility::Backward;
+        }
+        if Self::contains_all(&right_required, &left_required) && !Self::contains_all(&left_required, &right_required) {
+            return SchemaCompatibility::Forward;
+        }
+        if left.version < right.version {
+            return SchemaCompatibility::Breaking;
+        }
+        if left.version > right.version {
+            return SchemaCompatibility::Breaking;
+        }
+        SchemaCompatibility::Unknown
+    }
+
+    /// Return true when a new schema remains compatible with previously emitted data.
+    pub fn is_backward_compatible(env: Env, left: Schema, right: Schema) -> bool {
+        Self::require_initialized(&env);
+        let compatibility = Self::check_schema_compatibility(env.clone(), left, right);
+        compatibility == SchemaCompatibility::Full || compatibility == SchemaCompatibility::Backward
+    }
+
+    /// Return true when older readers can still consume data from the new schema.
+    pub fn is_forward_compatible(env: Env, left: Schema, right: Schema) -> bool {
+        Self::require_initialized(&env);
+        let compatibility = Self::check_schema_compatibility(env.clone(), left, right);
+        compatibility == SchemaCompatibility::Full || compatibility == SchemaCompatibility::Forward
+    }
+
     /// Set the TTL for events written to persistent storage (#121).
     ///
     /// When `ttl_ledgers > 0`, subsequent `log_event` calls store each event in
@@ -4586,6 +4763,87 @@ impl AuditLedger {
         let b3 = schema.get(3).unwrap() as u32;
         let min_len: u32 = b0 | (b1 << 8) | (b2 << 16) | (b3 << 24);
         metadata.len() >= min_len
+    }
+
+    fn contains_u32(values: &Vec<u32>, target: u32) -> bool {
+        for i in 0..values.len() {
+            if values.get(i).unwrap() == target {
+                return true;
+            }
+        }
+        false
+    }
+
+    fn insert_u32_sorted(values: &mut Vec<u32>, target: u32) {
+        let mut inserted = false;
+        for i in 0..values.len() {
+            if values.get(i).unwrap() > target {
+                values.insert(i, target);
+                inserted = true;
+                break;
+            }
+        }
+        if !inserted {
+            values.push_back(target);
+        }
+    }
+
+    fn contains_all(left: &Vec<String>, right: &Vec<String>) -> bool {
+        for i in 0..right.len() {
+            let value = right.get(i).unwrap();
+            let mut found = false;
+            for j in 0..left.len() {
+                if left.get(j).unwrap() == value {
+                    found = true;
+                    break;
+                }
+            }
+            if !found {
+                return false;
+            }
+        }
+        true
+    }
+
+    fn required_fields(env: &Env, definition: &Bytes) -> Vec<String> {
+        let mut result: Vec<String> = Vec::new(env);
+        let text = match core::str::from_utf8(definition.as_slice()) {
+            Ok(value) => value,
+            Err(_) => return result,
+        };
+        let mut cursor = 0usize;
+        while cursor + 9 < text.len() {
+            let chunk = &text[cursor..];
+            let required_pos = match chunk.find("\"required\"") {
+                Some(pos) => pos,
+                None => break,
+            };
+            let after_required = &chunk[required_pos + "\"required\"".len()..];
+            let bracket_start = match after_required.find('[') {
+                Some(pos) => pos,
+                None => break,
+            };
+            let list = &after_required[bracket_start + 1..];
+            let mut parse_cursor = 0usize;
+            while parse_cursor < list.len() {
+                let quote_pos = match list[parse_cursor..].find('"') {
+                    Some(pos) => parse_cursor + pos,
+                    None => break,
+                };
+                let name_start = quote_pos + 1;
+                let name_end = match &list[name_start..].find('"') {
+                    Some(pos) => name_start + pos,
+                    None => break,
+                };
+                if name_start < name_end {
+                    let field_name = &list[name_start..name_end];
+                    result.push_back(String::from_str(env, field_name));
+                }
+                parse_cursor = name_end + 1;
+            }
+            break;
+        }
+        result
     }
 
     /// Panic with `MetadataSchemaViolation` if `metadata` does not satisfy the
@@ -5495,7 +5753,6 @@ impl AuditLedger {
         });
         trail
     }
-}
 
     /// Attach a human-readable tag to a specific historical version (e.g.
     /// `approved`, `superseded`). Admin/owner-only.
@@ -5523,7 +5780,6 @@ impl AuditLedger {
         Self::require_initialized(&env);
         env.storage().instance().get(&DataKey::EventVersionTag(index, version))
     }
-}  // end impl AuditLedger
 
     /// Semantic field-level diff between two versions of an event
     /// (issue #368). Versions are 0-based indices into the event's audit trail.

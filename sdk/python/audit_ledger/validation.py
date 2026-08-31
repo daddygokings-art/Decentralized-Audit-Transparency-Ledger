@@ -57,34 +57,59 @@ BASE_EVENT_SCHEMA: Dict[str, Any] = {
 
 
 class SchemaRegistry:
-    """In-memory schema registry with optional per-schema caching.
-
-    Schemas are stored by name and can be retrieved, registered, updated,
-    or removed at runtime.  Compiled validators (when *jsonschema* is
-    available) are cached so each schema is compiled only once.
-
-    Example::
-
-        registry = SchemaRegistry()
-        registry.register("payment", {
-            "type": "object",
-            "required": ["amount", "currency"],
-            "properties": {
-                "amount": {"type": "number", "minimum": 0},
-                "currency": {"type": "string"},
-            },
-        })
-        registry.validate("payment", {"amount": 100, "currency": "USD"})
-    """
+    """In-memory schema registry with per-event-type versioning and migration support."""
 
     _JSONSCHEMA_AVAILABLE: Optional[bool] = None
 
     def __init__(self) -> None:
         self._schemas: Dict[str, Dict[str, Any]] = {}
-        # cache: schema_name -> compiled validator (or None if jsonschema unavailable)
+        self._schema_versions: Dict[str, list[int]] = {}
+        self._migrations: Dict[tuple[str, int, int], Dict[str, Any]] = {}
         self._validator_cache: Dict[str, Any] = {}
-        # Always pre-register the base schema
         self.register("__base__", BASE_EVENT_SCHEMA)
+
+    def register_schema(self, event_type: str, schema: Dict[str, Any], version: int = 1) -> None:
+        """Register a versioned schema for an event type."""
+        if not isinstance(schema, dict):
+            raise TypeError(f"Schema must be a dict, got {type(schema).__name__}")
+        if version <= 0:
+            raise ValueError("Schema version must be positive")
+        self._schemas[f"{event_type}:{version}"] = schema
+        versions = self._schema_versions.setdefault(event_type, [])
+        if version not in versions:
+            versions.append(version)
+            versions.sort()
+        self._validator_cache.pop(f"{event_type}:{version}", None)
+
+    def get_schema(self, event_type: str, version: int) -> Dict[str, Any]:
+        key = f"{event_type}:{version}"
+        try:
+            return self._schemas[key]
+        except KeyError as exc:
+            raise SchemaNotFoundError(f"No schema registered for event type {event_type!r} version {version!r}") from exc
+
+    def list_schemas(self, event_type: Optional[str] = None) -> list[int]:
+        if event_type is None:
+            versions: list[int] = []
+            for evt in self._schema_versions:
+                versions.extend(self._schema_versions[evt])
+            return sorted(set(versions))
+        return list(self._schema_versions.get(event_type, []))
+
+    def register(self, name: str, schema: Dict[str, Any]) -> None:
+        """Compatibility alias for simple schema registration using a single name."""
+        self._schemas[name] = schema
+        self._validator_cache.pop(name, None)
+
+    def get(self, name: str) -> Dict[str, Any]:
+        try:
+            return self._schemas[name]
+        except KeyError:
+            raise SchemaNotFoundError(f"No schema registered with name: {name!r}")
+
+    def remove(self, name: str) -> None:
+        self._schemas.pop(name, None)
+        self._validator_cache.pop(name, None)
 
     # ---- registry CRUD -------------------------------------------------
 
@@ -145,35 +170,68 @@ class SchemaRegistry:
         self._validate_against_schema(schema, data, schema_name=name)
 
     def validate_event_metadata(
-        self, event_type: str, metadata: Any, *, fallback_to_base: bool = True
+        self, event_type: str, metadata: Any, *, fallback_to_base: bool = True, version: Optional[int] = None
     ) -> None:
         """Validate *metadata* for the given *event_type*.
 
-        Looks up a schema named exactly *event_type*.  If no such schema is
-        registered and *fallback_to_base* is True, falls back to the built-in
-        base event schema.
-
-        Args:
-            event_type: The event type string (e.g. ``"payment"``).
-            metadata: The decoded metadata object to validate.
-            fallback_to_base: If True, use the base schema when no
-                event-specific schema exists.
-
-        Raises:
-            SchemaNotFoundError: If *event_type* has no schema and
-                *fallback_to_base* is False.
-            SchemaValidationError: If *metadata* fails validation.
+        If *version* is provided the schema for that version is used. Otherwise,
+        the latest registered version for this event type is selected, and if no
+        event-specific schema exists the base schema is used as fallback.
         """
-        if self.has(event_type):
-            self.validate(event_type, metadata)
-        elif fallback_to_base:
-            self._validate_against_schema(
-                BASE_EVENT_SCHEMA, metadata, schema_name="__base__"
-            )
-        else:
-            raise SchemaNotFoundError(
-                f"No schema registered for event type: {event_type!r}"
-            )
+        if version is not None:
+            schema_name = f"{event_type}:{version}"
+            if self._schemas.get(schema_name) is not None:
+                self._validate_against_schema(self._schemas[schema_name], metadata, schema_name=schema_name)
+                return
+            if self._schemas.get(event_type) is not None:
+                self._validate_against_schema(self._schemas[event_type], metadata, schema_name=event_type)
+                return
+            if not fallback_to_base:
+                raise SchemaNotFoundError(f"No schema registered for event type: {event_type!r} version {version!r}")
+
+        schema_direct = self._schemas.get(event_type)
+        if schema_direct is not None:
+            self._validate_against_schema(schema_direct, metadata, schema_name=event_type)
+            return
+
+        latest_version = None
+        if self._schema_versions.get(event_type):
+            latest_version = max(self._schema_versions[event_type])
+        if latest_version is not None:
+            self.validate_event_metadata(event_type, metadata, fallback_to_base=False, version=latest_version)
+            return
+        if fallback_to_base:
+            self._validate_against_schema(BASE_EVENT_SCHEMA, metadata, schema_name="__base__")
+            return
+        raise SchemaNotFoundError(f"No schema registered for event type: {event_type!r}")
+
+    def migrate_event_metadata(self, event_type: str, data: Any, from_version: int, to_version: int) -> Any:
+        """Apply a registered migration between schema versions."""
+        key = (event_type, from_version, to_version)
+        migration = self._migrations.get(key)
+        if migration is None:
+            raise SchemaNotFoundError(f"No migration registered for {event_type!r} from {from_version} to {to_version}")
+        fn = migration.get("fn")
+        if fn is None:
+            return data
+        return fn(data)
+
+    def register_migration(self, event_type: str, from_version: int, to_version: int, fn) -> None:
+        """Register a migration function for a schema version transition."""
+        self._migrations[(event_type, from_version, to_version)] = {"fn": fn}
+
+    @staticmethod
+    def check_compatibility(old_schema: Dict[str, Any], new_schema: Dict[str, Any]) -> str:
+        """Return compatibility classification for a schema evolution."""
+        old_required = set(old_schema.get("required", []))
+        new_required = set(new_schema.get("required", []))
+        if old_required == new_required:
+            return "full"
+        if old_required.issubset(new_required):
+            return "backward"
+        if new_required.issubset(old_required):
+            return "forward"
+        return "breaking"
 
     # ---- internals -----------------------------------------------------
 
