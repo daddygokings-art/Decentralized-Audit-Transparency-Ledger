@@ -63,6 +63,12 @@ pub mod privacy_preserving_analytics;
 // Contract event data governance and catalog (issue #527)
 pub mod data_governance;
 
+// On-chain inverted indexes for keyword-based event search (issue #359)
+pub mod inverted_index;
+
+#[cfg(test)]
+mod inverted_index_tests;
+
 /// Zero/invalid Stellar address (all zeroes) used to reject `NewOwnerIsZero`.
 const NULL_ACCOUNT: &str = "GAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAWHF";
 
