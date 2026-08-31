@@ -63,6 +63,12 @@ pub mod privacy_preserving_analytics;
 // Contract event data governance and catalog (issue #527)
 pub mod data_governance;
 
+// Multi-tenant support with namespace isolation (issue #394)
+pub mod multi_tenant;
+
+#[cfg(test)]
+mod multi_tenant_tests;
+
 /// Zero/invalid Stellar address (all zeroes) used to reject `NewOwnerIsZero`.
 const NULL_ACCOUNT: &str = "GAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAWHF";
 
