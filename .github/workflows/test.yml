@@ -17,6 +17,11 @@ jobs:
     runs-on: ubuntu-latest
     permissions:
       contents: read
+    strategy:
+      fail-fast: false
+      max-parallel: 2
+      matrix:
+        shard: [0, 1, 2, 3]
     steps:
       - uses: actions/checkout@v4
         with:
@@ -36,8 +41,15 @@ jobs:
       - name: Build
         run: cargo build
 
-      - name: Run tests
-        run: cargo test
+      - name: Run sharded contract event tests
+        env:
+          TOTAL_SHARDS: 4
+          SHARD_INDEX: ${{ matrix.shard }}
+          MAX_RETRIES: 2
+          CARGO_BUILD_JOBS: 2
+          RUST_TEST_THREADS: 1
+          LOG_DIR: target/ci
+        run: bash scripts/ci_contract_event_tests.sh
 
       # Quick coverage gate: reuse the pre-generated summary if the coverage
       # workflow has already run (artefact available). On PRs this is a
