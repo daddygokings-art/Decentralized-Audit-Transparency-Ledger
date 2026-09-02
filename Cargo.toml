@@ -16,7 +16,7 @@ proptest = "1"
 
 # ── Testcontainers integration-test dependencies ───────────────────────────────
 # Core testcontainers runtime (async, tokio-based)
-testcontainers        = { version = "0.28.0", default-features = false, features = ["ring"] }
+testcontainers        = { version = "0.27.3", default-features = false, features = ["ring"] }
 # Community modules: PostgreSQL, Redis, Kafka, Zookeeper (Kafka dependency)
 testcontainers-modules = { version = "0.15.0", default-features = false, features = [
     "postgres",
