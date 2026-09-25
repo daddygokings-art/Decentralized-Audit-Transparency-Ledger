@@ -46,6 +46,7 @@ from .batch import (
 from .cache import CacheConfig, CacheStats, LRUCache
 from .client import AuditLedgerClient
 from .models import Event, ContractError, RPCError, AuditLedgerError, Page
+from .crdt import CRDTOperation, EventCRDT
 from .async_client import AsyncAuditLedgerClient
 from .social_impact import (
     SocialImpactMetrics,
@@ -89,6 +90,9 @@ __all__ = [
     # Models
     "Event",
     "Page",
+    # Contract event collaboration (issue #431)
+    "CRDTOperation",
+    "EventCRDT",
     # Exceptions (issue #249)
     "AuditLedgerError",
     "ContractError",
