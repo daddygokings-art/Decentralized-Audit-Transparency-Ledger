@@ -1,0 +1,32 @@
+{
+  "name": "@audit-ledger/contract-debugger",
+  "version": "1.0.0",
+  "description": "Transaction tracer and step-through debugger for AuditLedger Soroban contract interactions (#408)",
+  "main": "dist/index.js",
+  "types": "dist/index.d.ts",
+  "bin": {
+    "audit-ledger-debug": "./dist/cli.js"
+  },
+  "scripts": {
+    "build": "tsc",
+    "typecheck": "tsc --noEmit",
+    "test": "vitest run",
+    "test:watch": "vitest",
+    "dap": "ts-node src/cli.ts dap"
+  },
+  "devDependencies": {
+    "@types/node": "^20.11.0",
+    "ts-node": "^10.9.2",
+    "typescript": "^5.3.3",
+    "vitest": "^1.6.0"
+  },
+  "keywords": [
+    "soroban",
+    "stellar",
+    "debugger",
+    "dap",
+    "tracer",
+    "audit-ledger"
+  ],
+  "license": "Apache-2.0"
+}
