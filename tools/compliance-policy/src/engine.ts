@@ -1,11 +1,16 @@
 import { execSync } from 'child_process';
 import * as fs from 'fs';
 import * as path from 'path';
-import { ContractEvent, PolicyEvaluationResult, PolicyViolation } from './types';
+import { ContractEvent, PolicyDecisionLogEntry, PolicyEvaluationResult, PolicyViolation } from './types';
+
+const MAX_DECISION_LOG_ENTRIES = 1000;
+
 
 export class PolicyEngine {
   private policyDir: string;
   private hasOpaCli: boolean;
+  private decisionLog: PolicyDecisionLogEntry[] = [];
+  private decisionSequence = 0;
 
   constructor(policyDir?: string) {
     this.policyDir = policyDir || path.resolve(__dirname, '../../../policies/compliance');
@@ -25,10 +30,67 @@ export class PolicyEngine {
    * Evaluates input events against Rego policies
    */
   public evaluate(events: ContractEvent[]): PolicyEvaluationResult[] {
-    if (this.hasOpaCli) {
-      return this.evaluateWithOpaCli(events);
+    const evaluator = this.hasOpaCli ? 'opa' : 'embedded';
+    const results = this.hasOpaCli
+      ? this.evaluateWithOpaCli(events)
+      : this.evaluateEmbedded(events);
+    this.recordDecisions(events, results, evaluator);
+    return results;
+  }
+
+  /** Return the most recent policy decisions in insertion order. */
+  public getDecisionLog(): readonly PolicyDecisionLogEntry[] {
+    return this.decisionLog;
+  }
+
+  /** Clear in-memory decision history, for example between test cases. */
+  public clearDecisionLog(): void {
+    this.decisionLog = [];
+    this.decisionSequence = 0;
+  }
+
+  /** List policy source files while excluding Rego test files. */
+  public listPolicies(): string[] {
+    if (!fs.existsSync(this.policyDir)) return [];
+    return this.listRegoFiles(this.policyDir)
+      .filter((file) => !file.endsWith('_test.rego'))
+      .sort();
+  }
+
+  private listRegoFiles(directory: string): string[] {
+    const files: string[] = [];
+    for (const entry of fs.readdirSync(directory, { withFileTypes: true })) {
+      const fullPath = path.join(directory, entry.name);
+      if (entry.isDirectory()) {
+        files.push(...this.listRegoFiles(fullPath));
+      } else if (entry.isFile() && entry.name.endsWith('.rego')) {
+        files.push(path.relative(this.policyDir, fullPath).replaceAll(path.sep, '/'));
+      }
     }
-    return this.evaluateEmbedded(events);
+    return files;
+  }
+
+  private recordDecisions(
+    events: ContractEvent[],
+    results: PolicyEvaluationResult[],
+    evaluator: 'opa' | 'embedded'
+  ): void {
+    const eventIds = events.map((event) => event.id);
+    for (const result of results) {
+      this.decisionSequence += 1;
+      this.decisionLog.push({
+        decision_id: `${Date.now()}-${this.decisionSequence}`,
+        event_ids: eventIds,
+        policy_package: result.policy_package,
+        compliant: result.compliant,
+        violation_count: result.violations.length,
+        decided_at: result.evaluated_at,
+        evaluator
+      });
+    }
+    if (this.decisionLog.length > MAX_DECISION_LOG_ENTRIES) {
+      this.decisionLog.splice(0, this.decisionLog.length - MAX_DECISION_LOG_ENTRIES);
+    }
   }
 
   /**

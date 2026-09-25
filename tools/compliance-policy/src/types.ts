@@ -33,6 +33,16 @@ export interface PolicyEvaluationResult {
   evaluated_at: string;
 }
 
+export interface PolicyDecisionLogEntry {
+  decision_id: string;
+  event_ids: string[];
+  policy_package: string;
+  compliant: boolean;
+  violation_count: number;
+  decided_at: string;
+  evaluator: 'opa' | 'embedded';
+}
+
 export interface DriftFinding {
   drift_id: string;
   category: string;
