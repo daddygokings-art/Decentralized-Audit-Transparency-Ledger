@@ -1,0 +1,4319 @@
+{
+  "spec_version": "1.0.0",
+  "contract": {
+    "name": "AuditLedger",
+    "crate": "audit-ledger",
+    "version": "0.1.0"
+  },
+  "meta": {
+    "sorobanSdk": "27.0.6",
+    "source": "/Users/maza/Desktop/drips/Decentralized-Audit-Transparency-Ledger/src/lib.rs",
+    "generatedBy": "sdk-codegen 1.0.0",
+    "sourceDigest": "6b2e36003ab7bca04959ee4b8f6f35393545dee4428261a50a30fc3d1e249912"
+  },
+  "types": [
+    {
+      "kind": "enum",
+      "name": "SchemaFormat",
+      "variants": [
+        {
+          "name": "JsonSchemaDraft7",
+          "value": 0
+        },
+        {
+          "name": "JsonSchema201909",
+          "value": 1
+        },
+        {
+          "name": "Protobuf",
+          "value": 2
+        }
+      ]
+    },
+    {
+      "kind": "enum",
+      "name": "SchemaCompatibility",
+      "variants": [
+        {
+          "name": "Full",
+          "value": 0
+        },
+        {
+          "name": "Backward",
+          "value": 1
+        },
+        {
+          "name": "Forward",
+          "value": 2
+        },
+        {
+          "name": "Breaking",
+          "value": 3
+        },
+        {
+          "name": "Unknown",
+          "value": 4
+        }
+      ]
+    },
+    {
+      "kind": "struct",
+      "name": "Schema",
+      "fields": [
+        {
+          "name": "format",
+          "type": {
+            "kind": "type",
+            "name": "SchemaFormat"
+          }
+        },
+        {
+          "name": "version",
+          "type": {
+            "kind": "u32"
+          }
+        },
+        {
+          "name": "definition",
+          "type": {
+            "kind": "bytes"
+          }
+        },
+        {
+          "name": "compatibility",
+          "type": {
+            "kind": "type",
+            "name": "SchemaCompatibility"
+          }
+        }
+      ]
+    },
+    {
+      "kind": "struct",
+      "name": "MigrationFunction",
+      "fields": [
+        {
+          "name": "from_version",
+          "type": {
+            "kind": "u32"
+          }
+        },
+        {
+          "name": "to_version",
+          "type": {
+            "kind": "u32"
+          }
+        },
+        {
+          "name": "name",
+          "type": {
+            "kind": "symbol"
+          }
+        },
+        {
+          "name": "body",
+          "type": {
+            "kind": "bytes"
+          }
+        }
+      ]
+    },
+    {
+      "kind": "struct",
+      "name": "Event",
+      "fields": [
+        {
+          "name": "index",
+          "type": {
+            "kind": "u32"
+          }
+        },
+        {
+          "name": "timestamp",
+          "type": {
+            "kind": "u64"
+          }
+        },
+        {
+          "name": "event_type",
+          "type": {
+            "kind": "symbol"
+          }
+        },
+        {
+          "name": "category",
+          "type": {
+            "kind": "symbol"
+          }
+        },
+        {
+          "name": "submitter",
+          "type": {
+            "kind": "address"
+          }
+        },
+        {
+          "name": "metadata",
+          "type": {
+            "kind": "bytes"
+          }
+        },
+        {
+          "name": "sub_event_type",
+          "type": {
+            "kind": "option",
+            "of": {
+              "kind": "symbol"
+            }
+          }
+        },
+        {
+          "name": "version",
+          "type": {
+            "kind": "u32"
+          }
+        },
+        {
+          "name": "event_hash",
+          "type": {
+            "kind": "bytesn",
+            "n": 32
+          }
+        },
+        {
+          "name": "prev_hash",
+          "type": {
+            "kind": "bytesn",
+            "n": 32
+          }
+        },
+        {
+          "name": "parent_event_id",
+          "type": {
+            "kind": "option",
+            "of": {
+              "kind": "bytesn",
+              "n": 32
+            }
+          }
+        }
+      ]
+    },
+    {
+      "kind": "struct",
+      "name": "EventHeader",
+      "fields": [
+        {
+          "name": "index",
+          "type": {
+            "kind": "u32"
+          }
+        },
+        {
+          "name": "timestamp",
+          "type": {
+            "kind": "u64"
+          }
+        },
+        {
+          "name": "event_type",
+          "type": {
+            "kind": "symbol"
+          }
+        },
+        {
+          "name": "submitter",
+          "type": {
+            "kind": "address"
+          }
+        }
+      ]
+    },
+    {
+      "kind": "struct",
+      "name": "EventVersion",
+      "fields": [
+        {
+          "name": "version",
+          "type": {
+            "kind": "u32"
+          }
+        },
+        {
+          "name": "data",
+          "type": {
+            "kind": "type",
+            "name": "Event"
+          }
+        },
+        {
+          "name": "updated_at",
+          "type": {
+            "kind": "u64"
+          }
+        },
+        {
+          "name": "updated_by",
+          "type": {
+            "kind": "address"
+          }
+        }
+      ]
+    },
+    {
+      "kind": "struct",
+      "name": "NonceState",
+      "fields": [
+        {
+          "name": "last_nonce",
+          "type": {
+            "kind": "u32"
+          }
+        },
+        {
+          "name": "window_size",
+          "type": {
+            "kind": "u32"
+          }
+        },
+        {
+          "name": "max_nonce",
+          "type": {
+            "kind": "u32"
+          }
+        }
+      ]
+    },
+    {
+      "kind": "struct",
+      "name": "ContractStatistics",
+      "fields": [
+        {
+          "name": "total_events",
+          "type": {
+            "kind": "u32"
+          }
+        },
+        {
+          "name": "events_by_type",
+          "type": {
+            "kind": "vec",
+            "of": {
+              "kind": "tuple",
+              "of": [
+                {
+                  "kind": "symbol"
+                },
+                {
+                  "kind": "u32"
+                }
+              ]
+            }
+          }
+        },
+        {
+          "name": "events_last_hour",
+          "type": {
+            "kind": "u32"
+          }
+        },
+        {
+          "name": "events_last_day",
+          "type": {
+            "kind": "u32"
+          }
+        },
+        {
+          "name": "events_last_week",
+          "type": {
+            "kind": "u32"
+          }
+        },
+        {
+          "name": "top_submitters",
+          "type": {
+            "kind": "vec",
+            "of": {
+              "kind": "tuple",
+              "of": [
+                {
+                  "kind": "address"
+                },
+                {
+                  "kind": "u32"
+                }
+              ]
+            }
+          }
+        }
+      ]
+    },
+    {
+      "kind": "enum",
+      "name": "ProposalAction",
+      "variants": [
+        {
+          "name": "TransferOwnership",
+          "value": 0,
+          "fields": [
+            {
+              "name": "field_0",
+              "type": {
+                "kind": "address"
+              }
+            }
+          ]
+        },
+        {
+          "name": "AddOwner",
+          "value": 1,
+          "fields": [
+            {
+              "name": "field_0",
+              "type": {
+                "kind": "address"
+              }
+            }
+          ]
+        },
+        {
+          "name": "RemoveOwner",
+          "value": 2,
+          "fields": [
+            {
+              "name": "field_0",
+              "type": {
+                "kind": "address"
+              }
+            }
+          ]
+        },
+        {
+          "name": "SetRequiredSignatures",
+          "value": 3,
+          "fields": [
+            {
+              "name": "field_0",
+              "type": {
+                "kind": "u32"
+              }
+            }
+          ]
+        },
+        {
+          "name": "SetGlobalMaxLogs",
+          "value": 4,
+          "fields": [
+            {
+              "name": "field_0",
+              "type": {
+                "kind": "u32"
+              }
+            }
+          ]
+        },
+        {
+          "name": "SetMetadataSchema",
+          "value": 5,
+          "fields": [
+            {
+              "name": "field_0",
+              "type": {
+                "kind": "symbol"
+              }
+            },
+            {
+              "name": "field_1",
+              "type": {
+                "kind": "bytes"
+              }
+            }
+          ]
+        },
+        {
+          "name": "RollbackEvent",
+          "value": 6,
+          "fields": [
+            {
+              "name": "field_0",
+              "type": {
+                "kind": "u32"
+              }
+            },
+            {
+              "name": "field_1",
+              "type": {
+                "kind": "u32"
+              }
+            }
+          ]
+        },
+        {
+          "name": "Pause",
+          "value": 7
+        },
+        {
+          "name": "Unpause",
+          "value": 8
+        }
+      ]
+    },
+    {
+      "kind": "struct",
+      "name": "Snapshot",
+      "fields": [
+        {
+          "name": "id",
+          "type": {
+            "kind": "u32"
+          }
+        },
+        {
+          "name": "timestamp",
+          "type": {
+            "kind": "u64"
+          }
+        },
+        {
+          "name": "event_count",
+          "type": {
+            "kind": "u32"
+          }
+        },
+        {
+          "name": "event_hash",
+          "type": {
+            "kind": "bytesn",
+            "n": 32
+          }
+        },
+        {
+          "name": "description",
+          "type": {
+            "kind": "bytes"
+          }
+        }
+      ]
+    },
+    {
+      "kind": "struct",
+      "name": "TtlCleanupStats",
+      "fields": [
+        {
+          "name": "runs",
+          "type": {
+            "kind": "u32"
+          }
+        },
+        {
+          "name": "ttl_extensions",
+          "type": {
+            "kind": "u32"
+          }
+        },
+        {
+          "name": "cleaned",
+          "type": {
+            "kind": "u32"
+          }
+        },
+        {
+          "name": "last_run_ledger",
+          "type": {
+            "kind": "u32"
+          }
+        }
+      ]
+    },
+    {
+      "kind": "enum",
+      "name": "Role",
+      "variants": [
+        {
+          "name": "Admin",
+          "value": 0
+        },
+        {
+          "name": "Auditor",
+          "value": 1
+        },
+        {
+          "name": "Submitter",
+          "value": 2
+        },
+        {
+          "name": "Viewer",
+          "value": 3
+        }
+      ]
+    },
+    {
+      "kind": "enum",
+      "name": "DedupPolicy",
+      "variants": [
+        {
+          "name": "None",
+          "value": 0
+        },
+        {
+          "name": "ContentHash",
+          "value": 1
+        },
+        {
+          "name": "ContentHashWithTimestamp",
+          "value": 2
+        },
+        {
+          "name": "Custom",
+          "value": 3
+        }
+      ]
+    },
+    {
+      "kind": "struct",
+      "name": "ArchiveConfig",
+      "fields": [
+        {
+          "name": "offchain_storage",
+          "type": {
+            "kind": "bool"
+          }
+        },
+        {
+          "name": "base_url",
+          "type": {
+            "kind": "bytes"
+          }
+        },
+        {
+          "name": "compression",
+          "type": {
+            "kind": "u32"
+          }
+        }
+      ]
+    },
+    {
+      "kind": "struct",
+      "name": "ArchivedEventRef",
+      "fields": [
+        {
+          "name": "id",
+          "type": {
+            "kind": "bytesn",
+            "n": 32
+          }
+        },
+        {
+          "name": "index",
+          "type": {
+            "kind": "u32"
+          }
+        },
+        {
+          "name": "checksum",
+          "type": {
+            "kind": "bytesn",
+            "n": 32
+          }
+        },
+        {
+          "name": "url",
+          "type": {
+            "kind": "bytes"
+          }
+        },
+        {
+          "name": "archived_at",
+          "type": {
+            "kind": "u64"
+          }
+        }
+      ]
+    },
+    {
+      "kind": "struct",
+      "name": "ArchiveStats",
+      "fields": [
+        {
+          "name": "total_archived",
+          "type": {
+            "kind": "u32"
+          }
+        },
+        {
+          "name": "total_compressed",
+          "type": {
+            "kind": "u32"
+          }
+        },
+        {
+          "name": "total_offchain",
+          "type": {
+            "kind": "u32"
+          }
+        }
+      ]
+    },
+    {
+      "kind": "struct",
+      "name": "FieldChange",
+      "fields": [
+        {
+          "name": "field",
+          "type": {
+            "kind": "symbol"
+          }
+        },
+        {
+          "name": "from",
+          "type": {
+            "kind": "bytes"
+          }
+        },
+        {
+          "name": "to",
+          "type": {
+            "kind": "bytes"
+          }
+        }
+      ]
+    },
+    {
+      "kind": "struct",
+      "name": "VersionComparison",
+      "fields": [
+        {
+          "name": "index",
+          "type": {
+            "kind": "u32"
+          }
+        },
+        {
+          "name": "from_version",
+          "type": {
+            "kind": "u32"
+          }
+        },
+        {
+          "name": "to_version",
+          "type": {
+            "kind": "u32"
+          }
+        },
+        {
+          "name": "same",
+          "type": {
+            "kind": "bool"
+          }
+        },
+        {
+          "name": "changes",
+          "type": {
+            "kind": "vec",
+            "of": {
+              "kind": "type",
+              "name": "FieldChange"
+            }
+          }
+        },
+        {
+          "name": "from_hash",
+          "type": {
+            "kind": "bytesn",
+            "n": 32
+          }
+        },
+        {
+          "name": "to_hash",
+          "type": {
+            "kind": "bytesn",
+            "n": 32
+          }
+        }
+      ]
+    }
+  ],
+  "errors": [
+    {
+      "name": "CallerNotOwner",
+      "code": 1
+    },
+    {
+      "name": "GlobalMaxLogsReached",
+      "code": 2
+    },
+    {
+      "name": "EventTypeMaxLogsReached",
+      "code": 3
+    },
+    {
+      "name": "EventDoesNotExist",
+      "code": 4
+    },
+    {
+      "name": "EventTypeIndexOutOfBounds",
+      "code": 5
+    },
+    {
+      "name": "NewOwnerIsZero",
+      "code": 6
+    },
+    {
+      "name": "CapNotSet",
+      "code": 7
+    },
+    {
+      "name": "MetadataTooLarge",
+      "code": 8
+    },
+    {
+      "name": "ContractNotInitialized",
+      "code": 9
+    },
+    {
+      "name": "TotalEventsOverflow",
+      "code": 10
+    },
+    {
+      "name": "TimestampOutOfRange",
+      "code": 11
+    },
+    {
+      "name": "InvalidSignature",
+      "code": 12
+    },
+    {
+      "name": "ContractPaused",
+      "code": 13
+    },
+    {
+      "name": "RateLimitExceeded",
+      "code": 14
+    },
+    {
+      "name": "SameOwner",
+      "code": 15
+    },
+    {
+      "name": "MaxLogsBelowCurrentCount",
+      "code": 16
+    },
+    {
+      "name": "CapAlreadyRemoved",
+      "code": 17
+    },
+    {
+      "name": "CapNeverSet",
+      "code": 18
+    },
+    {
+      "name": "NonceTooLow",
+      "code": 19
+    },
+    {
+      "name": "NoEventsForType",
+      "code": 20
+    },
+    {
+      "name": "InvalidPaginationParams",
+      "code": 21
+    },
+    {
+      "name": "InvalidWasmHash",
+      "code": 22
+    },
+    {
+      "name": "SubmitterBlocked",
+      "code": 23
+    },
+    {
+      "name": "CategoryTooLong",
+      "code": 24
+    },
+    {
+      "name": "ReentrancyDetected",
+      "code": 25
+    },
+    {
+      "name": "AlreadyInitialized",
+      "code": 26
+    },
+    {
+      "name": "NonceExhausted",
+      "code": 27
+    },
+    {
+      "name": "NonceWindowExceeded",
+      "code": 28
+    },
+    {
+      "name": "NonceResetNotExhausted",
+      "code": 29
+    },
+    {
+      "name": "SnapshotNotFound",
+      "code": 30
+    },
+    {
+      "name": "SnapshotVerificationFailed",
+      "code": 31
+    },
+    {
+      "name": "MetadataSchemaViolation",
+      "code": 32
+    },
+    {
+      "name": "InvalidVersion",
+      "code": 33
+    },
+    {
+      "name": "MaterialPassportAlreadyExists",
+      "code": 34
+    },
+    {
+      "name": "MaterialPassportNotFound",
+      "code": 35
+    },
+    {
+      "name": "InvalidLoopEventType",
+      "code": 36
+    },
+    {
+      "name": "InvalidFlowQuantity",
+      "code": 37
+    },
+    {
+      "name": "LcaProfileAlreadyExists",
+      "code": 38
+    },
+    {
+      "name": "LcaProfileNotFound",
+      "code": 39
+    },
+    {
+      "name": "InvalidLcaPhase",
+      "code": 40
+    },
+    {
+      "name": "InvalidImpactCategory",
+      "code": 41
+    },
+    {
+      "name": "LcaAlreadyFinalized",
+      "code": 42
+    },
+    {
+      "name": "LcaNotFinalized",
+      "code": 43
+    },
+    {
+      "name": "LcaNormRefNotFound",
+      "code": 44
+    },
+    {
+      "name": "LcaWeightingSchemeNotFound",
+      "code": 45
+    },
+    {
+      "name": "LcaDbEntryNotFound",
+      "code": 46
+    },
+    {
+      "name": "BioImpactNotFound",
+      "code": 47
+    },
+    {
+      "name": "BioOffsetNotFound",
+      "code": 48
+    },
+    {
+      "name": "InvalidLandUseType",
+      "code": 49
+    },
+    {
+      "name": "InvalidEcoServiceCat",
+      "code": 50
+    },
+    {
+      "name": "InvalidLandArea",
+      "code": 51
+    },
+    {
+      "name": "InvalidOffsetQuantity",
+      "code": 52
+    },
+    {
+      "name": "OffsetAlreadyRetired",
+      "code": 53
+    },
+    {
+      "name": "OffsetRetirementExceedsBalance",
+      "code": 54
+    },
+    {
+      "name": "SpeciesObservationNotFound",
+      "code": 55
+    },
+    {
+      "name": "WaterFootprintNotFound",
+      "code": 56
+    },
+    {
+      "name": "WaterRiskNotFound",
+      "code": 57
+    },
+    {
+      "name": "WaterStewardshipNotFound",
+      "code": 58
+    },
+    {
+      "name": "WaterDisclosureNotFound",
+      "code": 59
+    },
+    {
+      "name": "InvalidWaterSector",
+      "code": 60
+    },
+    {
+      "name": "InvalidWaterVolume",
+      "code": 61
+    },
+    {
+      "name": "InvalidScarcityFactor",
+      "code": 62
+    },
+    {
+      "name": "InvalidDisclosureYear",
+      "code": 63
+    },
+    {
+      "name": "EventOnLegalHold",
+      "code": 64
+    },
+    {
+      "name": "LegalHoldNotFound",
+      "code": 65
+    },
+    {
+      "name": "ComplianceExceptionActive",
+      "code": 66
+    },
+    {
+      "name": "EventAlreadyErased",
+      "code": 67
+    },
+    {
+      "name": "ErasureRequestNotFound",
+      "code": 68
+    },
+    {
+      "name": "ErasureRequestAlreadyDecided",
+      "code": 69
+    },
+    {
+      "name": "InvalidRetentionPeriod",
+      "code": 70
+    },
+    {
+      "name": "EmptyComplianceReason",
+      "code": 71
+    },
+    {
+      "name": "OperationalEventNotErasable",
+      "code": 72
+    },
+    {
+      "name": "UnauthorizedOpsRecorder",
+      "code": 73
+    },
+    {
+      "name": "RoleNotGranted",
+      "code": 74
+    },
+    {
+      "name": "InvalidDedupPolicy",
+      "code": 75
+    }
+  ],
+  "events": [
+    {
+      "name": "allowlist_disabled",
+      "topics": [],
+      "data": [
+        {
+          "kind": "address"
+        }
+      ]
+    },
+    {
+      "name": "allowlist_enabled",
+      "topics": [],
+      "data": [
+        {
+          "kind": "address"
+        }
+      ]
+    },
+    {
+      "name": "archived_events_purged",
+      "topics": [],
+      "data": [
+        {
+          "kind": "u32"
+        }
+      ]
+    },
+    {
+      "name": "config_set",
+      "topics": [
+        {
+          "kind": "symbol"
+        }
+      ],
+      "data": [
+        {
+          "kind": "address"
+        },
+        {
+          "kind": "bool"
+        },
+        {
+          "kind": "u32"
+        }
+      ]
+    },
+    {
+      "name": "contract_paused",
+      "topics": [],
+      "data": [
+        {
+          "kind": "address"
+        }
+      ]
+    },
+    {
+      "name": "contract_unpaused",
+      "topics": [],
+      "data": [
+        {
+          "kind": "address"
+        }
+      ]
+    },
+    {
+      "name": "contract_upgraded",
+      "topics": [],
+      "data": [
+        {
+          "kind": "option",
+          "of": {
+            "kind": "bytesn",
+            "n": 32
+          }
+        },
+        {
+          "kind": "bytesn",
+          "n": 32
+        }
+      ]
+    },
+    {
+      "name": "default_nonce_config_set",
+      "topics": [],
+      "data": [
+        {
+          "kind": "address"
+        },
+        {
+          "kind": "u32"
+        },
+        {
+          "kind": "u32"
+        }
+      ]
+    },
+    {
+      "name": "event_rolled_back",
+      "topics": [
+        {
+          "kind": "symbol"
+        }
+      ],
+      "data": [
+        {
+          "kind": "u32"
+        },
+        {
+          "kind": "u32"
+        },
+        {
+          "kind": "address"
+        },
+        {
+          "kind": "u64"
+        }
+      ]
+    },
+    {
+      "name": "event_updated",
+      "topics": [],
+      "data": [
+        {
+          "kind": "u32"
+        },
+        {
+          "kind": "bytesn",
+          "n": 32
+        },
+        {
+          "kind": "bytesn",
+          "n": 32
+        },
+        {
+          "kind": "address"
+        },
+        {
+          "kind": "u64"
+        }
+      ]
+    },
+    {
+      "name": "events_archived",
+      "topics": [],
+      "data": [
+        {
+          "kind": "u32"
+        }
+      ]
+    },
+    {
+      "name": "expired_removed",
+      "topics": [
+        {
+          "kind": "symbol"
+        }
+      ],
+      "data": [
+        {
+          "kind": "address"
+        },
+        {
+          "kind": "u32"
+        },
+        {
+          "kind": "u32"
+        },
+        {
+          "kind": "u32"
+        }
+      ]
+    },
+    {
+      "name": "log_event",
+      "topics": [
+        {
+          "kind": "symbol"
+        }
+      ],
+      "data": [
+        {
+          "kind": "address"
+        },
+        {
+          "kind": "symbol"
+        },
+        {
+          "kind": "u32"
+        }
+      ]
+    },
+    {
+      "name": "migrate_event_metadata",
+      "topics": [
+        {
+          "kind": "symbol"
+        }
+      ],
+      "data": [
+        {
+          "kind": "address"
+        },
+        {
+          "kind": "symbol"
+        },
+        {
+          "kind": "u32"
+        },
+        {
+          "kind": "u32"
+        }
+      ]
+    },
+    {
+      "name": "nonce_config_set",
+      "topics": [],
+      "data": [
+        {
+          "kind": "address"
+        },
+        {
+          "kind": "u32"
+        },
+        {
+          "kind": "u32"
+        }
+      ]
+    },
+    {
+      "name": "nonce_reset",
+      "topics": [],
+      "data": [
+        {
+          "kind": "address"
+        },
+        {
+          "kind": "address"
+        }
+      ]
+    },
+    {
+      "name": "owner_added",
+      "topics": [],
+      "data": [
+        {
+          "kind": "address"
+        }
+      ]
+    },
+    {
+      "name": "owner_removed",
+      "topics": [],
+      "data": [
+        {
+          "kind": "address"
+        }
+      ]
+    },
+    {
+      "name": "policy_set",
+      "topics": [
+        {
+          "kind": "symbol"
+        }
+      ],
+      "data": [
+        {
+          "kind": "address"
+        },
+        {
+          "kind": "u32"
+        }
+      ]
+    },
+    {
+      "name": "policy_set_type",
+      "topics": [
+        {
+          "kind": "symbol"
+        }
+      ],
+      "data": [
+        {
+          "kind": "address"
+        },
+        {
+          "kind": "symbol"
+        },
+        {
+          "kind": "option",
+          "of": {
+            "kind": "u32"
+          }
+        }
+      ]
+    },
+    {
+      "name": "proposal_approved",
+      "topics": [],
+      "data": [
+        {
+          "kind": "u32"
+        },
+        {
+          "kind": "address"
+        }
+      ]
+    },
+    {
+      "name": "proposal_executed",
+      "topics": [],
+      "data": [
+        {
+          "kind": "u32"
+        },
+        {
+          "kind": "address"
+        }
+      ]
+    },
+    {
+      "name": "proposal_submitted",
+      "topics": [],
+      "data": [
+        {
+          "kind": "bytesn",
+          "n": 32
+        }
+      ]
+    },
+    {
+      "name": "rbac_toggled",
+      "topics": [
+        {
+          "kind": "symbol"
+        }
+      ],
+      "data": [
+        {
+          "kind": "address"
+        },
+        {
+          "kind": "bool"
+        }
+      ]
+    },
+    {
+      "name": "register_schema",
+      "topics": [
+        {
+          "kind": "symbol"
+        }
+      ],
+      "data": [
+        {
+          "kind": "address"
+        },
+        {
+          "kind": "symbol"
+        },
+        {
+          "kind": "u32"
+        }
+      ]
+    },
+    {
+      "name": "register_webhook",
+      "topics": [
+        {
+          "kind": "symbol"
+        }
+      ],
+      "data": [
+        {
+          "kind": "address"
+        },
+        {
+          "kind": "symbol"
+        },
+        {
+          "kind": "bytes"
+        }
+      ]
+    },
+    {
+      "name": "remove_event_cap",
+      "topics": [
+        {
+          "kind": "symbol"
+        }
+      ],
+      "data": [
+        {
+          "kind": "address"
+        },
+        {
+          "kind": "symbol"
+        }
+      ]
+    },
+    {
+      "name": "required_signatures_set",
+      "topics": [],
+      "data": [
+        {
+          "kind": "u32"
+        }
+      ]
+    },
+    {
+      "name": "role_set",
+      "topics": [
+        {
+          "kind": "symbol"
+        }
+      ],
+      "data": [
+        {
+          "kind": "address"
+        },
+        {
+          "kind": "address"
+        },
+        {
+          "kind": "option",
+          "of": {
+            "kind": "type",
+            "name": "Role"
+          }
+        }
+      ]
+    },
+    {
+      "name": "set_event_ttl",
+      "topics": [
+        {
+          "kind": "symbol"
+        }
+      ],
+      "data": [
+        {
+          "kind": "address"
+        },
+        {
+          "kind": "u32"
+        },
+        {
+          "kind": "u32"
+        }
+      ]
+    },
+    {
+      "name": "set_global_max",
+      "topics": [
+        {
+          "kind": "symbol"
+        }
+      ],
+      "data": [
+        {
+          "kind": "address"
+        },
+        {
+          "kind": "u32"
+        },
+        {
+          "kind": "u32"
+        }
+      ]
+    },
+    {
+      "name": "set_metadata_schema",
+      "topics": [
+        {
+          "kind": "symbol"
+        }
+      ],
+      "data": [
+        {
+          "kind": "address"
+        },
+        {
+          "kind": "symbol"
+        },
+        {
+          "kind": "u32"
+        }
+      ]
+    },
+    {
+      "name": "snapshot_created",
+      "topics": [],
+      "data": [
+        {
+          "kind": "u32"
+        },
+        {
+          "kind": "u64"
+        },
+        {
+          "kind": "u32"
+        }
+      ]
+    },
+    {
+      "name": "stale_dedup_cleaned",
+      "topics": [],
+      "data": [
+        {
+          "kind": "u32"
+        }
+      ]
+    },
+    {
+      "name": "stale_hashes_cleaned",
+      "topics": [],
+      "data": [
+        {
+          "kind": "u32"
+        }
+      ]
+    },
+    {
+      "name": "storage_compacted",
+      "topics": [],
+      "data": [
+        {
+          "kind": "u32"
+        }
+      ]
+    },
+    {
+      "name": "submitter_allowed",
+      "topics": [],
+      "data": [
+        {
+          "kind": "address"
+        },
+        {
+          "kind": "address"
+        }
+      ]
+    },
+    {
+      "name": "submitter_blocked",
+      "topics": [],
+      "data": [
+        {
+          "kind": "address"
+        },
+        {
+          "kind": "address"
+        }
+      ]
+    },
+    {
+      "name": "submitter_removed_from_allowlist",
+      "topics": [],
+      "data": [
+        {
+          "kind": "address"
+        },
+        {
+          "kind": "address"
+        }
+      ]
+    },
+    {
+      "name": "submitter_unblocked",
+      "topics": [],
+      "data": [
+        {
+          "kind": "address"
+        },
+        {
+          "kind": "address"
+        }
+      ]
+    },
+    {
+      "name": "transfer_ownership",
+      "topics": [
+        {
+          "kind": "symbol"
+        }
+      ],
+      "data": [
+        {
+          "kind": "address"
+        },
+        {
+          "kind": "address"
+        },
+        {
+          "kind": "address"
+        }
+      ]
+    },
+    {
+      "name": "unregister_webhook",
+      "topics": [
+        {
+          "kind": "symbol"
+        }
+      ],
+      "data": [
+        {
+          "kind": "address"
+        },
+        {
+          "kind": "symbol"
+        },
+        {
+          "kind": "bytes"
+        }
+      ]
+    },
+    {
+      "name": "version_tagged",
+      "topics": [
+        {
+          "kind": "symbol"
+        }
+      ],
+      "data": [
+        {
+          "kind": "address"
+        },
+        {
+          "kind": "u32"
+        },
+        {
+          "kind": "u32"
+        },
+        {
+          "kind": "symbol"
+        }
+      ]
+    }
+  ],
+  "functions": [
+    {
+      "name": "initialize",
+      "inputs": [
+        {
+          "name": "owners",
+          "type": {
+            "kind": "vec",
+            "of": {
+              "kind": "address"
+            }
+          }
+        },
+        {
+          "name": "global_max_logs",
+          "type": {
+            "kind": "u32"
+          }
+        },
+        {
+          "name": "max_metadata_bytes",
+          "type": {
+            "kind": "u32"
+          }
+        }
+      ],
+      "output": {
+        "kind": "void"
+      },
+      "mutating": true
+    },
+    {
+      "name": "log_events",
+      "inputs": [
+        {
+          "name": "events",
+          "type": {
+            "kind": "vec",
+            "of": {
+              "kind": "tuple",
+              "of": [
+                {
+                  "kind": "address"
+                },
+                {
+                  "kind": "symbol"
+                },
+                {
+                  "kind": "bytes"
+                }
+              ]
+            }
+          }
+        }
+      ],
+      "output": {
+        "kind": "vec",
+        "of": {
+          "kind": "u32"
+        }
+      },
+      "mutating": true
+    },
+    {
+      "name": "log_event",
+      "inputs": [
+        {
+          "name": "submitter",
+          "type": {
+            "kind": "address"
+          }
+        },
+        {
+          "name": "event_type",
+          "type": {
+            "kind": "symbol"
+          }
+        },
+        {
+          "name": "metadata",
+          "type": {
+            "kind": "bytes"
+          }
+        },
+        {
+          "name": "category",
+          "type": {
+            "kind": "option",
+            "of": {
+              "kind": "symbol"
+            }
+          }
+        },
+        {
+          "name": "sub_event_type",
+          "type": {
+            "kind": "option",
+            "of": {
+              "kind": "symbol"
+            }
+          }
+        },
+        {
+          "name": "force",
+          "type": {
+            "kind": "bool"
+          }
+        }
+      ],
+      "output": {
+        "kind": "bytesn",
+        "n": 32
+      },
+      "mutating": true
+    },
+    {
+      "name": "log_event_with_hierarchy",
+      "inputs": [
+        {
+          "name": "submitter",
+          "type": {
+            "kind": "address"
+          }
+        },
+        {
+          "name": "event_type",
+          "type": {
+            "kind": "symbol"
+          }
+        },
+        {
+          "name": "metadata",
+          "type": {
+            "kind": "bytes"
+          }
+        },
+        {
+          "name": "category",
+          "type": {
+            "kind": "option",
+            "of": {
+              "kind": "symbol"
+            }
+          }
+        },
+        {
+          "name": "sub_event_type",
+          "type": {
+            "kind": "option",
+            "of": {
+              "kind": "symbol"
+            }
+          }
+        },
+        {
+          "name": "force",
+          "type": {
+            "kind": "bool"
+          }
+        }
+      ],
+      "output": {
+        "kind": "bytesn",
+        "n": 32
+      },
+      "mutating": true
+    },
+    {
+      "name": "log_event_with_nonce",
+      "inputs": [
+        {
+          "name": "submitter",
+          "type": {
+            "kind": "address"
+          }
+        },
+        {
+          "name": "event_type",
+          "type": {
+            "kind": "symbol"
+          }
+        },
+        {
+          "name": "metadata",
+          "type": {
+            "kind": "bytes"
+          }
+        },
+        {
+          "name": "nonce",
+          "type": {
+            "kind": "u32"
+          }
+        }
+      ],
+      "output": {
+        "kind": "bytesn",
+        "n": 32
+      },
+      "mutating": true
+    },
+    {
+      "name": "get_submitter_nonce",
+      "inputs": [
+        {
+          "name": "submitter",
+          "type": {
+            "kind": "address"
+          }
+        }
+      ],
+      "output": {
+        "kind": "u32"
+      },
+      "mutating": false
+    },
+    {
+      "name": "get_submitter_nonce_state",
+      "inputs": [
+        {
+          "name": "submitter",
+          "type": {
+            "kind": "address"
+          }
+        }
+      ],
+      "output": {
+        "kind": "type",
+        "name": "NonceState"
+      },
+      "mutating": false
+    },
+    {
+      "name": "set_submitter_nonce_config",
+      "inputs": [
+        {
+          "name": "caller",
+          "type": {
+            "kind": "address"
+          }
+        },
+        {
+          "name": "submitter",
+          "type": {
+            "kind": "address"
+          }
+        },
+        {
+          "name": "window_size",
+          "type": {
+            "kind": "u32"
+          }
+        },
+        {
+          "name": "max_nonce",
+          "type": {
+            "kind": "u32"
+          }
+        }
+      ],
+      "output": {
+        "kind": "void"
+      },
+      "mutating": true
+    },
+    {
+      "name": "reset_submitter_nonce",
+      "inputs": [
+        {
+          "name": "caller",
+          "type": {
+            "kind": "address"
+          }
+        },
+        {
+          "name": "submitter",
+          "type": {
+            "kind": "address"
+          }
+        }
+      ],
+      "output": {
+        "kind": "void"
+      },
+      "mutating": true
+    },
+    {
+      "name": "set_default_nonce_config",
+      "inputs": [
+        {
+          "name": "caller",
+          "type": {
+            "kind": "address"
+          }
+        },
+        {
+          "name": "window_size",
+          "type": {
+            "kind": "u32"
+          }
+        },
+        {
+          "name": "max_nonce",
+          "type": {
+            "kind": "u32"
+          }
+        }
+      ],
+      "output": {
+        "kind": "void"
+      },
+      "mutating": true
+    },
+    {
+      "name": "get_default_nonce_window_size",
+      "inputs": [],
+      "output": {
+        "kind": "u32"
+      },
+      "mutating": false
+    },
+    {
+      "name": "get_default_nonce_max_value",
+      "inputs": [],
+      "output": {
+        "kind": "u32"
+      },
+      "mutating": false
+    },
+    {
+      "name": "total_events",
+      "inputs": [],
+      "output": {
+        "kind": "u32"
+      },
+      "mutating": false
+    },
+    {
+      "name": "get_event_type_count",
+      "inputs": [
+        {
+          "name": "event_type",
+          "type": {
+            "kind": "symbol"
+          }
+        }
+      ],
+      "output": {
+        "kind": "u32"
+      },
+      "mutating": false
+    },
+    {
+      "name": "get_event",
+      "inputs": [
+        {
+          "name": "id",
+          "type": {
+            "kind": "bytesn",
+            "n": 32
+          }
+        }
+      ],
+      "output": {
+        "kind": "type",
+        "name": "Event"
+      },
+      "mutating": true
+    },
+    {
+      "name": "get_event_metadata",
+      "inputs": [
+        {
+          "name": "id",
+          "type": {
+            "kind": "bytesn",
+            "n": 32
+          }
+        }
+      ],
+      "output": {
+        "kind": "bytes"
+      },
+      "mutating": false
+    },
+    {
+      "name": "get_event_header",
+      "inputs": [
+        {
+          "name": "id",
+          "type": {
+            "kind": "bytesn",
+            "n": 32
+          }
+        }
+      ],
+      "output": {
+        "kind": "type",
+        "name": "EventHeader"
+      },
+      "mutating": false
+    },
+    {
+      "name": "get_event_by_order",
+      "inputs": [
+        {
+          "name": "order",
+          "type": {
+            "kind": "u32"
+          }
+        }
+      ],
+      "output": {
+        "kind": "type",
+        "name": "Event"
+      },
+      "mutating": false
+    },
+    {
+      "name": "event_count",
+      "inputs": [
+        {
+          "name": "event_type",
+          "type": {
+            "kind": "symbol"
+          }
+        }
+      ],
+      "output": {
+        "kind": "u32"
+      },
+      "mutating": false
+    },
+    {
+      "name": "event_count_by_category",
+      "inputs": [
+        {
+          "name": "category",
+          "type": {
+            "kind": "symbol"
+          }
+        }
+      ],
+      "output": {
+        "kind": "u32"
+      },
+      "mutating": false
+    },
+    {
+      "name": "list_events_by_category",
+      "inputs": [
+        {
+          "name": "category",
+          "type": {
+            "kind": "symbol"
+          }
+        },
+        {
+          "name": "start",
+          "type": {
+            "kind": "u32"
+          }
+        },
+        {
+          "name": "limit",
+          "type": {
+            "kind": "u32"
+          }
+        }
+      ],
+      "output": {
+        "kind": "vec",
+        "of": {
+          "kind": "type",
+          "name": "EventHeader"
+        }
+      },
+      "mutating": true
+    },
+    {
+      "name": "archive_events",
+      "inputs": [
+        {
+          "name": "caller",
+          "type": {
+            "kind": "address"
+          }
+        },
+        {
+          "name": "cutoff_timestamp",
+          "type": {
+            "kind": "u64"
+          }
+        }
+      ],
+      "output": {
+        "kind": "u32"
+      },
+      "mutating": true
+    },
+    {
+      "name": "get_archived_event",
+      "inputs": [
+        {
+          "name": "id",
+          "type": {
+            "kind": "bytesn",
+            "n": 32
+          }
+        }
+      ],
+      "output": {
+        "kind": "type",
+        "name": "Event"
+      },
+      "mutating": false
+    },
+    {
+      "name": "get_archived_event_ref",
+      "inputs": [
+        {
+          "name": "id",
+          "type": {
+            "kind": "bytesn",
+            "n": 32
+          }
+        }
+      ],
+      "output": {
+        "kind": "option",
+        "of": {
+          "kind": "type",
+          "name": "ArchivedEventRef"
+        }
+      },
+      "mutating": false
+    },
+    {
+      "name": "verify_archived_event_checksum",
+      "inputs": [
+        {
+          "name": "id",
+          "type": {
+            "kind": "bytesn",
+            "n": 32
+          }
+        },
+        {
+          "name": "candidate",
+          "type": {
+            "kind": "type",
+            "name": "Event"
+          }
+        }
+      ],
+      "output": {
+        "kind": "bool"
+      },
+      "mutating": false
+    },
+    {
+      "name": "get_archive_stats",
+      "inputs": [],
+      "output": {
+        "kind": "type",
+        "name": "ArchiveStats"
+      },
+      "mutating": false
+    },
+    {
+      "name": "get_archived_event_count",
+      "inputs": [],
+      "output": {
+        "kind": "u32"
+      },
+      "mutating": false
+    },
+    {
+      "name": "list_archived_events",
+      "inputs": [
+        {
+          "name": "start",
+          "type": {
+            "kind": "u32"
+          }
+        },
+        {
+          "name": "limit",
+          "type": {
+            "kind": "u32"
+          }
+        }
+      ],
+      "output": {
+        "kind": "vec",
+        "of": {
+          "kind": "type",
+          "name": "EventHeader"
+        }
+      },
+      "mutating": true
+    },
+    {
+      "name": "purge_archived_events",
+      "inputs": [
+        {
+          "name": "caller",
+          "type": {
+            "kind": "address"
+          }
+        },
+        {
+          "name": "cutoff_timestamp",
+          "type": {
+            "kind": "u64"
+          }
+        },
+        {
+          "name": "confirm",
+          "type": {
+            "kind": "bool"
+          }
+        }
+      ],
+      "output": {
+        "kind": "u32"
+      },
+      "mutating": true
+    },
+    {
+      "name": "upgrade_contract",
+      "inputs": [
+        {
+          "name": "caller",
+          "type": {
+            "kind": "address"
+          }
+        },
+        {
+          "name": "new_wasm_hash",
+          "type": {
+            "kind": "bytesn",
+            "n": 32
+          }
+        }
+      ],
+      "output": {
+        "kind": "void"
+      },
+      "mutating": true
+    },
+    {
+      "name": "get_event_by_type",
+      "inputs": [
+        {
+          "name": "event_type",
+          "type": {
+            "kind": "symbol"
+          }
+        },
+        {
+          "name": "type_index",
+          "type": {
+            "kind": "u32"
+          }
+        }
+      ],
+      "output": {
+        "kind": "type",
+        "name": "Event"
+      },
+      "mutating": false
+    },
+    {
+      "name": "list_events",
+      "inputs": [
+        {
+          "name": "offset",
+          "type": {
+            "kind": "u32"
+          }
+        },
+        {
+          "name": "limit",
+          "type": {
+            "kind": "u32"
+          }
+        }
+      ],
+      "output": {
+        "kind": "vec",
+        "of": {
+          "kind": "type",
+          "name": "Event"
+        }
+      },
+      "mutating": true
+    },
+    {
+      "name": "list_events_by_type",
+      "inputs": [
+        {
+          "name": "event_type",
+          "type": {
+            "kind": "symbol"
+          }
+        },
+        {
+          "name": "offset",
+          "type": {
+            "kind": "u32"
+          }
+        },
+        {
+          "name": "limit",
+          "type": {
+            "kind": "u32"
+          }
+        }
+      ],
+      "output": {
+        "kind": "vec",
+        "of": {
+          "kind": "type",
+          "name": "Event"
+        }
+      },
+      "mutating": true
+    },
+    {
+      "name": "get_events_by_type",
+      "inputs": [
+        {
+          "name": "event_type",
+          "type": {
+            "kind": "symbol"
+          }
+        },
+        {
+          "name": "start",
+          "type": {
+            "kind": "u32"
+          }
+        },
+        {
+          "name": "limit",
+          "type": {
+            "kind": "u32"
+          }
+        }
+      ],
+      "output": {
+        "kind": "vec",
+        "of": {
+          "kind": "type",
+          "name": "Event"
+        }
+      },
+      "mutating": true
+    },
+    {
+      "name": "submitter_event_count",
+      "inputs": [
+        {
+          "name": "submitter",
+          "type": {
+            "kind": "address"
+          }
+        }
+      ],
+      "output": {
+        "kind": "u32"
+      },
+      "mutating": false
+    },
+    {
+      "name": "get_event_by_submitter",
+      "inputs": [
+        {
+          "name": "submitter",
+          "type": {
+            "kind": "address"
+          }
+        },
+        {
+          "name": "submitter_index",
+          "type": {
+            "kind": "u32"
+          }
+        }
+      ],
+      "output": {
+        "kind": "type",
+        "name": "Event"
+      },
+      "mutating": false
+    },
+    {
+      "name": "get_events_by_submitter",
+      "inputs": [
+        {
+          "name": "submitter",
+          "type": {
+            "kind": "address"
+          }
+        },
+        {
+          "name": "start",
+          "type": {
+            "kind": "u32"
+          }
+        },
+        {
+          "name": "limit",
+          "type": {
+            "kind": "u32"
+          }
+        }
+      ],
+      "output": {
+        "kind": "vec",
+        "of": {
+          "kind": "type",
+          "name": "Event"
+        }
+      },
+      "mutating": true
+    },
+    {
+      "name": "get_events_by_time_range",
+      "inputs": [
+        {
+          "name": "start_time",
+          "type": {
+            "kind": "u64"
+          }
+        },
+        {
+          "name": "end_time",
+          "type": {
+            "kind": "u64"
+          }
+        },
+        {
+          "name": "offset",
+          "type": {
+            "kind": "u32"
+          }
+        },
+        {
+          "name": "limit",
+          "type": {
+            "kind": "u32"
+          }
+        }
+      ],
+      "output": {
+        "kind": "vec",
+        "of": {
+          "kind": "type",
+          "name": "Event"
+        }
+      },
+      "mutating": true
+    },
+    {
+      "name": "search_events",
+      "inputs": [
+        {
+          "name": "query",
+          "type": {
+            "kind": "bytes"
+          }
+        },
+        {
+          "name": "offset",
+          "type": {
+            "kind": "u32"
+          }
+        },
+        {
+          "name": "limit",
+          "type": {
+            "kind": "u32"
+          }
+        }
+      ],
+      "output": {
+        "kind": "vec",
+        "of": {
+          "kind": "type",
+          "name": "Event"
+        }
+      },
+      "mutating": true
+    },
+    {
+      "name": "update_event",
+      "inputs": [
+        {
+          "name": "caller",
+          "type": {
+            "kind": "address"
+          }
+        },
+        {
+          "name": "index",
+          "type": {
+            "kind": "u32"
+          }
+        },
+        {
+          "name": "new_metadata",
+          "type": {
+            "kind": "bytes"
+          }
+        }
+      ],
+      "output": {
+        "kind": "bytesn",
+        "n": 32
+      },
+      "mutating": true
+    },
+    {
+      "name": "get_event_history",
+      "inputs": [
+        {
+          "name": "index",
+          "type": {
+            "kind": "u32"
+          }
+        }
+      ],
+      "output": {
+        "kind": "vec",
+        "of": {
+          "kind": "type",
+          "name": "EventVersion"
+        }
+      },
+      "mutating": true
+    },
+    {
+      "name": "rollback_event",
+      "inputs": [
+        {
+          "name": "caller",
+          "type": {
+            "kind": "address"
+          }
+        },
+        {
+          "name": "index",
+          "type": {
+            "kind": "u32"
+          }
+        },
+        {
+          "name": "target_version",
+          "type": {
+            "kind": "u32"
+          }
+        }
+      ],
+      "output": {
+        "kind": "bytesn",
+        "n": 32
+      },
+      "mutating": true
+    },
+    {
+      "name": "get_event_version_count",
+      "inputs": [
+        {
+          "name": "index",
+          "type": {
+            "kind": "u32"
+          }
+        }
+      ],
+      "output": {
+        "kind": "u32"
+      },
+      "mutating": true
+    },
+    {
+      "name": "compare_event_versions",
+      "inputs": [
+        {
+          "name": "index",
+          "type": {
+            "kind": "u32"
+          }
+        },
+        {
+          "name": "version_a",
+          "type": {
+            "kind": "u32"
+          }
+        },
+        {
+          "name": "version_b",
+          "type": {
+            "kind": "u32"
+          }
+        }
+      ],
+      "output": {
+        "kind": "i32"
+      },
+      "mutating": true
+    },
+    {
+      "name": "verify_integrity",
+      "inputs": [],
+      "output": {
+        "kind": "bool"
+      },
+      "mutating": false
+    },
+    {
+      "name": "verify_integrity_range",
+      "inputs": [
+        {
+          "name": "from",
+          "type": {
+            "kind": "u32"
+          }
+        },
+        {
+          "name": "to",
+          "type": {
+            "kind": "u32"
+          }
+        }
+      ],
+      "output": {
+        "kind": "bool"
+      },
+      "mutating": false
+    },
+    {
+      "name": "create_snapshot",
+      "inputs": [
+        {
+          "name": "caller",
+          "type": {
+            "kind": "address"
+          }
+        },
+        {
+          "name": "description",
+          "type": {
+            "kind": "bytes"
+          }
+        }
+      ],
+      "output": {
+        "kind": "u32"
+      },
+      "mutating": true
+    },
+    {
+      "name": "get_snapshot",
+      "inputs": [
+        {
+          "name": "snapshot_id",
+          "type": {
+            "kind": "u32"
+          }
+        }
+      ],
+      "output": {
+        "kind": "type",
+        "name": "Snapshot"
+      },
+      "mutating": false
+    },
+    {
+      "name": "snapshot_count",
+      "inputs": [],
+      "output": {
+        "kind": "u32"
+      },
+      "mutating": false
+    },
+    {
+      "name": "verify_snapshot",
+      "inputs": [
+        {
+          "name": "snapshot_id",
+          "type": {
+            "kind": "u32"
+          }
+        }
+      ],
+      "output": {
+        "kind": "bool"
+      },
+      "mutating": false
+    },
+    {
+      "name": "cleanup_stale_hashes",
+      "inputs": [
+        {
+          "name": "caller",
+          "type": {
+            "kind": "address"
+          }
+        },
+        {
+          "name": "start_index",
+          "type": {
+            "kind": "u32"
+          }
+        },
+        {
+          "name": "batch_size",
+          "type": {
+            "kind": "u32"
+          }
+        }
+      ],
+      "output": {
+        "kind": "u32"
+      },
+      "mutating": true
+    },
+    {
+      "name": "set_global_max_logs",
+      "inputs": [
+        {
+          "name": "caller",
+          "type": {
+            "kind": "address"
+          }
+        },
+        {
+          "name": "new_max",
+          "type": {
+            "kind": "u32"
+          }
+        }
+      ],
+      "output": {
+        "kind": "void"
+      },
+      "mutating": true
+    },
+    {
+      "name": "set_event_max_logs",
+      "inputs": [
+        {
+          "name": "caller",
+          "type": {
+            "kind": "address"
+          }
+        },
+        {
+          "name": "event_type",
+          "type": {
+            "kind": "symbol"
+          }
+        },
+        {
+          "name": "new_max",
+          "type": {
+            "kind": "u32"
+          }
+        }
+      ],
+      "output": {
+        "kind": "void"
+      },
+      "mutating": true
+    },
+    {
+      "name": "remove_event_cap",
+      "inputs": [
+        {
+          "name": "caller",
+          "type": {
+            "kind": "address"
+          }
+        },
+        {
+          "name": "event_type",
+          "type": {
+            "kind": "symbol"
+          }
+        }
+      ],
+      "output": {
+        "kind": "void"
+      },
+      "mutating": true
+    },
+    {
+      "name": "has_cap",
+      "inputs": [
+        {
+          "name": "event_type",
+          "type": {
+            "kind": "symbol"
+          }
+        }
+      ],
+      "output": {
+        "kind": "bool"
+      },
+      "mutating": false
+    },
+    {
+      "name": "transfer_ownership",
+      "inputs": [
+        {
+          "name": "caller",
+          "type": {
+            "kind": "address"
+          }
+        },
+        {
+          "name": "new_owner",
+          "type": {
+            "kind": "address"
+          }
+        }
+      ],
+      "output": {
+        "kind": "void"
+      },
+      "mutating": true
+    },
+    {
+      "name": "set_metadata_max_size",
+      "inputs": [
+        {
+          "name": "caller",
+          "type": {
+            "kind": "address"
+          }
+        },
+        {
+          "name": "max_size",
+          "type": {
+            "kind": "u32"
+          }
+        }
+      ],
+      "output": {
+        "kind": "void"
+      },
+      "mutating": true
+    },
+    {
+      "name": "set_event_metadata_max_size",
+      "inputs": [
+        {
+          "name": "caller",
+          "type": {
+            "kind": "address"
+          }
+        },
+        {
+          "name": "event_type",
+          "type": {
+            "kind": "symbol"
+          }
+        },
+        {
+          "name": "max_size",
+          "type": {
+            "kind": "u32"
+          }
+        }
+      ],
+      "output": {
+        "kind": "void"
+      },
+      "mutating": true
+    },
+    {
+      "name": "set_metadata_schema",
+      "inputs": [
+        {
+          "name": "caller",
+          "type": {
+            "kind": "address"
+          }
+        },
+        {
+          "name": "event_type",
+          "type": {
+            "kind": "symbol"
+          }
+        },
+        {
+          "name": "schema",
+          "type": {
+            "kind": "bytes"
+          }
+        }
+      ],
+      "output": {
+        "kind": "void"
+      },
+      "mutating": true
+    },
+    {
+      "name": "get_metadata_schema",
+      "inputs": [
+        {
+          "name": "event_type",
+          "type": {
+            "kind": "symbol"
+          }
+        }
+      ],
+      "output": {
+        "kind": "bytes"
+      },
+      "mutating": false
+    },
+    {
+      "name": "register_schema",
+      "inputs": [
+        {
+          "name": "caller",
+          "type": {
+            "kind": "address"
+          }
+        },
+        {
+          "name": "event_type",
+          "type": {
+            "kind": "symbol"
+          }
+        },
+        {
+          "name": "schema",
+          "type": {
+            "kind": "type",
+            "name": "Schema"
+          }
+        },
+        {
+          "name": "version",
+          "type": {
+            "kind": "u32"
+          }
+        }
+      ],
+      "output": {
+        "kind": "void"
+      },
+      "mutating": true
+    },
+    {
+      "name": "get_schema",
+      "inputs": [
+        {
+          "name": "event_type",
+          "type": {
+            "kind": "symbol"
+          }
+        },
+        {
+          "name": "version",
+          "type": {
+            "kind": "u32"
+          }
+        }
+      ],
+      "output": {
+        "kind": "option",
+        "of": {
+          "kind": "type",
+          "name": "Schema"
+        }
+      },
+      "mutating": false
+    },
+    {
+      "name": "list_schemas",
+      "inputs": [
+        {
+          "name": "event_type",
+          "type": {
+            "kind": "symbol"
+          }
+        }
+      ],
+      "output": {
+        "kind": "vec",
+        "of": {
+          "kind": "u32"
+        }
+      },
+      "mutating": false
+    },
+    {
+      "name": "migrate_event_metadata",
+      "inputs": [
+        {
+          "name": "caller",
+          "type": {
+            "kind": "address"
+          }
+        },
+        {
+          "name": "event_type",
+          "type": {
+            "kind": "symbol"
+          }
+        },
+        {
+          "name": "from_version",
+          "type": {
+            "kind": "u32"
+          }
+        },
+        {
+          "name": "to_version",
+          "type": {
+            "kind": "u32"
+          }
+        },
+        {
+          "name": "migration_fn",
+          "type": {
+            "kind": "type",
+            "name": "MigrationFunction"
+          }
+        }
+      ],
+      "output": {
+        "kind": "void"
+      },
+      "mutating": true
+    },
+    {
+      "name": "get_migration_function",
+      "inputs": [
+        {
+          "name": "event_type",
+          "type": {
+            "kind": "symbol"
+          }
+        },
+        {
+          "name": "from_version",
+          "type": {
+            "kind": "u32"
+          }
+        },
+        {
+          "name": "to_version",
+          "type": {
+            "kind": "u32"
+          }
+        }
+      ],
+      "output": {
+        "kind": "option",
+        "of": {
+          "kind": "type",
+          "name": "MigrationFunction"
+        }
+      },
+      "mutating": false
+    },
+    {
+      "name": "check_schema_compatibility",
+      "inputs": [
+        {
+          "name": "left",
+          "type": {
+            "kind": "type",
+            "name": "Schema"
+          }
+        },
+        {
+          "name": "right",
+          "type": {
+            "kind": "type",
+            "name": "Schema"
+          }
+        }
+      ],
+      "output": {
+        "kind": "type",
+        "name": "SchemaCompatibility"
+      },
+      "mutating": false
+    },
+    {
+      "name": "is_backward_compatible",
+      "inputs": [
+        {
+          "name": "left",
+          "type": {
+            "kind": "type",
+            "name": "Schema"
+          }
+        },
+        {
+          "name": "right",
+          "type": {
+            "kind": "type",
+            "name": "Schema"
+          }
+        }
+      ],
+      "output": {
+        "kind": "bool"
+      },
+      "mutating": false
+    },
+    {
+      "name": "is_forward_compatible",
+      "inputs": [
+        {
+          "name": "left",
+          "type": {
+            "kind": "type",
+            "name": "Schema"
+          }
+        },
+        {
+          "name": "right",
+          "type": {
+            "kind": "type",
+            "name": "Schema"
+          }
+        }
+      ],
+      "output": {
+        "kind": "bool"
+      },
+      "mutating": false
+    },
+    {
+      "name": "set_event_ttl",
+      "inputs": [
+        {
+          "name": "caller",
+          "type": {
+            "kind": "address"
+          }
+        },
+        {
+          "name": "ttl_ledgers",
+          "type": {
+            "kind": "u32"
+          }
+        }
+      ],
+      "output": {
+        "kind": "void"
+      },
+      "mutating": true
+    },
+    {
+      "name": "get_event_ttl",
+      "inputs": [],
+      "output": {
+        "kind": "u32"
+      },
+      "mutating": false
+    },
+    {
+      "name": "cleanup_expired_events",
+      "inputs": [
+        {
+          "name": "caller",
+          "type": {
+            "kind": "address"
+          }
+        },
+        {
+          "name": "start_index",
+          "type": {
+            "kind": "u32"
+          }
+        },
+        {
+          "name": "batch_size",
+          "type": {
+            "kind": "u32"
+          }
+        }
+      ],
+      "output": {
+        "kind": "u32"
+      },
+      "mutating": true
+    },
+    {
+      "name": "get_cleanup_stats",
+      "inputs": [],
+      "output": {
+        "kind": "type",
+        "name": "TtlCleanupStats"
+      },
+      "mutating": false
+    },
+    {
+      "name": "register_webhook",
+      "inputs": [
+        {
+          "name": "caller",
+          "type": {
+            "kind": "address"
+          }
+        },
+        {
+          "name": "event_type",
+          "type": {
+            "kind": "symbol"
+          }
+        },
+        {
+          "name": "url",
+          "type": {
+            "kind": "bytes"
+          }
+        },
+        {
+          "name": "secret",
+          "type": {
+            "kind": "bytes"
+          }
+        }
+      ],
+      "output": {
+        "kind": "void"
+      },
+      "mutating": true
+    },
+    {
+      "name": "unregister_webhook",
+      "inputs": [
+        {
+          "name": "caller",
+          "type": {
+            "kind": "address"
+          }
+        },
+        {
+          "name": "event_type",
+          "type": {
+            "kind": "symbol"
+          }
+        },
+        {
+          "name": "url",
+          "type": {
+            "kind": "bytes"
+          }
+        }
+      ],
+      "output": {
+        "kind": "void"
+      },
+      "mutating": true
+    },
+    {
+      "name": "get_webhooks",
+      "inputs": [
+        {
+          "name": "event_type",
+          "type": {
+            "kind": "symbol"
+          }
+        }
+      ],
+      "output": {
+        "kind": "vec",
+        "of": {
+          "kind": "bytes"
+        }
+      },
+      "mutating": true
+    },
+    {
+      "name": "pause",
+      "inputs": [
+        {
+          "name": "caller",
+          "type": {
+            "kind": "address"
+          }
+        }
+      ],
+      "output": {
+        "kind": "void"
+      },
+      "mutating": true
+    },
+    {
+      "name": "unpause",
+      "inputs": [
+        {
+          "name": "caller",
+          "type": {
+            "kind": "address"
+          }
+        }
+      ],
+      "output": {
+        "kind": "void"
+      },
+      "mutating": true
+    },
+    {
+      "name": "is_paused",
+      "inputs": [],
+      "output": {
+        "kind": "bool"
+      },
+      "mutating": false
+    },
+    {
+      "name": "paused_since",
+      "inputs": [],
+      "output": {
+        "kind": "u64"
+      },
+      "mutating": false
+    },
+    {
+      "name": "set_category_max_len",
+      "inputs": [
+        {
+          "name": "caller",
+          "type": {
+            "kind": "address"
+          }
+        },
+        {
+          "name": "max_len",
+          "type": {
+            "kind": "u32"
+          }
+        }
+      ],
+      "output": {
+        "kind": "void"
+      },
+      "mutating": true
+    },
+    {
+      "name": "block_submitter",
+      "inputs": [
+        {
+          "name": "caller",
+          "type": {
+            "kind": "address"
+          }
+        },
+        {
+          "name": "submitter",
+          "type": {
+            "kind": "address"
+          }
+        }
+      ],
+      "output": {
+        "kind": "void"
+      },
+      "mutating": true
+    },
+    {
+      "name": "unblock_submitter",
+      "inputs": [
+        {
+          "name": "caller",
+          "type": {
+            "kind": "address"
+          }
+        },
+        {
+          "name": "submitter",
+          "type": {
+            "kind": "address"
+          }
+        }
+      ],
+      "output": {
+        "kind": "void"
+      },
+      "mutating": true
+    },
+    {
+      "name": "enable_allowlist_mode",
+      "inputs": [
+        {
+          "name": "caller",
+          "type": {
+            "kind": "address"
+          }
+        }
+      ],
+      "output": {
+        "kind": "void"
+      },
+      "mutating": true
+    },
+    {
+      "name": "disable_allowlist_mode",
+      "inputs": [
+        {
+          "name": "caller",
+          "type": {
+            "kind": "address"
+          }
+        }
+      ],
+      "output": {
+        "kind": "void"
+      },
+      "mutating": true
+    },
+    {
+      "name": "allow_submitter",
+      "inputs": [
+        {
+          "name": "caller",
+          "type": {
+            "kind": "address"
+          }
+        },
+        {
+          "name": "submitter",
+          "type": {
+            "kind": "address"
+          }
+        }
+      ],
+      "output": {
+        "kind": "void"
+      },
+      "mutating": true
+    },
+    {
+      "name": "remove_submitter_from_allowlist",
+      "inputs": [
+        {
+          "name": "caller",
+          "type": {
+            "kind": "address"
+          }
+        },
+        {
+          "name": "submitter",
+          "type": {
+            "kind": "address"
+          }
+        }
+      ],
+      "output": {
+        "kind": "void"
+      },
+      "mutating": true
+    },
+    {
+      "name": "get_metadata_max_size",
+      "inputs": [
+        {
+          "name": "event_type",
+          "type": {
+            "kind": "symbol"
+          }
+        }
+      ],
+      "output": {
+        "kind": "u32"
+      },
+      "mutating": false
+    },
+    {
+      "name": "get_statistics",
+      "inputs": [
+        {
+          "name": "caller",
+          "type": {
+            "kind": "address"
+          }
+        }
+      ],
+      "output": {
+        "kind": "type",
+        "name": "ContractStatistics"
+      },
+      "mutating": false
+    },
+    {
+      "name": "set_event_emission_mode",
+      "inputs": [
+        {
+          "name": "caller",
+          "type": {
+            "kind": "address"
+          }
+        },
+        {
+          "name": "mode",
+          "type": {
+            "kind": "u32"
+          }
+        }
+      ],
+      "output": {
+        "kind": "void"
+      },
+      "mutating": true
+    },
+    {
+      "name": "get_event_emission_mode",
+      "inputs": [],
+      "output": {
+        "kind": "u32"
+      },
+      "mutating": false
+    },
+    {
+      "name": "set_low_cost_mode",
+      "inputs": [
+        {
+          "name": "caller",
+          "type": {
+            "kind": "address"
+          }
+        },
+        {
+          "name": "enabled",
+          "type": {
+            "kind": "bool"
+          }
+        }
+      ],
+      "output": {
+        "kind": "void"
+      },
+      "mutating": true
+    },
+    {
+      "name": "is_low_cost_mode",
+      "inputs": [],
+      "output": {
+        "kind": "bool"
+      },
+      "mutating": false
+    },
+    {
+      "name": "set_submitter_rate_limit",
+      "inputs": [
+        {
+          "name": "caller",
+          "type": {
+            "kind": "address"
+          }
+        },
+        {
+          "name": "submitter",
+          "type": {
+            "kind": "address"
+          }
+        },
+        {
+          "name": "max_per_timestamp",
+          "type": {
+            "kind": "u32"
+          }
+        }
+      ],
+      "output": {
+        "kind": "void"
+      },
+      "mutating": true
+    },
+    {
+      "name": "compact_storage",
+      "inputs": [
+        {
+          "name": "caller",
+          "type": {
+            "kind": "address"
+          }
+        },
+        {
+          "name": "stale_types",
+          "type": {
+            "kind": "vec",
+            "of": {
+              "kind": "symbol"
+            }
+          }
+        }
+      ],
+      "output": {
+        "kind": "u32"
+      },
+      "mutating": true
+    },
+    {
+      "name": "log_event_signed",
+      "inputs": [
+        {
+          "name": "submitter",
+          "type": {
+            "kind": "address"
+          }
+        },
+        {
+          "name": "event_type",
+          "type": {
+            "kind": "symbol"
+          }
+        },
+        {
+          "name": "metadata",
+          "type": {
+            "kind": "bytes"
+          }
+        },
+        {
+          "name": "signature_payload",
+          "type": {
+            "kind": "bytes"
+          }
+        }
+      ],
+      "output": {
+        "kind": "bytesn",
+        "n": 32
+      },
+      "mutating": true
+    },
+    {
+      "name": "get_event_signature",
+      "inputs": [
+        {
+          "name": "event_id",
+          "type": {
+            "kind": "bytesn",
+            "n": 32
+          }
+        }
+      ],
+      "output": {
+        "kind": "option",
+        "of": {
+          "kind": "bytes"
+        }
+      },
+      "mutating": false
+    },
+    {
+      "name": "find_event_by_content",
+      "inputs": [
+        {
+          "name": "event_type",
+          "type": {
+            "kind": "symbol"
+          }
+        },
+        {
+          "name": "submitter",
+          "type": {
+            "kind": "address"
+          }
+        },
+        {
+          "name": "metadata",
+          "type": {
+            "kind": "bytes"
+          }
+        }
+      ],
+      "output": {
+        "kind": "option",
+        "of": {
+          "kind": "type",
+          "name": "Event"
+        }
+      },
+      "mutating": false
+    },
+    {
+      "name": "add_owner",
+      "inputs": [
+        {
+          "name": "caller",
+          "type": {
+            "kind": "address"
+          }
+        },
+        {
+          "name": "new_owner",
+          "type": {
+            "kind": "address"
+          }
+        }
+      ],
+      "output": {
+        "kind": "void"
+      },
+      "mutating": true
+    },
+    {
+      "name": "remove_owner",
+      "inputs": [
+        {
+          "name": "caller",
+          "type": {
+            "kind": "address"
+          }
+        },
+        {
+          "name": "owner_to_remove",
+          "type": {
+            "kind": "address"
+          }
+        }
+      ],
+      "output": {
+        "kind": "void"
+      },
+      "mutating": true
+    },
+    {
+      "name": "set_required_signatures",
+      "inputs": [
+        {
+          "name": "caller",
+          "type": {
+            "kind": "address"
+          }
+        },
+        {
+          "name": "required",
+          "type": {
+            "kind": "u32"
+          }
+        }
+      ],
+      "output": {
+        "kind": "void"
+      },
+      "mutating": true
+    },
+    {
+      "name": "submit_proposal",
+      "inputs": [
+        {
+          "name": "proposer",
+          "type": {
+            "kind": "address"
+          }
+        },
+        {
+          "name": "action",
+          "type": {
+            "kind": "type",
+            "name": "ProposalAction"
+          }
+        },
+        {
+          "name": "ttl_seconds",
+          "type": {
+            "kind": "u64"
+          }
+        }
+      ],
+      "output": {
+        "kind": "u32"
+      },
+      "mutating": true
+    },
+    {
+      "name": "approve_proposal",
+      "inputs": [
+        {
+          "name": "approver",
+          "type": {
+            "kind": "address"
+          }
+        },
+        {
+          "name": "proposal_id",
+          "type": {
+            "kind": "u32"
+          }
+        }
+      ],
+      "output": {
+        "kind": "void"
+      },
+      "mutating": true
+    },
+    {
+      "name": "execute_proposal",
+      "inputs": [
+        {
+          "name": "executor",
+          "type": {
+            "kind": "address"
+          }
+        },
+        {
+          "name": "proposal_id",
+          "type": {
+            "kind": "u32"
+          }
+        }
+      ],
+      "output": {
+        "kind": "void"
+      },
+      "mutating": true
+    },
+    {
+      "name": "set_role",
+      "inputs": [
+        {
+          "name": "caller",
+          "type": {
+            "kind": "address"
+          }
+        },
+        {
+          "name": "target",
+          "type": {
+            "kind": "address"
+          }
+        },
+        {
+          "name": "role",
+          "type": {
+            "kind": "option",
+            "of": {
+              "kind": "type",
+              "name": "Role"
+            }
+          }
+        }
+      ],
+      "output": {
+        "kind": "void"
+      },
+      "mutating": true
+    },
+    {
+      "name": "get_role",
+      "inputs": [
+        {
+          "name": "target",
+          "type": {
+            "kind": "address"
+          }
+        }
+      ],
+      "output": {
+        "kind": "option",
+        "of": {
+          "kind": "type",
+          "name": "Role"
+        }
+      },
+      "mutating": false
+    },
+    {
+      "name": "enable_rbac",
+      "inputs": [
+        {
+          "name": "caller",
+          "type": {
+            "kind": "address"
+          }
+        },
+        {
+          "name": "enabled",
+          "type": {
+            "kind": "bool"
+          }
+        }
+      ],
+      "output": {
+        "kind": "void"
+      },
+      "mutating": true
+    },
+    {
+      "name": "is_rbac_enabled",
+      "inputs": [],
+      "output": {
+        "kind": "bool"
+      },
+      "mutating": false
+    },
+    {
+      "name": "set_dedup_policy",
+      "inputs": [
+        {
+          "name": "caller",
+          "type": {
+            "kind": "address"
+          }
+        },
+        {
+          "name": "policy",
+          "type": {
+            "kind": "type",
+            "name": "DedupPolicy"
+          }
+        }
+      ],
+      "output": {
+        "kind": "void"
+      },
+      "mutating": true
+    },
+    {
+      "name": "get_dedup_policy",
+      "inputs": [],
+      "output": {
+        "kind": "type",
+        "name": "DedupPolicy"
+      },
+      "mutating": false
+    },
+    {
+      "name": "set_dedup_policy_for_type",
+      "inputs": [
+        {
+          "name": "caller",
+          "type": {
+            "kind": "address"
+          }
+        },
+        {
+          "name": "event_type",
+          "type": {
+            "kind": "symbol"
+          }
+        },
+        {
+          "name": "policy",
+          "type": {
+            "kind": "option",
+            "of": {
+              "kind": "type",
+              "name": "DedupPolicy"
+            }
+          }
+        }
+      ],
+      "output": {
+        "kind": "void"
+      },
+      "mutating": true
+    },
+    {
+      "name": "get_dedup_policy_for_type",
+      "inputs": [
+        {
+          "name": "event_type",
+          "type": {
+            "kind": "symbol"
+          }
+        }
+      ],
+      "output": {
+        "kind": "type",
+        "name": "DedupPolicy"
+      },
+      "mutating": false
+    },
+    {
+      "name": "log_event_with_custom_key",
+      "inputs": [
+        {
+          "name": "submitter",
+          "type": {
+            "kind": "address"
+          }
+        },
+        {
+          "name": "event_type",
+          "type": {
+            "kind": "symbol"
+          }
+        },
+        {
+          "name": "metadata",
+          "type": {
+            "kind": "bytes"
+          }
+        },
+        {
+          "name": "category",
+          "type": {
+            "kind": "option",
+            "of": {
+              "kind": "symbol"
+            }
+          }
+        },
+        {
+          "name": "sub_event_type",
+          "type": {
+            "kind": "option",
+            "of": {
+              "kind": "symbol"
+            }
+          }
+        },
+        {
+          "name": "force",
+          "type": {
+            "kind": "bool"
+          }
+        },
+        {
+          "name": "custom_key",
+          "type": {
+            "kind": "option",
+            "of": {
+              "kind": "bytesn",
+              "n": 32
+            }
+          }
+        }
+      ],
+      "output": {
+        "kind": "bytesn",
+        "n": 32
+      },
+      "mutating": true
+    },
+    {
+      "name": "cleanup_stale_dedup_entries",
+      "inputs": [
+        {
+          "name": "caller",
+          "type": {
+            "kind": "address"
+          }
+        },
+        {
+          "name": "start_index",
+          "type": {
+            "kind": "u32"
+          }
+        },
+        {
+          "name": "batch_size",
+          "type": {
+            "kind": "u32"
+          }
+        }
+      ],
+      "output": {
+        "kind": "u32"
+      },
+      "mutating": true
+    },
+    {
+      "name": "set_archive_config",
+      "inputs": [
+        {
+          "name": "caller",
+          "type": {
+            "kind": "address"
+          }
+        },
+        {
+          "name": "config",
+          "type": {
+            "kind": "type",
+            "name": "ArchiveConfig"
+          }
+        }
+      ],
+      "output": {
+        "kind": "void"
+      },
+      "mutating": true
+    },
+    {
+      "name": "get_archive_config",
+      "inputs": [],
+      "output": {
+        "kind": "option",
+        "of": {
+          "kind": "type",
+          "name": "ArchiveConfig"
+        }
+      },
+      "mutating": false
+    },
+    {
+      "name": "get_event_audit_trail",
+      "inputs": [
+        {
+          "name": "index",
+          "type": {
+            "kind": "u32"
+          }
+        }
+      ],
+      "output": {
+        "kind": "vec",
+        "of": {
+          "kind": "type",
+          "name": "EventVersion"
+        }
+      },
+      "mutating": true
+    },
+    {
+      "name": "tag_event_version",
+      "inputs": [
+        {
+          "name": "caller",
+          "type": {
+            "kind": "address"
+          }
+        },
+        {
+          "name": "index",
+          "type": {
+            "kind": "u32"
+          }
+        },
+        {
+          "name": "version",
+          "type": {
+            "kind": "u32"
+          }
+        },
+        {
+          "name": "tag",
+          "type": {
+            "kind": "symbol"
+          }
+        }
+      ],
+      "output": {
+        "kind": "void"
+      },
+      "mutating": true
+    },
+    {
+      "name": "get_event_version_tag",
+      "inputs": [
+        {
+          "name": "index",
+          "type": {
+            "kind": "u32"
+          }
+        },
+        {
+          "name": "version",
+          "type": {
+            "kind": "u32"
+          }
+        }
+      ],
+      "output": {
+        "kind": "option",
+        "of": {
+          "kind": "symbol"
+        }
+      },
+      "mutating": false
+    },
+    {
+      "name": "get_event_diff",
+      "inputs": [
+        {
+          "name": "index",
+          "type": {
+            "kind": "u32"
+          }
+        },
+        {
+          "name": "from_version",
+          "type": {
+            "kind": "u32"
+          }
+        },
+        {
+          "name": "to_version",
+          "type": {
+            "kind": "u32"
+          }
+        }
+      ],
+      "output": {
+        "kind": "vec",
+        "of": {
+          "kind": "type",
+          "name": "FieldChange"
+        }
+      },
+      "mutating": true
+    },
+    {
+      "name": "compare_event_versions_detailed",
+      "inputs": [
+        {
+          "name": "index",
+          "type": {
+            "kind": "u32"
+          }
+        },
+        {
+          "name": "from_version",
+          "type": {
+            "kind": "u32"
+          }
+        },
+        {
+          "name": "to_version",
+          "type": {
+            "kind": "u32"
+          }
+        }
+      ],
+      "output": {
+        "kind": "type",
+        "name": "VersionComparison"
+      },
+      "mutating": true
+    }
+  ]
+}
