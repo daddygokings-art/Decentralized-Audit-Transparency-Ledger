@@ -71,6 +71,9 @@ nav:
       - API Reference: docs/api-reference.md
       - Versioning & Deprecation: docs/api-versioning.md
       - SDK Reference: docs/api-sdk-reference/index.md
+      - SDK Code Generation: docs/sdk-codegen.md
+  - Developer Tooling:
+      - Contract Debugger & Tracer: docs/contract-debugger.md
   - Architecture Decision Records:
       - Index: docs/adr/ADR-001-append-only-log.md
       - Compliance Policy-as-Code: docs/adr/ADR-015-contract-event-compliance-policy-as-code.md

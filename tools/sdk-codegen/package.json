@@ -1,0 +1,42 @@
+{
+  "name": "@audit-ledger/sdk-codegen",
+  "version": "1.0.0",
+  "description": "Generate type-safe AuditLedger Soroban SDK clients (TypeScript, Python, Rust) from the contract ABI/IDL (#407)",
+  "main": "dist/index.js",
+  "types": "dist/index.d.ts",
+  "bin": {
+    "sdk-codegen": "./dist/cli.js"
+  },
+  "scripts": {
+    "build": "tsc",
+    "typecheck": "tsc --noEmit",
+    "extract": "ts-node src/cli.ts extract",
+    "generate": "ts-node src/cli.ts generate",
+    "check": "ts-node src/cli.ts check",
+    "compat": "ts-node src/cli.ts compat",
+    "verify": "ts-node src/cli.ts verify",
+    "test": "vitest run",
+    "test:watch": "vitest"
+  },
+  "dependencies": {
+    "commander": "^12.0.0"
+  },
+  "devDependencies": {
+    "@types/node": "^20.11.0",
+    "ts-node": "^10.9.2",
+    "typescript": "^5.3.3",
+    "vitest": "^1.6.0"
+  },
+  "keywords": [
+    "soroban",
+    "stellar",
+    "codegen",
+    "abi",
+    "idl",
+    "audit-ledger"
+  ],
+  "license": "Apache-2.0",
+  "files": [
+    "dist"
+  ]
+}

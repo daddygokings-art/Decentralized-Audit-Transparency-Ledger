@@ -1,0 +1,107 @@
+{
+  "name": "audit-ledger-debugger",
+  "displayName": "AuditLedger Transaction Debugger",
+  "description": "Step through, inspect and trace AuditLedger Soroban contract transactions in VS Code.",
+  "version": "1.0.0",
+  "publisher": "audit-ledger",
+  "license": "Apache-2.0",
+  "engines": {
+    "vscode": "^1.85.0"
+  },
+  "categories": [
+    "Debuggers"
+  ],
+  "main": "./extension.js",
+  "activationEvents": [
+    "onDebugResolve:audit-ledger-trace",
+    "onDebugDynamicConfigurations:audit-ledger-trace"
+  ],
+  "contributes": {
+    "debuggers": [
+      {
+        "type": "audit-ledger-trace",
+        "label": "AuditLedger Transaction Trace",
+        "languages": [
+          "rust"
+        ],
+        "configurationAttributes": {
+          "launch": {
+            "required": [
+              "trace"
+            ],
+            "properties": {
+              "trace": {
+                "type": "string",
+                "description": "Path to a transaction trace recorded by the tracer, or to a normalized RPC result.",
+                "default": "${workspaceFolder}/traces/latest.json"
+              },
+              "stopOnEntry": {
+                "type": "boolean",
+                "description": "Pause at the first step of the trace.",
+                "default": true
+              },
+              "sourceRoot": {
+                "type": "string",
+                "description": "Directory the contract sources live in, for mapping recorded lines onto the editor.",
+                "default": "${workspaceFolder}"
+              }
+            }
+          }
+        },
+        "initialConfigurations": [
+          {
+            "type": "audit-ledger-trace",
+            "request": "launch",
+            "name": "Debug transaction trace",
+            "trace": "${workspaceFolder}/traces/latest.json",
+            "stopOnEntry": true
+          },
+          {
+            "type": "audit-ledger-trace",
+            "request": "attach",
+            "name": "Attach to transaction trace",
+            "trace": "${workspaceFolder}/traces/latest.json",
+            "stopOnEntry": false
+          }
+        ],
+        "configurationSnippets": [
+          {
+            "label": "AuditLedger: debug a transaction trace",
+            "description": "Step through a recorded contract interaction",
+            "body": {
+              "type": "audit-ledger-trace",
+              "request": "launch",
+              "name": "Debug transaction trace",
+              "trace": "^\"\\${workspaceFolder}/traces/latest.json\"",
+              "stopOnEntry": true
+            }
+          }
+        ]
+      }
+    ],
+    "commands": [
+      {
+        "command": "audit-ledger.openTrace",
+        "title": "AuditLedger: Open Transaction Trace",
+        "category": "AuditLedger"
+      },
+      {
+        "command": "audit-ledger.verifyTrace",
+        "title": "AuditLedger: Verify Transaction Trace",
+        "category": "AuditLedger"
+      }
+    ],
+    "menus": {
+      "editor/title": [
+        {
+          "command": "audit-ledger.verifyTrace",
+          "when": "resourceExtname == .json",
+          "group": "navigation"
+        }
+      ]
+    }
+  },
+  "scripts": {
+    "package": "vsce package"
+  }
+}

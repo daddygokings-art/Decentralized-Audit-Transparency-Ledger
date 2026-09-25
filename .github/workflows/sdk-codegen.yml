@@ -1,0 +1,141 @@
+name: SDK codegen
+
+# Verifies that the committed contract IDL and every generated SDK binding match
+# the contract source, and that the generated code still builds.  (#407)
+#
+# `abi/audit-ledger.json` is the single source of truth for the TypeScript,
+# Python and Rust SDKs under `sdk/`.  A contract change that is not regenerated
+# fails here rather than at a consumer's compile time.
+
+permissions: {}
+
+on:
+  push:
+    paths:
+      - 'src/lib.rs'
+      - 'abi/audit-ledger.json'
+      - 'sdk/js/src/generated/**'
+      - 'sdk/python/audit_ledger/generated/**'
+      - 'sdk/rust/src/generated/**'
+      - 'tools/sdk-codegen/**'
+      - '.github/workflows/sdk-codegen.yml'
+  pull_request:
+    paths:
+      - 'src/lib.rs'
+      - 'abi/audit-ledger.json'
+      - 'sdk/js/src/generated/**'
+      - 'sdk/python/audit_ledger/generated/**'
+      - 'sdk/rust/src/generated/**'
+      - 'tools/sdk-codegen/**'
+      - '.github/workflows/sdk-codegen.yml'
+  workflow_dispatch:
+
+jobs:
+  codegen:
+    name: IDL and generated SDK bindings
+    runs-on: ubuntu-latest
+    permissions:
+      contents: read
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          persist-credentials: false
+
+      - uses: actions/setup-node@v4
+        with:
+          node-version: '20'
+
+      - name: Install Rust toolchain
+        uses: dtolnay/rust-toolchain@stable
+        with:
+          components: rustfmt
+
+      - name: Install dependencies
+        working-directory: tools/sdk-codegen
+        run: npm ci
+
+      - name: Type-check the generator
+        working-directory: tools/sdk-codegen
+        run: npx tsc --noEmit
+
+      - name: Unit tests
+        working-directory: tools/sdk-codegen
+        run: npx vitest run
+
+      - name: IDL matches the contract, generated code is up to date
+        working-directory: tools/sdk-codegen
+        run: npx ts-node src/cli.ts verify
+
+      - name: Show the regeneration diff
+        if: failure()
+        working-directory: tools/sdk-codegen
+        run: |
+          npx ts-node src/cli.ts extract
+          npx ts-node src/cli.ts generate
+          git --no-pager diff --stat
+
+  generated-typescript:
+    name: Generated TypeScript compiles
+    runs-on: ubuntu-latest
+    permissions:
+      contents: read
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          persist-credentials: false
+
+      - uses: actions/setup-node@v4
+        with:
+          node-version: '20'
+
+      - name: Type-check the generated bindings in strict mode
+        run: |
+          npm --prefix tools/sdk-codegen ci
+          npx --yes --package=typescript@5.6 tsc --noEmit --strict \
+            --target es2020 --lib es2020 --types \
+            sdk/js/src/generated/index.ts
+
+  generated-python:
+    name: Generated Python imports
+    runs-on: ubuntu-latest
+    permissions:
+      contents: read
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          persist-credentials: false
+
+      - uses: actions/setup-python@v5
+        with:
+          python-version: '3.11'
+
+      - name: Byte-compile the generated package
+        run: python -m compileall -q sdk/python/audit_ledger/generated
+
+      - name: Import the generated package and read the contract surface
+        run: |
+          PYTHONPATH=sdk/python python - <<'PY'
+          import audit_ledger.generated as g
+          assert len(g.CONTRACT_EVENT_NAMES) > 0, "no events generated"
+          assert len(g.CONTRACT_ERROR_NAMES) > 0, "no errors generated"
+          print(f"{len(g.CONTRACT_EVENT_NAMES)} events, {len(g.CONTRACT_ERROR_NAMES)} errors")
+          PY
+
+  generated-rust:
+    name: Generated Rust is rustfmt-clean
+    runs-on: ubuntu-latest
+    permissions:
+      contents: read
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          persist-credentials: false
+
+      - uses: dtolnay/rust-toolchain@stable
+        with:
+          components: rustfmt
+
+      - name: Check formatting of the generated crate
+        # `rustfmt mod.rs` walks `mod x;` statements, so this covers the whole
+        # generated module set, not just the entry file.
+        run: rustfmt --check sdk/rust/src/generated/mod.rs

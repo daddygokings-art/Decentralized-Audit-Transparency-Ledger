@@ -1,0 +1,92 @@
+name: Contract debugger
+
+# Verifies the transaction tracer and debugger, including the accuracy of its
+# gas and storage accounting.  (#408)
+#
+# The debugger's central promise is that what it reports is derived from a trace
+# and not asserted: every view (call stack, storage at a step, gas breakdown) is
+# a fold over the recorded steps, and `verify` cross-checks those folds against
+# the totals the trace claims.  So the tests below check the folds against
+# hand-computed expectations, and check that a deliberately inconsistent trace is
+# reported as inconsistent rather than silently accepted.
+
+permissions: {}
+
+on:
+  push:
+    paths:
+      - 'tools/contract-debugger/**'
+      - 'abi/audit-ledger.json'
+      - '.github/workflows/contract-debugger.yml'
+  pull_request:
+    paths:
+      - 'tools/contract-debugger/**'
+      - 'abi/audit-ledger.json'
+      - '.github/workflows/contract-debugger.yml'
+  workflow_dispatch:
+
+jobs:
+  debugger:
+    name: Tracer and debugger
+    runs-on: ubuntu-latest
+    permissions:
+      contents: read
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          persist-credentials: false
+
+      - uses: actions/setup-node@v4
+        with:
+          node-version: '20'
+
+      - name: Install dependencies
+        working-directory: tools/contract-debugger
+        run: npm ci
+
+      - name: Type-check
+        working-directory: tools/contract-debugger
+        run: npx tsc --noEmit
+
+      - name: Unit tests
+        working-directory: tools/contract-debugger
+        run: npx vitest run
+
+      - name: Build
+        working-directory: tools/contract-debugger
+        run: npm run build
+
+      - name: Every built-in scenario is self-consistent
+        # `verify` exits non-zero when a trace's per-step folds disagree with
+        # its recorded totals, so this is the accuracy gate.
+        working-directory: tools/contract-debugger
+        run: |
+          set -euo pipefail
+          mkdir -p /tmp/traces
+          for scenario in log-event batch panic read-writeback; do
+            node dist/cli.js scenario "$scenario" -o "/tmp/traces/$scenario.json"
+            node dist/cli.js verify "/tmp/traces/$scenario.json"
+            echo
+          done
+
+      - name: A tampered trace is reported as inconsistent
+        # The inverse of the gate above: `verify` must fail when the totals are
+        # inflated, otherwise it is not actually checking anything.
+        working-directory: tools/contract-debugger
+        run: |
+          set -euo pipefail
+          node dist/cli.js scenario inconsistent -o /tmp/traces/inconsistent.json
+          if node dist/cli.js verify /tmp/traces/inconsistent.json; then
+            echo "::error::verify accepted a trace whose totals disagree with its steps"
+            exit 1
+          fi
+          echo "correctly rejected"
+
+      - name: The debug adapter speaks DAP
+        # Drive the adapter over a pipe through a real initialize -> launch ->
+        # configurationDone -> continue -> stackTrace -> disconnect exchange, so a
+        # framing or handshake regression fails here rather than in a
+        # developer's editor.  Each request waits for its own response instead of
+        # racing a timer, so this cannot flake on a slow runner.
+        working-directory: tools/contract-debugger
+        run: node tools/contract-debugger/test/dap-exchange.check.js
