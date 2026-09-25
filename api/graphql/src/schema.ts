@@ -29,6 +29,8 @@ export const typeDefs = `
     event_hash: String!
     """Hash of the immediately preceding event, forming the tamper-evident chain."""
     prev_hash: String!
+    """Other events submitted by the same account, optionally filtered by type."""
+    relatedEvents(type: String, limit: Int = 10): [Event!]!
   }
 
   """

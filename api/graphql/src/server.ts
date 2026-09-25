@@ -7,7 +7,7 @@ import { useServer } from "graphql-ws/dist/use/ws";
 import { makeExecutableSchema } from "@graphql-tools/schema";
 import { GraphQLError } from "graphql";
 import { typeDefs } from "./schema";
-import { resolvers } from "./resolvers";
+import { createEventLoaders, resolvers } from "./resolvers";
 import { validateKey } from "../../rest/src/keys";
 import type { Role } from "../../rest/src/keys";
 
@@ -79,7 +79,7 @@ async function main() {
             role = record.role;
           }
         }
-        return { apiKey, role };
+        return { apiKey, role, eventLoaders: createEventLoaders() };
       },
     })
   );

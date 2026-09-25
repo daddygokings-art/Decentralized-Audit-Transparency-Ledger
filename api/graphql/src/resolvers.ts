@@ -1,12 +1,13 @@
 import { PubSub, withFilter } from "graphql-subscriptions";
 import { requireRole, Role } from "./auth";
 import { deliverEvent } from "../../rest/src/webhooks";
+import { DataLoader } from "./dataloader";
 
 export const pubsub = new PubSub();
 export const EVENT_LOGGED = "EVENT_LOGGED";
 
 // In-memory mock store (replace with JS SDK calls in production)
-interface EventRecord {
+export interface EventRecord {
   id: string;
   index: number;
   timestamp: number;
@@ -27,6 +28,25 @@ interface GovernanceEventRecord {
 
 const events: EventRecord[] = [];
 const governanceEvents: GovernanceEventRecord[] = [];
+
+export type EventLoader = DataLoader<string, EventRecord | null>;
+export type SubmitterEventLoader = DataLoader<string, EventRecord[]>;
+
+export interface EventLoaders {
+  byId: EventLoader;
+  bySubmitter: SubmitterEventLoader;
+}
+
+export function createEventLoaders(source: readonly EventRecord[] = events): EventLoaders {
+  return {
+    byId: new DataLoader<string, EventRecord | null>(async (ids) =>
+      ids.map((id) => source.find((event) => event.id === id) ?? null)
+    ),
+    bySubmitter: new DataLoader<string, EventRecord[]>(async (submitters) =>
+      submitters.map((submitter) => source.filter((event) => event.submitter === submitter))
+    ),
+  };
+}
 
 function matchesFilter(e: EventRecord, filter: any): boolean {
   if (!filter) return true;
@@ -90,6 +110,14 @@ export const resolvers = {
 
   Event: {
     __resolveReference: (reference: { id: string }) => events.find((event) => event.id === reference.id) ?? null,
+
+    relatedEvents: async (event: EventRecord, { type, limit = 10 }: any, ctx: any) => {
+      const loaders = ctx?.eventLoaders ?? createEventLoaders();
+      const related = await loaders.bySubmitter.load(event.submitter);
+      return related
+        .filter((candidate) => candidate.id !== event.id && (!type || candidate.event_type === type))
+        .slice(0, Math.max(0, limit));
+    },
   },
 
   Mutation: {
