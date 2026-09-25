@@ -4,7 +4,11 @@ import type { NextRequest } from "next/server";
 const CONTENT_SECURITY_POLICY = [
   "default-src 'self'",
   "script-src 'self' 'unsafe-inline' 'unsafe-eval'",
+  "script-src-elem 'self' 'unsafe-inline'",
+  "script-src-attr 'none'",
   "style-src 'self' 'unsafe-inline'",
+  "style-src-elem 'self' 'unsafe-inline'",
+  "style-src-attr 'none'",
   "img-src 'self' data: blob:",
   "font-src 'self' data:",
   "connect-src 'self' ws: wss: https:",
@@ -13,8 +17,11 @@ const CONTENT_SECURITY_POLICY = [
   "base-uri 'self'",
   "form-action 'self'",
   "frame-ancestors 'none'",
+  "frame-src 'none'",
+  "child-src 'self'",
   "worker-src 'self'",
   "manifest-src 'self'",
+  "navigate-to 'self'",
   "upgrade-insecure-requests",
 ].join("; ");
 
