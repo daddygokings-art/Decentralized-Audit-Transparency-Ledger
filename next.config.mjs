@@ -8,17 +8,20 @@ const securityHeaders = [
       "style-src 'self' 'unsafe-inline'",
       "img-src 'self' data: blob:",
       "font-src 'self' data:",
-      "connect-src 'self'",
+      "connect-src 'self' ws: wss: https:",
+      "media-src 'self'",
       "object-src 'none'",
       "base-uri 'self'",
       "form-action 'self'",
       "frame-ancestors 'none'",
+      "worker-src 'self'",
+      "manifest-src 'self'",
       "upgrade-insecure-requests",
     ].join('; '),
   },
   {
     key: 'Permissions-Policy',
-    value: 'camera=(), microphone=(), geolocation=(), payment=(), usb=(), interest-cohort=()',
+    value: 'camera=(), microphone=(), geolocation=(), payment=(), usb=(), interest-cohort=(), accelerometer=(), gyroscope=(), magnetometer=()',
   },
   {
     key: 'X-Content-Type-Options',
@@ -32,7 +35,22 @@ const securityHeaders = [
     key: 'X-Frame-Options',
     value: 'DENY',
   },
-]
+];
+
+const cacheHeaders = [
+  {
+    key: 'Cache-Control',
+    value: 'no-store, no-cache, must-revalidate, proxy-revalidate, max-age=0',
+  },
+  {
+    key: 'Pragma',
+    value: 'no-cache',
+  },
+  {
+    key: 'Expires',
+    value: '0',
+  },
+];
 
 const nextConfig = {
   reactStrictMode: true,
@@ -45,33 +63,18 @@ const nextConfig = {
       },
       {
         source: '/',
-        headers: [
-          {
-            key: 'Cache-Control',
-            value: 'public, max-age=0, must-revalidate',
-          },
-        ],
+        headers: [...securityHeaders, ...cacheHeaders],
       },
       {
         source: '/robots.txt',
-        headers: [
-          {
-            key: 'Cache-Control',
-            value: 'public, max-age=0, must-revalidate',
-          },
-        ],
+        headers: [...securityHeaders, ...cacheHeaders],
       },
       {
         source: '/sitemap.xml',
-        headers: [
-          {
-            key: 'Cache-Control',
-            value: 'public, max-age=0, must-revalidate',
-          },
-        ],
+        headers: [...securityHeaders, ...cacheHeaders],
       },
-    ]
+    ];
   },
-}
+};
 
-export default nextConfig
+export default nextConfig;

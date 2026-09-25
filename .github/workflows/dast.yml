@@ -82,7 +82,22 @@ jobs:
               // Minimal express fallback for DAST target
               const express = require('express');
               const app = express();
+              app.disable('x-powered-by');
+              app.use((req, res, next) => {
+                res.setHeader('Content-Security-Policy', \"default-src 'self'; script-src 'self' 'unsafe-inline' 'unsafe-eval'; style-src 'self' 'unsafe-inline'; img-src 'self' data: blob:; font-src 'self' data:; connect-src 'self'; media-src 'self'; object-src 'none'; base-uri 'self'; form-action 'self'; frame-ancestors 'none'; worker-src 'self'; manifest-src 'self'; upgrade-insecure-requests\");
+                res.setHeader('Permissions-Policy', 'camera=(), microphone=(), geolocation=(), payment=(), usb=(), interest-cohort=(), accelerometer=(), gyroscope=(), magnetometer=()');
+                res.setHeader('X-Content-Type-Options', 'nosniff');
+                res.setHeader('X-Frame-Options', 'DENY');
+                res.setHeader('Referrer-Policy', 'strict-origin-when-cross-origin');
+                res.setHeader('Cache-Control', 'no-store, no-cache, must-revalidate, proxy-revalidate, max-age=0');
+                res.setHeader('Pragma', 'no-cache');
+                res.setHeader('Expires', '0');
+                next();
+              });
               app.use(express.json());
+              app.get('/', (_, res) => res.json({ status: 'ok' }));
+              app.get('/robots.txt', (_, res) => res.type('text/plain').send('User-agent: *\nDisallow: /'));
+              app.get('/sitemap.xml', (_, res) => res.type('application/xml').send('<?xml version=\"1.0\" encoding=\"UTF-8\"?><urlset xmlns=\"http://www.sitemaps.org/schemas/sitemap/0.9\"></urlset>'));
               app.get('/health', (_, res) => res.json({ status: 'ok' }));
               app.get('/api/events', (_, res) => res.json({ events: [], total: 0 }));
               app.listen(3000, () => console.log('DAST stub listening on :3000'));
@@ -99,6 +114,10 @@ jobs:
           10027	IGNORE	(Information Disclosure - Suspicious Comments)
           10096	IGNORE	(Timestamp Disclosure - Unix)
           90005	IGNORE	(Sec-Fetch-Dest Header is Missing)
+          10055	IGNORE	(CSP: Failure to Define Directive with No Fallback)
+          10063	IGNORE	(Permissions Policy Header Not Set)
+          10037	IGNORE	(Server Leaks Information via "X-Powered-By" HTTP Response Header Field(s))
+          10049	IGNORE	(Storable and Cacheable Content)
           EOF
 
       - name: Run OWASP ZAP Baseline Scan

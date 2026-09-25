@@ -9,11 +9,14 @@ const securityHeaders = [
       "style-src 'self' 'unsafe-inline'",
       "img-src 'self' data: blob:",
       "font-src 'self' data:",
-      "connect-src 'self'",
+      "connect-src 'self' ws: wss: https:",
+      "media-src 'self'",
       "object-src 'none'",
       "base-uri 'self'",
       "form-action 'self'",
       "frame-ancestors 'none'",
+      "worker-src 'self'",
+      "manifest-src 'self'",
       "upgrade-insecure-requests",
     ].join("; "),
   },
@@ -28,6 +31,7 @@ const securityHeaders = [
       "microphone=()",
       "payment=()",
       "usb=()",
+      "interest-cohort=()",
     ].join(", "),
   },
   {
@@ -38,9 +42,29 @@ const securityHeaders = [
     key: "Referrer-Policy",
     value: "strict-origin-when-cross-origin",
   },
+  {
+    key: "X-Frame-Options",
+    value: "DENY",
+  },
+];
+
+const cacheHeaders = [
+  {
+    key: "Cache-Control",
+    value: "no-store, no-cache, must-revalidate, proxy-revalidate, max-age=0",
+  },
+  {
+    key: "Pragma",
+    value: "no-cache",
+  },
+  {
+    key: "Expires",
+    value: "0",
+  },
 ];
 
 const nextConfig: NextConfig = {
+  reactStrictMode: true,
   poweredByHeader: false,
   async headers() {
     return [
@@ -49,22 +73,16 @@ const nextConfig: NextConfig = {
         headers: securityHeaders,
       },
       {
+        source: "/",
+        headers: [...securityHeaders, ...cacheHeaders],
+      },
+      {
         source: "/robots.txt",
-        headers: [
-          {
-            key: "Cache-Control",
-            value: "public, max-age=3600, must-revalidate",
-          },
-        ],
+        headers: [...securityHeaders, ...cacheHeaders],
       },
       {
         source: "/sitemap.xml",
-        headers: [
-          {
-            key: "Cache-Control",
-            value: "public, max-age=3600, must-revalidate",
-          },
-        ],
+        headers: [...securityHeaders, ...cacheHeaders],
       },
     ];
   },

@@ -39,6 +39,7 @@ import {
 } from "./eventCache";
 
 const app = express();
+app.disable("x-powered-by");
 const port = process.env.PORT || 3002;
 
 app.use(cors());
@@ -147,6 +148,21 @@ function resolveContext(req: express.Request): { apiKey?: string; role?: Role } 
 // ── Health Check Endpoints (#268) ─────────────────────────────────────────────
 
 const startTime = Date.now();
+
+app.get(["/", "/robots.txt", "/sitemap.xml"], (req, res) => {
+  res.setHeader("Cache-Control", "no-store, no-cache, must-revalidate, proxy-revalidate, max-age=0");
+  res.setHeader("Pragma", "no-cache");
+  res.setHeader("Expires", "0");
+  if (req.path === "/robots.txt") {
+    return res.type("text/plain").send("User-agent: *\nDisallow: /");
+  }
+  if (req.path === "/sitemap.xml") {
+    return res
+      .type("application/xml")
+      .send('<?xml version="1.0" encoding="UTF-8"?><urlset xmlns="http://www.sitemaps.org/schemas/sitemap/0.9"></urlset>');
+  }
+  return res.json({ status: "ok", name: "AuditLedger REST API", version: "v1" });
+});
 
 app.get("/healthz", (_req, res) => {
   res.json({
