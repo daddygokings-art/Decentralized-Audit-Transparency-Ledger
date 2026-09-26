@@ -86,6 +86,8 @@ services:
       GF_SERVER_ROUTER_LOGGING: "true"
       GF_LOG_LEVEL: "info"
       GF_LOG_MODE: "console"
+      # Security headers required by ZAP scan (#740)
+      GF_SERVER_CUSTOM_RESPONSE_HEADERS: "Cross-Origin-Embedder-Policy=require-corp;Cross-Origin-Opener-Policy=same-origin;Cross-Origin-Resource-Policy=same-origin"
 
   rest:
     deploy:
