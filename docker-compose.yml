@@ -67,6 +67,8 @@ services:
       GF_SECURITY_ADMIN_PASSWORD: "${GRAFANA_PASSWORD:-admin}"
       GF_USERS_ALLOW_SIGN_UP: "false"
       GF_DASHBOARDS_DEFAULT_HOME_DASHBOARD_PATH: /var/lib/grafana/dashboards/audit-ledger.json
+      # Security headers required by ZAP scan (#740)
+      GF_SERVER_CUSTOM_RESPONSE_HEADERS: "Cross-Origin-Embedder-Policy=require-corp;Cross-Origin-Opener-Policy=same-origin;Cross-Origin-Resource-Policy=same-origin"
     ports:
       - "3000:3000"
     restart: unless-stopped
