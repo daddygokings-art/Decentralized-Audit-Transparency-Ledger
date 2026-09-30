@@ -1,0 +1,2837 @@
+{
+  "generated_at": "2026-09-26T21:01:57Z",
+  "revision": "f6c8dbc",
+  "suite": {
+    "schema": 1,
+    "name": "audit-ledger contract benchmarks",
+    "sdk_version": "27.0.6",
+    "model": "host-operation-model: figures are metered from a real Soroban host executing the contract's storage and event operations, transcribed from the contract source. The contract crate itself does not compile, so its own instruction count is not measured and the figures are a lower bound on production cost. See docs/performance/benchmark-methodology.md.",
+    "generated_at": "2026-09-26T21:01:57Z",
+    "results": [
+      {
+        "id": "scenario:single_event/ledger=100",
+        "group": "scenario",
+        "name": "single_event",
+        "params": {
+          "ledger": "100"
+        },
+        "metrics": {
+          "event_bytes": 272,
+          "instructions": 1759194,
+          "mem_bytes": 816695,
+          "read_bytes": 0,
+          "read_entries": 10,
+          "rent_bumps": 7,
+          "rent_ledger_bytes": 3525152760,
+          "write_bytes": 2704,
+          "write_entries": 10
+        }
+      },
+      {
+        "id": "scenario:single_event/ledger=300",
+        "group": "scenario",
+        "name": "single_event",
+        "params": {
+          "ledger": "300"
+        },
+        "metrics": {
+          "event_bytes": 272,
+          "instructions": 4264785,
+          "mem_bytes": 2246515,
+          "read_bytes": 0,
+          "read_entries": 10,
+          "rent_bumps": 7,
+          "rent_ledger_bytes": 3525152760,
+          "write_bytes": 3068,
+          "write_entries": 10
+        }
+      },
+      {
+        "id": "scenario:batch_events/ledger=100/batch=4",
+        "group": "scenario",
+        "name": "batch_events",
+        "params": {
+          "batch": "4",
+          "ledger": "100"
+        },
+        "metrics": {
+          "event_bytes": 1092,
+          "instructions": 6839825,
+          "mem_bytes": 3077847,
+          "read_bytes": 0,
+          "read_entries": 36,
+          "rent_bumps": 27,
+          "rent_ledger_bytes": 14131715040,
+          "write_bytes": 8948,
+          "write_entries": 36
+        }
+      },
+      {
+        "id": "scenario:batch_events/ledger=100/batch=8",
+        "group": "scenario",
+        "name": "batch_events",
+        "params": {
+          "batch": "8",
+          "ledger": "100"
+        },
+        "metrics": {
+          "event_bytes": 2184,
+          "instructions": 13980761,
+          "mem_bytes": 6226219,
+          "read_bytes": 0,
+          "read_entries": 68,
+          "rent_bumps": 51,
+          "rent_ledger_bytes": 28263430080,
+          "write_bytes": 16640,
+          "write_entries": 68
+        }
+      },
+      {
+        "id": "scenario:batch_events/ledger=100/batch=16",
+        "group": "scenario",
+        "name": "batch_events",
+        "params": {
+          "batch": "16",
+          "ledger": "100"
+        },
+        "metrics": {
+          "event_bytes": 4372,
+          "instructions": 28884701,
+          "mem_bytes": 12841431,
+          "read_bytes": 0,
+          "read_entries": 108,
+          "rent_bumps": 91,
+          "rent_ledger_bytes": 56557964160,
+          "write_bytes": 27620,
+          "write_entries": 108
+        }
+      },
+      {
+        "id": "scenario:batch_events/ledger=300/batch=4",
+        "group": "scenario",
+        "name": "batch_events",
+        "params": {
+          "batch": "4",
+          "ledger": "300"
+        },
+        "metrics": {
+          "event_bytes": 1092,
+          "instructions": 16449476,
+          "mem_bytes": 8389167,
+          "read_bytes": 0,
+          "read_entries": 36,
+          "rent_bumps": 27,
+          "rent_ledger_bytes": 14131715040,
+          "write_bytes": 10148,
+          "write_entries": 36
+        }
+      },
+      {
+        "id": "scenario:batch_events/ledger=300/batch=8",
+        "group": "scenario",
+        "name": "batch_events",
+        "params": {
+          "batch": "8",
+          "ledger": "300"
+        },
+        "metrics": {
+          "event_bytes": 2184,
+          "instructions": 33070916,
+          "mem_bytes": 16712879,
+          "read_bytes": 0,
+          "read_entries": 68,
+          "rent_bumps": 51,
+          "rent_ledger_bytes": 28263430080,
+          "write_bytes": 18240,
+          "write_entries": 68
+        }
+      },
+      {
+        "id": "scenario:batch_events/ledger=300/batch=16",
+        "group": "scenario",
+        "name": "batch_events",
+        "params": {
+          "batch": "16",
+          "ledger": "300"
+        },
+        "metrics": {
+          "event_bytes": 4372,
+          "instructions": 66914398,
+          "mem_bytes": 33678751,
+          "read_bytes": 0,
+          "read_entries": 108,
+          "rent_bumps": 91,
+          "rent_ledger_bytes": 56557964160,
+          "write_bytes": 29220,
+          "write_entries": 108
+        }
+      },
+      {
+        "id": "scenario:queries/ledger=0",
+        "group": "scenario",
+        "name": "queries",
+        "params": {
+          "ledger": "0"
+        },
+        "metrics": {
+          "event_bytes": 0,
+          "instructions": 14577,
+          "mem_bytes": 5823,
+          "read_bytes": 0,
+          "read_entries": 1,
+          "rent_bumps": 0,
+          "rent_ledger_bytes": 0,
+          "write_bytes": 0,
+          "write_entries": 0
+        }
+      },
+      {
+        "id": "scenario:queries/ledger=100",
+        "group": "scenario",
+        "name": "queries",
+        "params": {
+          "ledger": "100"
+        },
+        "metrics": {
+          "event_bytes": 0,
+          "instructions": 238458,
+          "mem_bytes": 54958,
+          "read_bytes": 0,
+          "read_entries": 14,
+          "rent_bumps": 0,
+          "rent_ledger_bytes": 0,
+          "write_bytes": 0,
+          "write_entries": 0
+        }
+      },
+      {
+        "id": "scenario:queries/ledger=400",
+        "group": "scenario",
+        "name": "queries",
+        "params": {
+          "ledger": "400"
+        },
+        "metrics": {
+          "event_bytes": 0,
+          "instructions": 281944,
+          "mem_bytes": 157358,
+          "read_bytes": 0,
+          "read_entries": 14,
+          "rent_bumps": 0,
+          "rent_ledger_bytes": 0,
+          "write_bytes": 0,
+          "write_entries": 0
+        }
+      },
+      {
+        "id": "scenario:governance/ledger=100/voters=5",
+        "group": "scenario",
+        "name": "governance",
+        "params": {
+          "ledger": "100",
+          "voters": "5"
+        },
+        "metrics": {
+          "event_bytes": 156,
+          "instructions": 667743,
+          "mem_bytes": 284969,
+          "read_bytes": 0,
+          "read_entries": 6,
+          "rent_bumps": 0,
+          "rent_ledger_bytes": 0,
+          "write_bytes": 1724,
+          "write_entries": 6
+        }
+      },
+      {
+        "id": "scenario:governance/ledger=300/voters=5",
+        "group": "scenario",
+        "name": "governance",
+        "params": {
+          "ledger": "300",
+          "voters": "5"
+        },
+        "metrics": {
+          "event_bytes": 156,
+          "instructions": 1434630,
+          "mem_bytes": 760969,
+          "read_bytes": 0,
+          "read_entries": 6,
+          "rent_bumps": 0,
+          "rent_ledger_bytes": 0,
+          "write_bytes": 1724,
+          "write_entries": 6
+        }
+      },
+      {
+        "id": "scenario:archive/ledger=100/count=25",
+        "group": "scenario",
+        "name": "archive",
+        "params": {
+          "count": "25",
+          "ledger": "100"
+        },
+        "metrics": {
+          "event_bytes": 0,
+          "instructions": 16527284,
+          "mem_bytes": 7281239,
+          "read_bytes": 0,
+          "read_entries": 101,
+          "rent_bumps": 50,
+          "rent_ledger_bytes": 45702144000,
+          "write_bytes": 25012,
+          "write_entries": 76
+        }
+      },
+      {
+        "id": "scenario:archive/ledger=300/count=25",
+        "group": "scenario",
+        "name": "archive",
+        "params": {
+          "count": "25",
+          "ledger": "300"
+        },
+        "metrics": {
+          "event_bytes": 0,
+          "instructions": 38475044,
+          "mem_bytes": 19317508,
+          "read_bytes": 0,
+          "read_entries": 101,
+          "rent_bumps": 50,
+          "rent_ledger_bytes": 45712512000,
+          "write_bytes": 25020,
+          "write_entries": 76
+        }
+      },
+      {
+        "id": "storage:write_instance_scalar",
+        "group": "storage",
+        "name": "write_instance_scalar",
+        "params": {},
+        "metrics": {
+          "event_bytes": 0,
+          "instructions": 16948,
+          "mem_bytes": 2475,
+          "read_bytes": 0,
+          "read_entries": 1,
+          "rent_bumps": 0,
+          "rent_ledger_bytes": 0,
+          "write_bytes": 148,
+          "write_entries": 1
+        }
+      },
+      {
+        "id": "storage:write_persistent_bytes32",
+        "group": "storage",
+        "name": "write_persistent_bytes32",
+        "params": {},
+        "metrics": {
+          "event_bytes": 0,
+          "instructions": 17838,
+          "mem_bytes": 2409,
+          "read_bytes": 0,
+          "read_entries": 2,
+          "rent_bumps": 0,
+          "rent_ledger_bytes": 0,
+          "write_bytes": 148,
+          "write_entries": 1
+        }
+      },
+      {
+        "id": "storage:read_persistent",
+        "group": "storage",
+        "name": "read_persistent",
+        "params": {},
+        "metrics": {
+          "event_bytes": 0,
+          "instructions": 14369,
+          "mem_bytes": 1891,
+          "read_bytes": 0,
+          "read_entries": 2,
+          "rent_bumps": 0,
+          "rent_ledger_bytes": 0,
+          "write_bytes": 0,
+          "write_entries": 0
+        }
+      },
+      {
+        "id": "storage:has_persistent",
+        "group": "storage",
+        "name": "has_persistent",
+        "params": {},
+        "metrics": {
+          "event_bytes": 0,
+          "instructions": 10731,
+          "mem_bytes": 1570,
+          "read_bytes": 0,
+          "read_entries": 2,
+          "rent_bumps": 0,
+          "rent_ledger_bytes": 0,
+          "write_bytes": 0,
+          "write_entries": 0
+        }
+      },
+      {
+        "id": "storage:rewrite_packed_index",
+        "group": "storage",
+        "name": "rewrite_packed_index",
+        "params": {},
+        "metrics": {
+          "event_bytes": 0,
+          "instructions": 36157,
+          "mem_bytes": 23417,
+          "read_bytes": 0,
+          "read_entries": 2,
+          "rent_bumps": 1,
+          "rent_ledger_bytes": 16380,
+          "write_bytes": 4100,
+          "write_entries": 1
+        }
+      },
+      {
+        "id": "storage:rent_extension",
+        "group": "storage",
+        "name": "rent_extension",
+        "params": {},
+        "metrics": {
+          "event_bytes": 0,
+          "instructions": 12039,
+          "mem_bytes": 1790,
+          "read_bytes": 0,
+          "read_entries": 2,
+          "rent_bumps": 1,
+          "rent_ledger_bytes": 383009940,
+          "write_bytes": 0,
+          "write_entries": 0
+        }
+      },
+      {
+        "id": "storage:emit_event",
+        "group": "storage",
+        "name": "emit_event",
+        "params": {},
+        "metrics": {
+          "event_bytes": 212,
+          "instructions": 11110,
+          "mem_bytes": 1680,
+          "read_bytes": 0,
+          "read_entries": 1,
+          "rent_bumps": 0,
+          "rent_ledger_bytes": 0,
+          "write_bytes": 0,
+          "write_entries": 0
+        }
+      },
+      {
+        "id": "function:add_owner",
+        "group": "function",
+        "name": "add_owner",
+        "params": {
+          "mutating": "true",
+          "profile": "config_write"
+        },
+        "metrics": {
+          "event_bytes": 0,
+          "instructions": 163616,
+          "mem_bytes": 86362,
+          "read_bytes": 0,
+          "read_entries": 1,
+          "rent_bumps": 1,
+          "rent_ledger_bytes": 753480,
+          "write_bytes": 732,
+          "write_entries": 1
+        }
+      },
+      {
+        "id": "function:allow_submitter",
+        "group": "function",
+        "name": "allow_submitter",
+        "params": {
+          "mutating": "true",
+          "profile": "write_small_instance"
+        },
+        "metrics": {
+          "event_bytes": 0,
+          "instructions": 154073,
+          "mem_bytes": 85233,
+          "read_bytes": 0,
+          "read_entries": 1,
+          "rent_bumps": 1,
+          "rent_ledger_bytes": 442260,
+          "write_bytes": 656,
+          "write_entries": 1
+        }
+      },
+      {
+        "id": "function:approve_proposal",
+        "group": "function",
+        "name": "approve_proposal",
+        "params": {
+          "mutating": "true",
+          "profile": "write_small_instance"
+        },
+        "metrics": {
+          "event_bytes": 0,
+          "instructions": 154073,
+          "mem_bytes": 85233,
+          "read_bytes": 0,
+          "read_entries": 1,
+          "rent_bumps": 1,
+          "rent_ledger_bytes": 442260,
+          "write_bytes": 656,
+          "write_entries": 1
+        }
+      },
+      {
+        "id": "function:archive_events",
+        "group": "function",
+        "name": "archive_events",
+        "params": {
+          "mutating": "true",
+          "profile": "archive_move"
+        },
+        "metrics": {
+          "event_bytes": 0,
+          "instructions": 616692,
+          "mem_bytes": 311019,
+          "read_bytes": 0,
+          "read_entries": 4,
+          "rent_bumps": 2,
+          "rent_ledger_bytes": 1824768000,
+          "write_bytes": 1252,
+          "write_entries": 3
+        }
+      },
+      {
+        "id": "function:block_submitter",
+        "group": "function",
+        "name": "block_submitter",
+        "params": {
+          "mutating": "true",
+          "profile": "write_small_instance"
+        },
+        "metrics": {
+          "event_bytes": 0,
+          "instructions": 154073,
+          "mem_bytes": 85233,
+          "read_bytes": 0,
+          "read_entries": 1,
+          "rent_bumps": 1,
+          "rent_ledger_bytes": 442260,
+          "write_bytes": 656,
+          "write_entries": 1
+        }
+      },
+      {
+        "id": "function:check_schema_compatibility",
+        "group": "function",
+        "name": "check_schema_compatibility",
+        "params": {
+          "mutating": "false",
+          "profile": "probe"
+        },
+        "metrics": {
+          "event_bytes": 0,
+          "instructions": 118372,
+          "mem_bytes": 78532,
+          "read_bytes": 0,
+          "read_entries": 4,
+          "rent_bumps": 0,
+          "rent_ledger_bytes": 0,
+          "write_bytes": 0,
+          "write_entries": 0
+        }
+      },
+      {
+        "id": "function:cleanup_expired_events",
+        "group": "function",
+        "name": "cleanup_expired_events",
+        "params": {
+          "mutating": "true",
+          "profile": "archive_move"
+        },
+        "metrics": {
+          "event_bytes": 0,
+          "instructions": 616692,
+          "mem_bytes": 311019,
+          "read_bytes": 0,
+          "read_entries": 4,
+          "rent_bumps": 2,
+          "rent_ledger_bytes": 1824768000,
+          "write_bytes": 1252,
+          "write_entries": 3
+        }
+      },
+      {
+        "id": "function:cleanup_stale_dedup_entries",
+        "group": "function",
+        "name": "cleanup_stale_dedup_entries",
+        "params": {
+          "mutating": "true",
+          "profile": "write_small_instance"
+        },
+        "metrics": {
+          "event_bytes": 0,
+          "instructions": 154073,
+          "mem_bytes": 85233,
+          "read_bytes": 0,
+          "read_entries": 1,
+          "rent_bumps": 1,
+          "rent_ledger_bytes": 442260,
+          "write_bytes": 656,
+          "write_entries": 1
+        }
+      },
+      {
+        "id": "function:cleanup_stale_hashes",
+        "group": "function",
+        "name": "cleanup_stale_hashes",
+        "params": {
+          "mutating": "true",
+          "profile": "write_small_instance"
+        },
+        "metrics": {
+          "event_bytes": 0,
+          "instructions": 154073,
+          "mem_bytes": 85233,
+          "read_bytes": 0,
+          "read_entries": 1,
+          "rent_bumps": 1,
+          "rent_ledger_bytes": 442260,
+          "write_bytes": 656,
+          "write_entries": 1
+        }
+      },
+      {
+        "id": "function:compact_storage",
+        "group": "function",
+        "name": "compact_storage",
+        "params": {
+          "mutating": "true",
+          "profile": "write_small_instance"
+        },
+        "metrics": {
+          "event_bytes": 0,
+          "instructions": 154073,
+          "mem_bytes": 85233,
+          "read_bytes": 0,
+          "read_entries": 1,
+          "rent_bumps": 1,
+          "rent_ledger_bytes": 442260,
+          "write_bytes": 656,
+          "write_entries": 1
+        }
+      },
+      {
+        "id": "function:compare_event_versions",
+        "group": "function",
+        "name": "compare_event_versions",
+        "params": {
+          "mutating": "true",
+          "profile": "write_small_instance"
+        },
+        "metrics": {
+          "event_bytes": 0,
+          "instructions": 154073,
+          "mem_bytes": 85233,
+          "read_bytes": 0,
+          "read_entries": 1,
+          "rent_bumps": 1,
+          "rent_ledger_bytes": 442260,
+          "write_bytes": 656,
+          "write_entries": 1
+        }
+      },
+      {
+        "id": "function:compare_event_versions_detailed",
+        "group": "function",
+        "name": "compare_event_versions_detailed",
+        "params": {
+          "mutating": "true",
+          "profile": "write_small_instance"
+        },
+        "metrics": {
+          "event_bytes": 0,
+          "instructions": 154073,
+          "mem_bytes": 85233,
+          "read_bytes": 0,
+          "read_entries": 1,
+          "rent_bumps": 1,
+          "rent_ledger_bytes": 442260,
+          "write_bytes": 656,
+          "write_entries": 1
+        }
+      },
+      {
+        "id": "function:create_snapshot",
+        "group": "function",
+        "name": "create_snapshot",
+        "params": {
+          "mutating": "true",
+          "profile": "write_large_entry"
+        },
+        "metrics": {
+          "event_bytes": 0,
+          "instructions": 400643,
+          "mem_bytes": 173835,
+          "read_bytes": 0,
+          "read_entries": 2,
+          "rent_bumps": 1,
+          "rent_ledger_bytes": 1617408000,
+          "write_bytes": 624,
+          "write_entries": 1
+        }
+      },
+      {
+        "id": "function:disable_allowlist_mode",
+        "group": "function",
+        "name": "disable_allowlist_mode",
+        "params": {
+          "mutating": "true",
+          "profile": "write_small_instance"
+        },
+        "metrics": {
+          "event_bytes": 0,
+          "instructions": 154073,
+          "mem_bytes": 85233,
+          "read_bytes": 0,
+          "read_entries": 1,
+          "rent_bumps": 1,
+          "rent_ledger_bytes": 442260,
+          "write_bytes": 656,
+          "write_entries": 1
+        }
+      },
+      {
+        "id": "function:enable_allowlist_mode",
+        "group": "function",
+        "name": "enable_allowlist_mode",
+        "params": {
+          "mutating": "true",
+          "profile": "write_small_instance"
+        },
+        "metrics": {
+          "event_bytes": 0,
+          "instructions": 154073,
+          "mem_bytes": 85233,
+          "read_bytes": 0,
+          "read_entries": 1,
+          "rent_bumps": 1,
+          "rent_ledger_bytes": 442260,
+          "write_bytes": 656,
+          "write_entries": 1
+        }
+      },
+      {
+        "id": "function:enable_rbac",
+        "group": "function",
+        "name": "enable_rbac",
+        "params": {
+          "mutating": "true",
+          "profile": "write_small_instance"
+        },
+        "metrics": {
+          "event_bytes": 0,
+          "instructions": 154073,
+          "mem_bytes": 85233,
+          "read_bytes": 0,
+          "read_entries": 1,
+          "rent_bumps": 1,
+          "rent_ledger_bytes": 442260,
+          "write_bytes": 656,
+          "write_entries": 1
+        }
+      },
+      {
+        "id": "function:event_count",
+        "group": "function",
+        "name": "event_count",
+        "params": {
+          "mutating": "false",
+          "profile": "read_cached_state"
+        },
+        "metrics": {
+          "event_bytes": 0,
+          "instructions": 50840,
+          "mem_bytes": 42124,
+          "read_bytes": 0,
+          "read_entries": 1,
+          "rent_bumps": 0,
+          "rent_ledger_bytes": 0,
+          "write_bytes": 0,
+          "write_entries": 0
+        }
+      },
+      {
+        "id": "function:event_count_by_category",
+        "group": "function",
+        "name": "event_count_by_category",
+        "params": {
+          "mutating": "false",
+          "profile": "read_cached_state"
+        },
+        "metrics": {
+          "event_bytes": 0,
+          "instructions": 50840,
+          "mem_bytes": 42124,
+          "read_bytes": 0,
+          "read_entries": 1,
+          "rent_bumps": 0,
+          "rent_ledger_bytes": 0,
+          "write_bytes": 0,
+          "write_entries": 0
+        }
+      },
+      {
+        "id": "function:execute_proposal",
+        "group": "function",
+        "name": "execute_proposal",
+        "params": {
+          "mutating": "true",
+          "profile": "write_small_instance"
+        },
+        "metrics": {
+          "event_bytes": 0,
+          "instructions": 154073,
+          "mem_bytes": 85233,
+          "read_bytes": 0,
+          "read_entries": 1,
+          "rent_bumps": 1,
+          "rent_ledger_bytes": 442260,
+          "write_bytes": 656,
+          "write_entries": 1
+        }
+      },
+      {
+        "id": "function:find_event_by_content",
+        "group": "function",
+        "name": "find_event_by_content",
+        "params": {
+          "mutating": "false",
+          "profile": "read_cached_state"
+        },
+        "metrics": {
+          "event_bytes": 0,
+          "instructions": 50840,
+          "mem_bytes": 42124,
+          "read_bytes": 0,
+          "read_entries": 1,
+          "rent_bumps": 0,
+          "rent_ledger_bytes": 0,
+          "write_bytes": 0,
+          "write_entries": 0
+        }
+      },
+      {
+        "id": "function:get_archive_config",
+        "group": "function",
+        "name": "get_archive_config",
+        "params": {
+          "mutating": "false",
+          "profile": "read_cached_state"
+        },
+        "metrics": {
+          "event_bytes": 0,
+          "instructions": 50840,
+          "mem_bytes": 42124,
+          "read_bytes": 0,
+          "read_entries": 1,
+          "rent_bumps": 0,
+          "rent_ledger_bytes": 0,
+          "write_bytes": 0,
+          "write_entries": 0
+        }
+      },
+      {
+        "id": "function:get_archive_stats",
+        "group": "function",
+        "name": "get_archive_stats",
+        "params": {
+          "mutating": "false",
+          "profile": "read_one_event"
+        },
+        "metrics": {
+          "event_bytes": 0,
+          "instructions": 70893,
+          "mem_bytes": 43496,
+          "read_bytes": 0,
+          "read_entries": 4,
+          "rent_bumps": 0,
+          "rent_ledger_bytes": 0,
+          "write_bytes": 0,
+          "write_entries": 0
+        }
+      },
+      {
+        "id": "function:get_archived_event",
+        "group": "function",
+        "name": "get_archived_event",
+        "params": {
+          "mutating": "false",
+          "profile": "read_one_event"
+        },
+        "metrics": {
+          "event_bytes": 0,
+          "instructions": 70893,
+          "mem_bytes": 43496,
+          "read_bytes": 0,
+          "read_entries": 4,
+          "rent_bumps": 0,
+          "rent_ledger_bytes": 0,
+          "write_bytes": 0,
+          "write_entries": 0
+        }
+      },
+      {
+        "id": "function:get_archived_event_count",
+        "group": "function",
+        "name": "get_archived_event_count",
+        "params": {
+          "mutating": "false",
+          "profile": "read_one_event"
+        },
+        "metrics": {
+          "event_bytes": 0,
+          "instructions": 70893,
+          "mem_bytes": 43496,
+          "read_bytes": 0,
+          "read_entries": 4,
+          "rent_bumps": 0,
+          "rent_ledger_bytes": 0,
+          "write_bytes": 0,
+          "write_entries": 0
+        }
+      },
+      {
+        "id": "function:get_archived_event_ref",
+        "group": "function",
+        "name": "get_archived_event_ref",
+        "params": {
+          "mutating": "false",
+          "profile": "read_one_event"
+        },
+        "metrics": {
+          "event_bytes": 0,
+          "instructions": 70893,
+          "mem_bytes": 43496,
+          "read_bytes": 0,
+          "read_entries": 4,
+          "rent_bumps": 0,
+          "rent_ledger_bytes": 0,
+          "write_bytes": 0,
+          "write_entries": 0
+        }
+      },
+      {
+        "id": "function:get_cleanup_stats",
+        "group": "function",
+        "name": "get_cleanup_stats",
+        "params": {
+          "mutating": "false",
+          "profile": "read_one_event"
+        },
+        "metrics": {
+          "event_bytes": 0,
+          "instructions": 70893,
+          "mem_bytes": 43496,
+          "read_bytes": 0,
+          "read_entries": 4,
+          "rent_bumps": 0,
+          "rent_ledger_bytes": 0,
+          "write_bytes": 0,
+          "write_entries": 0
+        }
+      },
+      {
+        "id": "function:get_dedup_policy",
+        "group": "function",
+        "name": "get_dedup_policy",
+        "params": {
+          "mutating": "false",
+          "profile": "read_one_event"
+        },
+        "metrics": {
+          "event_bytes": 0,
+          "instructions": 70893,
+          "mem_bytes": 43496,
+          "read_bytes": 0,
+          "read_entries": 4,
+          "rent_bumps": 0,
+          "rent_ledger_bytes": 0,
+          "write_bytes": 0,
+          "write_entries": 0
+        }
+      },
+      {
+        "id": "function:get_dedup_policy_for_type",
+        "group": "function",
+        "name": "get_dedup_policy_for_type",
+        "params": {
+          "mutating": "false",
+          "profile": "read_one_event"
+        },
+        "metrics": {
+          "event_bytes": 0,
+          "instructions": 70893,
+          "mem_bytes": 43496,
+          "read_bytes": 0,
+          "read_entries": 4,
+          "rent_bumps": 0,
+          "rent_ledger_bytes": 0,
+          "write_bytes": 0,
+          "write_entries": 0
+        }
+      },
+      {
+        "id": "function:get_default_nonce_max_value",
+        "group": "function",
+        "name": "get_default_nonce_max_value",
+        "params": {
+          "mutating": "false",
+          "profile": "read_one_event"
+        },
+        "metrics": {
+          "event_bytes": 0,
+          "instructions": 70893,
+          "mem_bytes": 43496,
+          "read_bytes": 0,
+          "read_entries": 4,
+          "rent_bumps": 0,
+          "rent_ledger_bytes": 0,
+          "write_bytes": 0,
+          "write_entries": 0
+        }
+      },
+      {
+        "id": "function:get_default_nonce_window_size",
+        "group": "function",
+        "name": "get_default_nonce_window_size",
+        "params": {
+          "mutating": "false",
+          "profile": "read_one_event"
+        },
+        "metrics": {
+          "event_bytes": 0,
+          "instructions": 70893,
+          "mem_bytes": 43496,
+          "read_bytes": 0,
+          "read_entries": 4,
+          "rent_bumps": 0,
+          "rent_ledger_bytes": 0,
+          "write_bytes": 0,
+          "write_entries": 0
+        }
+      },
+      {
+        "id": "function:get_event",
+        "group": "function",
+        "name": "get_event",
+        "params": {
+          "mutating": "true",
+          "profile": "write_small_instance"
+        },
+        "metrics": {
+          "event_bytes": 0,
+          "instructions": 154073,
+          "mem_bytes": 85233,
+          "read_bytes": 0,
+          "read_entries": 1,
+          "rent_bumps": 1,
+          "rent_ledger_bytes": 442260,
+          "write_bytes": 656,
+          "write_entries": 1
+        }
+      },
+      {
+        "id": "function:get_event_audit_trail",
+        "group": "function",
+        "name": "get_event_audit_trail",
+        "params": {
+          "mutating": "true",
+          "profile": "write_small_instance"
+        },
+        "metrics": {
+          "event_bytes": 0,
+          "instructions": 154073,
+          "mem_bytes": 85233,
+          "read_bytes": 0,
+          "read_entries": 1,
+          "rent_bumps": 1,
+          "rent_ledger_bytes": 442260,
+          "write_bytes": 656,
+          "write_entries": 1
+        }
+      },
+      {
+        "id": "function:get_event_by_order",
+        "group": "function",
+        "name": "get_event_by_order",
+        "params": {
+          "mutating": "false",
+          "profile": "read_one_event"
+        },
+        "metrics": {
+          "event_bytes": 0,
+          "instructions": 70893,
+          "mem_bytes": 43496,
+          "read_bytes": 0,
+          "read_entries": 4,
+          "rent_bumps": 0,
+          "rent_ledger_bytes": 0,
+          "write_bytes": 0,
+          "write_entries": 0
+        }
+      },
+      {
+        "id": "function:get_event_by_submitter",
+        "group": "function",
+        "name": "get_event_by_submitter",
+        "params": {
+          "mutating": "false",
+          "profile": "read_listing"
+        },
+        "metrics": {
+          "event_bytes": 0,
+          "instructions": 80589,
+          "mem_bytes": 144588,
+          "read_bytes": 0,
+          "read_entries": 3,
+          "rent_bumps": 0,
+          "rent_ledger_bytes": 0,
+          "write_bytes": 0,
+          "write_entries": 0
+        }
+      },
+      {
+        "id": "function:get_event_by_type",
+        "group": "function",
+        "name": "get_event_by_type",
+        "params": {
+          "mutating": "false",
+          "profile": "read_listing"
+        },
+        "metrics": {
+          "event_bytes": 0,
+          "instructions": 80589,
+          "mem_bytes": 144588,
+          "read_bytes": 0,
+          "read_entries": 3,
+          "rent_bumps": 0,
+          "rent_ledger_bytes": 0,
+          "write_bytes": 0,
+          "write_entries": 0
+        }
+      },
+      {
+        "id": "function:get_event_diff",
+        "group": "function",
+        "name": "get_event_diff",
+        "params": {
+          "mutating": "true",
+          "profile": "write_small_instance"
+        },
+        "metrics": {
+          "event_bytes": 0,
+          "instructions": 154073,
+          "mem_bytes": 85233,
+          "read_bytes": 0,
+          "read_entries": 1,
+          "rent_bumps": 1,
+          "rent_ledger_bytes": 442260,
+          "write_bytes": 656,
+          "write_entries": 1
+        }
+      },
+      {
+        "id": "function:get_event_emission_mode",
+        "group": "function",
+        "name": "get_event_emission_mode",
+        "params": {
+          "mutating": "false",
+          "profile": "read_one_event"
+        },
+        "metrics": {
+          "event_bytes": 0,
+          "instructions": 70893,
+          "mem_bytes": 43496,
+          "read_bytes": 0,
+          "read_entries": 4,
+          "rent_bumps": 0,
+          "rent_ledger_bytes": 0,
+          "write_bytes": 0,
+          "write_entries": 0
+        }
+      },
+      {
+        "id": "function:get_event_header",
+        "group": "function",
+        "name": "get_event_header",
+        "params": {
+          "mutating": "false",
+          "profile": "read_one_event"
+        },
+        "metrics": {
+          "event_bytes": 0,
+          "instructions": 70893,
+          "mem_bytes": 43496,
+          "read_bytes": 0,
+          "read_entries": 4,
+          "rent_bumps": 0,
+          "rent_ledger_bytes": 0,
+          "write_bytes": 0,
+          "write_entries": 0
+        }
+      },
+      {
+        "id": "function:get_event_history",
+        "group": "function",
+        "name": "get_event_history",
+        "params": {
+          "mutating": "true",
+          "profile": "write_small_instance"
+        },
+        "metrics": {
+          "event_bytes": 0,
+          "instructions": 154073,
+          "mem_bytes": 85233,
+          "read_bytes": 0,
+          "read_entries": 1,
+          "rent_bumps": 1,
+          "rent_ledger_bytes": 442260,
+          "write_bytes": 656,
+          "write_entries": 1
+        }
+      },
+      {
+        "id": "function:get_event_metadata",
+        "group": "function",
+        "name": "get_event_metadata",
+        "params": {
+          "mutating": "false",
+          "profile": "read_one_event"
+        },
+        "metrics": {
+          "event_bytes": 0,
+          "instructions": 70893,
+          "mem_bytes": 43496,
+          "read_bytes": 0,
+          "read_entries": 4,
+          "rent_bumps": 0,
+          "rent_ledger_bytes": 0,
+          "write_bytes": 0,
+          "write_entries": 0
+        }
+      },
+      {
+        "id": "function:get_event_signature",
+        "group": "function",
+        "name": "get_event_signature",
+        "params": {
+          "mutating": "false",
+          "profile": "read_one_event"
+        },
+        "metrics": {
+          "event_bytes": 0,
+          "instructions": 70893,
+          "mem_bytes": 43496,
+          "read_bytes": 0,
+          "read_entries": 4,
+          "rent_bumps": 0,
+          "rent_ledger_bytes": 0,
+          "write_bytes": 0,
+          "write_entries": 0
+        }
+      },
+      {
+        "id": "function:get_event_ttl",
+        "group": "function",
+        "name": "get_event_ttl",
+        "params": {
+          "mutating": "false",
+          "profile": "read_one_event"
+        },
+        "metrics": {
+          "event_bytes": 0,
+          "instructions": 70893,
+          "mem_bytes": 43496,
+          "read_bytes": 0,
+          "read_entries": 4,
+          "rent_bumps": 0,
+          "rent_ledger_bytes": 0,
+          "write_bytes": 0,
+          "write_entries": 0
+        }
+      },
+      {
+        "id": "function:get_event_type_count",
+        "group": "function",
+        "name": "get_event_type_count",
+        "params": {
+          "mutating": "false",
+          "profile": "read_one_event"
+        },
+        "metrics": {
+          "event_bytes": 0,
+          "instructions": 70893,
+          "mem_bytes": 43496,
+          "read_bytes": 0,
+          "read_entries": 4,
+          "rent_bumps": 0,
+          "rent_ledger_bytes": 0,
+          "write_bytes": 0,
+          "write_entries": 0
+        }
+      },
+      {
+        "id": "function:get_event_version_count",
+        "group": "function",
+        "name": "get_event_version_count",
+        "params": {
+          "mutating": "true",
+          "profile": "write_small_instance"
+        },
+        "metrics": {
+          "event_bytes": 0,
+          "instructions": 154073,
+          "mem_bytes": 85233,
+          "read_bytes": 0,
+          "read_entries": 1,
+          "rent_bumps": 1,
+          "rent_ledger_bytes": 442260,
+          "write_bytes": 656,
+          "write_entries": 1
+        }
+      },
+      {
+        "id": "function:get_event_version_tag",
+        "group": "function",
+        "name": "get_event_version_tag",
+        "params": {
+          "mutating": "false",
+          "profile": "read_one_event"
+        },
+        "metrics": {
+          "event_bytes": 0,
+          "instructions": 70893,
+          "mem_bytes": 43496,
+          "read_bytes": 0,
+          "read_entries": 4,
+          "rent_bumps": 0,
+          "rent_ledger_bytes": 0,
+          "write_bytes": 0,
+          "write_entries": 0
+        }
+      },
+      {
+        "id": "function:get_events_by_submitter",
+        "group": "function",
+        "name": "get_events_by_submitter",
+        "params": {
+          "mutating": "true",
+          "profile": "write_small_instance"
+        },
+        "metrics": {
+          "event_bytes": 0,
+          "instructions": 154073,
+          "mem_bytes": 85233,
+          "read_bytes": 0,
+          "read_entries": 1,
+          "rent_bumps": 1,
+          "rent_ledger_bytes": 442260,
+          "write_bytes": 656,
+          "write_entries": 1
+        }
+      },
+      {
+        "id": "function:get_events_by_time_range",
+        "group": "function",
+        "name": "get_events_by_time_range",
+        "params": {
+          "mutating": "true",
+          "profile": "write_small_instance"
+        },
+        "metrics": {
+          "event_bytes": 0,
+          "instructions": 154073,
+          "mem_bytes": 85233,
+          "read_bytes": 0,
+          "read_entries": 1,
+          "rent_bumps": 1,
+          "rent_ledger_bytes": 442260,
+          "write_bytes": 656,
+          "write_entries": 1
+        }
+      },
+      {
+        "id": "function:get_events_by_type",
+        "group": "function",
+        "name": "get_events_by_type",
+        "params": {
+          "mutating": "true",
+          "profile": "write_small_instance"
+        },
+        "metrics": {
+          "event_bytes": 0,
+          "instructions": 154073,
+          "mem_bytes": 85233,
+          "read_bytes": 0,
+          "read_entries": 1,
+          "rent_bumps": 1,
+          "rent_ledger_bytes": 442260,
+          "write_bytes": 656,
+          "write_entries": 1
+        }
+      },
+      {
+        "id": "function:get_metadata_max_size",
+        "group": "function",
+        "name": "get_metadata_max_size",
+        "params": {
+          "mutating": "false",
+          "profile": "read_one_event"
+        },
+        "metrics": {
+          "event_bytes": 0,
+          "instructions": 70893,
+          "mem_bytes": 43496,
+          "read_bytes": 0,
+          "read_entries": 4,
+          "rent_bumps": 0,
+          "rent_ledger_bytes": 0,
+          "write_bytes": 0,
+          "write_entries": 0
+        }
+      },
+      {
+        "id": "function:get_metadata_schema",
+        "group": "function",
+        "name": "get_metadata_schema",
+        "params": {
+          "mutating": "false",
+          "profile": "read_one_event"
+        },
+        "metrics": {
+          "event_bytes": 0,
+          "instructions": 70893,
+          "mem_bytes": 43496,
+          "read_bytes": 0,
+          "read_entries": 4,
+          "rent_bumps": 0,
+          "rent_ledger_bytes": 0,
+          "write_bytes": 0,
+          "write_entries": 0
+        }
+      },
+      {
+        "id": "function:get_migration_function",
+        "group": "function",
+        "name": "get_migration_function",
+        "params": {
+          "mutating": "false",
+          "profile": "read_one_event"
+        },
+        "metrics": {
+          "event_bytes": 0,
+          "instructions": 70893,
+          "mem_bytes": 43496,
+          "read_bytes": 0,
+          "read_entries": 4,
+          "rent_bumps": 0,
+          "rent_ledger_bytes": 0,
+          "write_bytes": 0,
+          "write_entries": 0
+        }
+      },
+      {
+        "id": "function:get_role",
+        "group": "function",
+        "name": "get_role",
+        "params": {
+          "mutating": "false",
+          "profile": "read_one_event"
+        },
+        "metrics": {
+          "event_bytes": 0,
+          "instructions": 70893,
+          "mem_bytes": 43496,
+          "read_bytes": 0,
+          "read_entries": 4,
+          "rent_bumps": 0,
+          "rent_ledger_bytes": 0,
+          "write_bytes": 0,
+          "write_entries": 0
+        }
+      },
+      {
+        "id": "function:get_schema",
+        "group": "function",
+        "name": "get_schema",
+        "params": {
+          "mutating": "false",
+          "profile": "read_one_event"
+        },
+        "metrics": {
+          "event_bytes": 0,
+          "instructions": 70893,
+          "mem_bytes": 43496,
+          "read_bytes": 0,
+          "read_entries": 4,
+          "rent_bumps": 0,
+          "rent_ledger_bytes": 0,
+          "write_bytes": 0,
+          "write_entries": 0
+        }
+      },
+      {
+        "id": "function:get_snapshot",
+        "group": "function",
+        "name": "get_snapshot",
+        "params": {
+          "mutating": "false",
+          "profile": "read_one_event"
+        },
+        "metrics": {
+          "event_bytes": 0,
+          "instructions": 70893,
+          "mem_bytes": 43496,
+          "read_bytes": 0,
+          "read_entries": 4,
+          "rent_bumps": 0,
+          "rent_ledger_bytes": 0,
+          "write_bytes": 0,
+          "write_entries": 0
+        }
+      },
+      {
+        "id": "function:get_statistics",
+        "group": "function",
+        "name": "get_statistics",
+        "params": {
+          "mutating": "false",
+          "profile": "read_one_event"
+        },
+        "metrics": {
+          "event_bytes": 0,
+          "instructions": 70893,
+          "mem_bytes": 43496,
+          "read_bytes": 0,
+          "read_entries": 4,
+          "rent_bumps": 0,
+          "rent_ledger_bytes": 0,
+          "write_bytes": 0,
+          "write_entries": 0
+        }
+      },
+      {
+        "id": "function:get_submitter_nonce",
+        "group": "function",
+        "name": "get_submitter_nonce",
+        "params": {
+          "mutating": "false",
+          "profile": "read_one_event"
+        },
+        "metrics": {
+          "event_bytes": 0,
+          "instructions": 70893,
+          "mem_bytes": 43496,
+          "read_bytes": 0,
+          "read_entries": 4,
+          "rent_bumps": 0,
+          "rent_ledger_bytes": 0,
+          "write_bytes": 0,
+          "write_entries": 0
+        }
+      },
+      {
+        "id": "function:get_submitter_nonce_state",
+        "group": "function",
+        "name": "get_submitter_nonce_state",
+        "params": {
+          "mutating": "false",
+          "profile": "read_cached_state"
+        },
+        "metrics": {
+          "event_bytes": 0,
+          "instructions": 50840,
+          "mem_bytes": 42124,
+          "read_bytes": 0,
+          "read_entries": 1,
+          "rent_bumps": 0,
+          "rent_ledger_bytes": 0,
+          "write_bytes": 0,
+          "write_entries": 0
+        }
+      },
+      {
+        "id": "function:get_webhooks",
+        "group": "function",
+        "name": "get_webhooks",
+        "params": {
+          "mutating": "true",
+          "profile": "write_small_instance"
+        },
+        "metrics": {
+          "event_bytes": 0,
+          "instructions": 154073,
+          "mem_bytes": 85233,
+          "read_bytes": 0,
+          "read_entries": 1,
+          "rent_bumps": 1,
+          "rent_ledger_bytes": 442260,
+          "write_bytes": 656,
+          "write_entries": 1
+        }
+      },
+      {
+        "id": "function:has_cap",
+        "group": "function",
+        "name": "has_cap",
+        "params": {
+          "mutating": "false",
+          "profile": "probe"
+        },
+        "metrics": {
+          "event_bytes": 0,
+          "instructions": 118372,
+          "mem_bytes": 78532,
+          "read_bytes": 0,
+          "read_entries": 4,
+          "rent_bumps": 0,
+          "rent_ledger_bytes": 0,
+          "write_bytes": 0,
+          "write_entries": 0
+        }
+      },
+      {
+        "id": "function:initialize",
+        "group": "function",
+        "name": "initialize",
+        "params": {
+          "mutating": "true",
+          "profile": "write_small_instance"
+        },
+        "metrics": {
+          "event_bytes": 0,
+          "instructions": 154073,
+          "mem_bytes": 85233,
+          "read_bytes": 0,
+          "read_entries": 1,
+          "rent_bumps": 1,
+          "rent_ledger_bytes": 442260,
+          "write_bytes": 656,
+          "write_entries": 1
+        }
+      },
+      {
+        "id": "function:is_backward_compatible",
+        "group": "function",
+        "name": "is_backward_compatible",
+        "params": {
+          "mutating": "false",
+          "profile": "probe"
+        },
+        "metrics": {
+          "event_bytes": 0,
+          "instructions": 118372,
+          "mem_bytes": 78532,
+          "read_bytes": 0,
+          "read_entries": 4,
+          "rent_bumps": 0,
+          "rent_ledger_bytes": 0,
+          "write_bytes": 0,
+          "write_entries": 0
+        }
+      },
+      {
+        "id": "function:is_forward_compatible",
+        "group": "function",
+        "name": "is_forward_compatible",
+        "params": {
+          "mutating": "false",
+          "profile": "probe"
+        },
+        "metrics": {
+          "event_bytes": 0,
+          "instructions": 118372,
+          "mem_bytes": 78532,
+          "read_bytes": 0,
+          "read_entries": 4,
+          "rent_bumps": 0,
+          "rent_ledger_bytes": 0,
+          "write_bytes": 0,
+          "write_entries": 0
+        }
+      },
+      {
+        "id": "function:is_low_cost_mode",
+        "group": "function",
+        "name": "is_low_cost_mode",
+        "params": {
+          "mutating": "false",
+          "profile": "probe"
+        },
+        "metrics": {
+          "event_bytes": 0,
+          "instructions": 118372,
+          "mem_bytes": 78532,
+          "read_bytes": 0,
+          "read_entries": 4,
+          "rent_bumps": 0,
+          "rent_ledger_bytes": 0,
+          "write_bytes": 0,
+          "write_entries": 0
+        }
+      },
+      {
+        "id": "function:is_paused",
+        "group": "function",
+        "name": "is_paused",
+        "params": {
+          "mutating": "false",
+          "profile": "probe"
+        },
+        "metrics": {
+          "event_bytes": 0,
+          "instructions": 118372,
+          "mem_bytes": 78532,
+          "read_bytes": 0,
+          "read_entries": 4,
+          "rent_bumps": 0,
+          "rent_ledger_bytes": 0,
+          "write_bytes": 0,
+          "write_entries": 0
+        }
+      },
+      {
+        "id": "function:is_rbac_enabled",
+        "group": "function",
+        "name": "is_rbac_enabled",
+        "params": {
+          "mutating": "false",
+          "profile": "probe"
+        },
+        "metrics": {
+          "event_bytes": 0,
+          "instructions": 118372,
+          "mem_bytes": 78532,
+          "read_bytes": 0,
+          "read_entries": 4,
+          "rent_bumps": 0,
+          "rent_ledger_bytes": 0,
+          "write_bytes": 0,
+          "write_entries": 0
+        }
+      },
+      {
+        "id": "function:list_archived_events",
+        "group": "function",
+        "name": "list_archived_events",
+        "params": {
+          "mutating": "true",
+          "profile": "archive_move"
+        },
+        "metrics": {
+          "event_bytes": 0,
+          "instructions": 616692,
+          "mem_bytes": 311019,
+          "read_bytes": 0,
+          "read_entries": 4,
+          "rent_bumps": 2,
+          "rent_ledger_bytes": 1824768000,
+          "write_bytes": 1252,
+          "write_entries": 3
+        }
+      },
+      {
+        "id": "function:list_events",
+        "group": "function",
+        "name": "list_events",
+        "params": {
+          "mutating": "true",
+          "profile": "write_small_instance"
+        },
+        "metrics": {
+          "event_bytes": 0,
+          "instructions": 154073,
+          "mem_bytes": 85233,
+          "read_bytes": 0,
+          "read_entries": 1,
+          "rent_bumps": 1,
+          "rent_ledger_bytes": 442260,
+          "write_bytes": 656,
+          "write_entries": 1
+        }
+      },
+      {
+        "id": "function:list_events_by_category",
+        "group": "function",
+        "name": "list_events_by_category",
+        "params": {
+          "mutating": "true",
+          "profile": "write_small_instance"
+        },
+        "metrics": {
+          "event_bytes": 0,
+          "instructions": 154073,
+          "mem_bytes": 85233,
+          "read_bytes": 0,
+          "read_entries": 1,
+          "rent_bumps": 1,
+          "rent_ledger_bytes": 442260,
+          "write_bytes": 656,
+          "write_entries": 1
+        }
+      },
+      {
+        "id": "function:list_events_by_type",
+        "group": "function",
+        "name": "list_events_by_type",
+        "params": {
+          "mutating": "true",
+          "profile": "write_small_instance"
+        },
+        "metrics": {
+          "event_bytes": 0,
+          "instructions": 154073,
+          "mem_bytes": 85233,
+          "read_bytes": 0,
+          "read_entries": 1,
+          "rent_bumps": 1,
+          "rent_ledger_bytes": 442260,
+          "write_bytes": 656,
+          "write_entries": 1
+        }
+      },
+      {
+        "id": "function:list_schemas",
+        "group": "function",
+        "name": "list_schemas",
+        "params": {
+          "mutating": "false",
+          "profile": "read_listing"
+        },
+        "metrics": {
+          "event_bytes": 0,
+          "instructions": 80589,
+          "mem_bytes": 144588,
+          "read_bytes": 0,
+          "read_entries": 3,
+          "rent_bumps": 0,
+          "rent_ledger_bytes": 0,
+          "write_bytes": 0,
+          "write_entries": 0
+        }
+      },
+      {
+        "id": "function:log_event",
+        "group": "function",
+        "name": "log_event",
+        "params": {
+          "mutating": "true",
+          "profile": "append_event"
+        },
+        "metrics": {
+          "event_bytes": 272,
+          "instructions": 1759194,
+          "mem_bytes": 816695,
+          "read_bytes": 0,
+          "read_entries": 10,
+          "rent_bumps": 7,
+          "rent_ledger_bytes": 3525152760,
+          "write_bytes": 2704,
+          "write_entries": 10
+        }
+      },
+      {
+        "id": "function:log_event_signed",
+        "group": "function",
+        "name": "log_event_signed",
+        "params": {
+          "mutating": "true",
+          "profile": "append_event"
+        },
+        "metrics": {
+          "event_bytes": 272,
+          "instructions": 1759194,
+          "mem_bytes": 816695,
+          "read_bytes": 0,
+          "read_entries": 10,
+          "rent_bumps": 7,
+          "rent_ledger_bytes": 3525152760,
+          "write_bytes": 2704,
+          "write_entries": 10
+        }
+      },
+      {
+        "id": "function:log_event_with_custom_key",
+        "group": "function",
+        "name": "log_event_with_custom_key",
+        "params": {
+          "mutating": "true",
+          "profile": "append_event"
+        },
+        "metrics": {
+          "event_bytes": 272,
+          "instructions": 1759194,
+          "mem_bytes": 816695,
+          "read_bytes": 0,
+          "read_entries": 10,
+          "rent_bumps": 7,
+          "rent_ledger_bytes": 3525152760,
+          "write_bytes": 2704,
+          "write_entries": 10
+        }
+      },
+      {
+        "id": "function:log_event_with_hierarchy",
+        "group": "function",
+        "name": "log_event_with_hierarchy",
+        "params": {
+          "mutating": "true",
+          "profile": "append_event"
+        },
+        "metrics": {
+          "event_bytes": 272,
+          "instructions": 1759194,
+          "mem_bytes": 816695,
+          "read_bytes": 0,
+          "read_entries": 10,
+          "rent_bumps": 7,
+          "rent_ledger_bytes": 3525152760,
+          "write_bytes": 2704,
+          "write_entries": 10
+        }
+      },
+      {
+        "id": "function:log_event_with_nonce",
+        "group": "function",
+        "name": "log_event_with_nonce",
+        "params": {
+          "mutating": "true",
+          "profile": "append_event"
+        },
+        "metrics": {
+          "event_bytes": 272,
+          "instructions": 1759194,
+          "mem_bytes": 816695,
+          "read_bytes": 0,
+          "read_entries": 10,
+          "rent_bumps": 7,
+          "rent_ledger_bytes": 3525152760,
+          "write_bytes": 2704,
+          "write_entries": 10
+        }
+      },
+      {
+        "id": "function:log_events",
+        "group": "function",
+        "name": "log_events",
+        "params": {
+          "mutating": "true",
+          "profile": "append_batch"
+        },
+        "metrics": {
+          "event_bytes": 4372,
+          "instructions": 28884701,
+          "mem_bytes": 12841431,
+          "read_bytes": 0,
+          "read_entries": 108,
+          "rent_bumps": 91,
+          "rent_ledger_bytes": 56557964160,
+          "write_bytes": 27620,
+          "write_entries": 108
+        }
+      },
+      {
+        "id": "function:migrate_event_metadata",
+        "group": "function",
+        "name": "migrate_event_metadata",
+        "params": {
+          "mutating": "true",
+          "profile": "write_small_instance"
+        },
+        "metrics": {
+          "event_bytes": 0,
+          "instructions": 154073,
+          "mem_bytes": 85233,
+          "read_bytes": 0,
+          "read_entries": 1,
+          "rent_bumps": 1,
+          "rent_ledger_bytes": 442260,
+          "write_bytes": 656,
+          "write_entries": 1
+        }
+      },
+      {
+        "id": "function:pause",
+        "group": "function",
+        "name": "pause",
+        "params": {
+          "mutating": "true",
+          "profile": "write_small_instance"
+        },
+        "metrics": {
+          "event_bytes": 0,
+          "instructions": 154073,
+          "mem_bytes": 85233,
+          "read_bytes": 0,
+          "read_entries": 1,
+          "rent_bumps": 1,
+          "rent_ledger_bytes": 442260,
+          "write_bytes": 656,
+          "write_entries": 1
+        }
+      },
+      {
+        "id": "function:paused_since",
+        "group": "function",
+        "name": "paused_since",
+        "params": {
+          "mutating": "false",
+          "profile": "read_cached_state"
+        },
+        "metrics": {
+          "event_bytes": 0,
+          "instructions": 50840,
+          "mem_bytes": 42124,
+          "read_bytes": 0,
+          "read_entries": 1,
+          "rent_bumps": 0,
+          "rent_ledger_bytes": 0,
+          "write_bytes": 0,
+          "write_entries": 0
+        }
+      },
+      {
+        "id": "function:purge_archived_events",
+        "group": "function",
+        "name": "purge_archived_events",
+        "params": {
+          "mutating": "true",
+          "profile": "archive_move"
+        },
+        "metrics": {
+          "event_bytes": 0,
+          "instructions": 616692,
+          "mem_bytes": 311019,
+          "read_bytes": 0,
+          "read_entries": 4,
+          "rent_bumps": 2,
+          "rent_ledger_bytes": 1824768000,
+          "write_bytes": 1252,
+          "write_entries": 3
+        }
+      },
+      {
+        "id": "function:register_schema",
+        "group": "function",
+        "name": "register_schema",
+        "params": {
+          "mutating": "true",
+          "profile": "write_large_entry"
+        },
+        "metrics": {
+          "event_bytes": 0,
+          "instructions": 400643,
+          "mem_bytes": 173835,
+          "read_bytes": 0,
+          "read_entries": 2,
+          "rent_bumps": 1,
+          "rent_ledger_bytes": 1617408000,
+          "write_bytes": 624,
+          "write_entries": 1
+        }
+      },
+      {
+        "id": "function:register_webhook",
+        "group": "function",
+        "name": "register_webhook",
+        "params": {
+          "mutating": "true",
+          "profile": "write_large_entry"
+        },
+        "metrics": {
+          "event_bytes": 0,
+          "instructions": 400643,
+          "mem_bytes": 173835,
+          "read_bytes": 0,
+          "read_entries": 2,
+          "rent_bumps": 1,
+          "rent_ledger_bytes": 1617408000,
+          "write_bytes": 624,
+          "write_entries": 1
+        }
+      },
+      {
+        "id": "function:remove_event_cap",
+        "group": "function",
+        "name": "remove_event_cap",
+        "params": {
+          "mutating": "true",
+          "profile": "write_small_instance"
+        },
+        "metrics": {
+          "event_bytes": 0,
+          "instructions": 154073,
+          "mem_bytes": 85233,
+          "read_bytes": 0,
+          "read_entries": 1,
+          "rent_bumps": 1,
+          "rent_ledger_bytes": 442260,
+          "write_bytes": 656,
+          "write_entries": 1
+        }
+      },
+      {
+        "id": "function:remove_owner",
+        "group": "function",
+        "name": "remove_owner",
+        "params": {
+          "mutating": "true",
+          "profile": "config_write"
+        },
+        "metrics": {
+          "event_bytes": 0,
+          "instructions": 163616,
+          "mem_bytes": 86362,
+          "read_bytes": 0,
+          "read_entries": 1,
+          "rent_bumps": 1,
+          "rent_ledger_bytes": 753480,
+          "write_bytes": 732,
+          "write_entries": 1
+        }
+      },
+      {
+        "id": "function:remove_submitter_from_allowlist",
+        "group": "function",
+        "name": "remove_submitter_from_allowlist",
+        "params": {
+          "mutating": "true",
+          "profile": "write_small_instance"
+        },
+        "metrics": {
+          "event_bytes": 0,
+          "instructions": 154073,
+          "mem_bytes": 85233,
+          "read_bytes": 0,
+          "read_entries": 1,
+          "rent_bumps": 1,
+          "rent_ledger_bytes": 442260,
+          "write_bytes": 656,
+          "write_entries": 1
+        }
+      },
+      {
+        "id": "function:reset_submitter_nonce",
+        "group": "function",
+        "name": "reset_submitter_nonce",
+        "params": {
+          "mutating": "true",
+          "profile": "write_small_instance"
+        },
+        "metrics": {
+          "event_bytes": 0,
+          "instructions": 154073,
+          "mem_bytes": 85233,
+          "read_bytes": 0,
+          "read_entries": 1,
+          "rent_bumps": 1,
+          "rent_ledger_bytes": 442260,
+          "write_bytes": 656,
+          "write_entries": 1
+        }
+      },
+      {
+        "id": "function:rollback_event",
+        "group": "function",
+        "name": "rollback_event",
+        "params": {
+          "mutating": "true",
+          "profile": "write_small_instance"
+        },
+        "metrics": {
+          "event_bytes": 0,
+          "instructions": 154073,
+          "mem_bytes": 85233,
+          "read_bytes": 0,
+          "read_entries": 1,
+          "rent_bumps": 1,
+          "rent_ledger_bytes": 442260,
+          "write_bytes": 656,
+          "write_entries": 1
+        }
+      },
+      {
+        "id": "function:search_events",
+        "group": "function",
+        "name": "search_events",
+        "params": {
+          "mutating": "true",
+          "profile": "write_small_instance"
+        },
+        "metrics": {
+          "event_bytes": 0,
+          "instructions": 154073,
+          "mem_bytes": 85233,
+          "read_bytes": 0,
+          "read_entries": 1,
+          "rent_bumps": 1,
+          "rent_ledger_bytes": 442260,
+          "write_bytes": 656,
+          "write_entries": 1
+        }
+      },
+      {
+        "id": "function:set_archive_config",
+        "group": "function",
+        "name": "set_archive_config",
+        "params": {
+          "mutating": "true",
+          "profile": "archive_move"
+        },
+        "metrics": {
+          "event_bytes": 0,
+          "instructions": 616692,
+          "mem_bytes": 311019,
+          "read_bytes": 0,
+          "read_entries": 4,
+          "rent_bumps": 2,
+          "rent_ledger_bytes": 1824768000,
+          "write_bytes": 1252,
+          "write_entries": 3
+        }
+      },
+      {
+        "id": "function:set_category_max_len",
+        "group": "function",
+        "name": "set_category_max_len",
+        "params": {
+          "mutating": "true",
+          "profile": "config_write"
+        },
+        "metrics": {
+          "event_bytes": 0,
+          "instructions": 163616,
+          "mem_bytes": 86362,
+          "read_bytes": 0,
+          "read_entries": 1,
+          "rent_bumps": 1,
+          "rent_ledger_bytes": 753480,
+          "write_bytes": 732,
+          "write_entries": 1
+        }
+      },
+      {
+        "id": "function:set_dedup_policy",
+        "group": "function",
+        "name": "set_dedup_policy",
+        "params": {
+          "mutating": "true",
+          "profile": "config_write"
+        },
+        "metrics": {
+          "event_bytes": 0,
+          "instructions": 163616,
+          "mem_bytes": 86362,
+          "read_bytes": 0,
+          "read_entries": 1,
+          "rent_bumps": 1,
+          "rent_ledger_bytes": 753480,
+          "write_bytes": 732,
+          "write_entries": 1
+        }
+      },
+      {
+        "id": "function:set_dedup_policy_for_type",
+        "group": "function",
+        "name": "set_dedup_policy_for_type",
+        "params": {
+          "mutating": "true",
+          "profile": "config_write"
+        },
+        "metrics": {
+          "event_bytes": 0,
+          "instructions": 163616,
+          "mem_bytes": 86362,
+          "read_bytes": 0,
+          "read_entries": 1,
+          "rent_bumps": 1,
+          "rent_ledger_bytes": 753480,
+          "write_bytes": 732,
+          "write_entries": 1
+        }
+      },
+      {
+        "id": "function:set_default_nonce_config",
+        "group": "function",
+        "name": "set_default_nonce_config",
+        "params": {
+          "mutating": "true",
+          "profile": "config_write"
+        },
+        "metrics": {
+          "event_bytes": 0,
+          "instructions": 163616,
+          "mem_bytes": 86362,
+          "read_bytes": 0,
+          "read_entries": 1,
+          "rent_bumps": 1,
+          "rent_ledger_bytes": 753480,
+          "write_bytes": 732,
+          "write_entries": 1
+        }
+      },
+      {
+        "id": "function:set_event_emission_mode",
+        "group": "function",
+        "name": "set_event_emission_mode",
+        "params": {
+          "mutating": "true",
+          "profile": "config_write"
+        },
+        "metrics": {
+          "event_bytes": 0,
+          "instructions": 163616,
+          "mem_bytes": 86362,
+          "read_bytes": 0,
+          "read_entries": 1,
+          "rent_bumps": 1,
+          "rent_ledger_bytes": 753480,
+          "write_bytes": 732,
+          "write_entries": 1
+        }
+      },
+      {
+        "id": "function:set_event_max_logs",
+        "group": "function",
+        "name": "set_event_max_logs",
+        "params": {
+          "mutating": "true",
+          "profile": "config_write"
+        },
+        "metrics": {
+          "event_bytes": 0,
+          "instructions": 163616,
+          "mem_bytes": 86362,
+          "read_bytes": 0,
+          "read_entries": 1,
+          "rent_bumps": 1,
+          "rent_ledger_bytes": 753480,
+          "write_bytes": 732,
+          "write_entries": 1
+        }
+      },
+      {
+        "id": "function:set_event_metadata_max_size",
+        "group": "function",
+        "name": "set_event_metadata_max_size",
+        "params": {
+          "mutating": "true",
+          "profile": "config_write"
+        },
+        "metrics": {
+          "event_bytes": 0,
+          "instructions": 163616,
+          "mem_bytes": 86362,
+          "read_bytes": 0,
+          "read_entries": 1,
+          "rent_bumps": 1,
+          "rent_ledger_bytes": 753480,
+          "write_bytes": 732,
+          "write_entries": 1
+        }
+      },
+      {
+        "id": "function:set_event_ttl",
+        "group": "function",
+        "name": "set_event_ttl",
+        "params": {
+          "mutating": "true",
+          "profile": "config_write"
+        },
+        "metrics": {
+          "event_bytes": 0,
+          "instructions": 163616,
+          "mem_bytes": 86362,
+          "read_bytes": 0,
+          "read_entries": 1,
+          "rent_bumps": 1,
+          "rent_ledger_bytes": 753480,
+          "write_bytes": 732,
+          "write_entries": 1
+        }
+      },
+      {
+        "id": "function:set_global_max_logs",
+        "group": "function",
+        "name": "set_global_max_logs",
+        "params": {
+          "mutating": "true",
+          "profile": "config_write"
+        },
+        "metrics": {
+          "event_bytes": 0,
+          "instructions": 163616,
+          "mem_bytes": 86362,
+          "read_bytes": 0,
+          "read_entries": 1,
+          "rent_bumps": 1,
+          "rent_ledger_bytes": 753480,
+          "write_bytes": 732,
+          "write_entries": 1
+        }
+      },
+      {
+        "id": "function:set_low_cost_mode",
+        "group": "function",
+        "name": "set_low_cost_mode",
+        "params": {
+          "mutating": "true",
+          "profile": "config_write"
+        },
+        "metrics": {
+          "event_bytes": 0,
+          "instructions": 163616,
+          "mem_bytes": 86362,
+          "read_bytes": 0,
+          "read_entries": 1,
+          "rent_bumps": 1,
+          "rent_ledger_bytes": 753480,
+          "write_bytes": 732,
+          "write_entries": 1
+        }
+      },
+      {
+        "id": "function:set_metadata_max_size",
+        "group": "function",
+        "name": "set_metadata_max_size",
+        "params": {
+          "mutating": "true",
+          "profile": "config_write"
+        },
+        "metrics": {
+          "event_bytes": 0,
+          "instructions": 163616,
+          "mem_bytes": 86362,
+          "read_bytes": 0,
+          "read_entries": 1,
+          "rent_bumps": 1,
+          "rent_ledger_bytes": 753480,
+          "write_bytes": 732,
+          "write_entries": 1
+        }
+      },
+      {
+        "id": "function:set_metadata_schema",
+        "group": "function",
+        "name": "set_metadata_schema",
+        "params": {
+          "mutating": "true",
+          "profile": "write_large_entry"
+        },
+        "metrics": {
+          "event_bytes": 0,
+          "instructions": 400643,
+          "mem_bytes": 173835,
+          "read_bytes": 0,
+          "read_entries": 2,
+          "rent_bumps": 1,
+          "rent_ledger_bytes": 1617408000,
+          "write_bytes": 624,
+          "write_entries": 1
+        }
+      },
+      {
+        "id": "function:set_required_signatures",
+        "group": "function",
+        "name": "set_required_signatures",
+        "params": {
+          "mutating": "true",
+          "profile": "config_write"
+        },
+        "metrics": {
+          "event_bytes": 0,
+          "instructions": 163616,
+          "mem_bytes": 86362,
+          "read_bytes": 0,
+          "read_entries": 1,
+          "rent_bumps": 1,
+          "rent_ledger_bytes": 753480,
+          "write_bytes": 732,
+          "write_entries": 1
+        }
+      },
+      {
+        "id": "function:set_role",
+        "group": "function",
+        "name": "set_role",
+        "params": {
+          "mutating": "true",
+          "profile": "config_write"
+        },
+        "metrics": {
+          "event_bytes": 0,
+          "instructions": 163616,
+          "mem_bytes": 86362,
+          "read_bytes": 0,
+          "read_entries": 1,
+          "rent_bumps": 1,
+          "rent_ledger_bytes": 753480,
+          "write_bytes": 732,
+          "write_entries": 1
+        }
+      },
+      {
+        "id": "function:set_submitter_nonce_config",
+        "group": "function",
+        "name": "set_submitter_nonce_config",
+        "params": {
+          "mutating": "true",
+          "profile": "config_write"
+        },
+        "metrics": {
+          "event_bytes": 0,
+          "instructions": 163616,
+          "mem_bytes": 86362,
+          "read_bytes": 0,
+          "read_entries": 1,
+          "rent_bumps": 1,
+          "rent_ledger_bytes": 753480,
+          "write_bytes": 732,
+          "write_entries": 1
+        }
+      },
+      {
+        "id": "function:set_submitter_rate_limit",
+        "group": "function",
+        "name": "set_submitter_rate_limit",
+        "params": {
+          "mutating": "true",
+          "profile": "config_write"
+        },
+        "metrics": {
+          "event_bytes": 0,
+          "instructions": 163616,
+          "mem_bytes": 86362,
+          "read_bytes": 0,
+          "read_entries": 1,
+          "rent_bumps": 1,
+          "rent_ledger_bytes": 753480,
+          "write_bytes": 732,
+          "write_entries": 1
+        }
+      },
+      {
+        "id": "function:snapshot_count",
+        "group": "function",
+        "name": "snapshot_count",
+        "params": {
+          "mutating": "false",
+          "profile": "read_cached_state"
+        },
+        "metrics": {
+          "event_bytes": 0,
+          "instructions": 50840,
+          "mem_bytes": 42124,
+          "read_bytes": 0,
+          "read_entries": 1,
+          "rent_bumps": 0,
+          "rent_ledger_bytes": 0,
+          "write_bytes": 0,
+          "write_entries": 0
+        }
+      },
+      {
+        "id": "function:submit_proposal",
+        "group": "function",
+        "name": "submit_proposal",
+        "params": {
+          "mutating": "true",
+          "profile": "write_small_instance"
+        },
+        "metrics": {
+          "event_bytes": 0,
+          "instructions": 154073,
+          "mem_bytes": 85233,
+          "read_bytes": 0,
+          "read_entries": 1,
+          "rent_bumps": 1,
+          "rent_ledger_bytes": 442260,
+          "write_bytes": 656,
+          "write_entries": 1
+        }
+      },
+      {
+        "id": "function:submitter_event_count",
+        "group": "function",
+        "name": "submitter_event_count",
+        "params": {
+          "mutating": "false",
+          "profile": "read_cached_state"
+        },
+        "metrics": {
+          "event_bytes": 0,
+          "instructions": 50840,
+          "mem_bytes": 42124,
+          "read_bytes": 0,
+          "read_entries": 1,
+          "rent_bumps": 0,
+          "rent_ledger_bytes": 0,
+          "write_bytes": 0,
+          "write_entries": 0
+        }
+      },
+      {
+        "id": "function:tag_event_version",
+        "group": "function",
+        "name": "tag_event_version",
+        "params": {
+          "mutating": "true",
+          "profile": "write_small_instance"
+        },
+        "metrics": {
+          "event_bytes": 0,
+          "instructions": 154073,
+          "mem_bytes": 85233,
+          "read_bytes": 0,
+          "read_entries": 1,
+          "rent_bumps": 1,
+          "rent_ledger_bytes": 442260,
+          "write_bytes": 656,
+          "write_entries": 1
+        }
+      },
+      {
+        "id": "function:total_events",
+        "group": "function",
+        "name": "total_events",
+        "params": {
+          "mutating": "false",
+          "profile": "read_cached_state"
+        },
+        "metrics": {
+          "event_bytes": 0,
+          "instructions": 50840,
+          "mem_bytes": 42124,
+          "read_bytes": 0,
+          "read_entries": 1,
+          "rent_bumps": 0,
+          "rent_ledger_bytes": 0,
+          "write_bytes": 0,
+          "write_entries": 0
+        }
+      },
+      {
+        "id": "function:transfer_ownership",
+        "group": "function",
+        "name": "transfer_ownership",
+        "params": {
+          "mutating": "true",
+          "profile": "config_write"
+        },
+        "metrics": {
+          "event_bytes": 0,
+          "instructions": 163616,
+          "mem_bytes": 86362,
+          "read_bytes": 0,
+          "read_entries": 1,
+          "rent_bumps": 1,
+          "rent_ledger_bytes": 753480,
+          "write_bytes": 732,
+          "write_entries": 1
+        }
+      },
+      {
+        "id": "function:unblock_submitter",
+        "group": "function",
+        "name": "unblock_submitter",
+        "params": {
+          "mutating": "true",
+          "profile": "write_small_instance"
+        },
+        "metrics": {
+          "event_bytes": 0,
+          "instructions": 154073,
+          "mem_bytes": 85233,
+          "read_bytes": 0,
+          "read_entries": 1,
+          "rent_bumps": 1,
+          "rent_ledger_bytes": 442260,
+          "write_bytes": 656,
+          "write_entries": 1
+        }
+      },
+      {
+        "id": "function:unpause",
+        "group": "function",
+        "name": "unpause",
+        "params": {
+          "mutating": "true",
+          "profile": "write_small_instance"
+        },
+        "metrics": {
+          "event_bytes": 0,
+          "instructions": 154073,
+          "mem_bytes": 85233,
+          "read_bytes": 0,
+          "read_entries": 1,
+          "rent_bumps": 1,
+          "rent_ledger_bytes": 442260,
+          "write_bytes": 656,
+          "write_entries": 1
+        }
+      },
+      {
+        "id": "function:unregister_webhook",
+        "group": "function",
+        "name": "unregister_webhook",
+        "params": {
+          "mutating": "true",
+          "profile": "write_large_entry"
+        },
+        "metrics": {
+          "event_bytes": 0,
+          "instructions": 400643,
+          "mem_bytes": 173835,
+          "read_bytes": 0,
+          "read_entries": 2,
+          "rent_bumps": 1,
+          "rent_ledger_bytes": 1617408000,
+          "write_bytes": 624,
+          "write_entries": 1
+        }
+      },
+      {
+        "id": "function:update_event",
+        "group": "function",
+        "name": "update_event",
+        "params": {
+          "mutating": "true",
+          "profile": "config_write"
+        },
+        "metrics": {
+          "event_bytes": 0,
+          "instructions": 163616,
+          "mem_bytes": 86362,
+          "read_bytes": 0,
+          "read_entries": 1,
+          "rent_bumps": 1,
+          "rent_ledger_bytes": 753480,
+          "write_bytes": 732,
+          "write_entries": 1
+        }
+      },
+      {
+        "id": "function:upgrade_contract",
+        "group": "function",
+        "name": "upgrade_contract",
+        "params": {
+          "mutating": "true",
+          "profile": "write_small_instance"
+        },
+        "metrics": {
+          "event_bytes": 0,
+          "instructions": 154073,
+          "mem_bytes": 85233,
+          "read_bytes": 0,
+          "read_entries": 1,
+          "rent_bumps": 1,
+          "rent_ledger_bytes": 442260,
+          "write_bytes": 656,
+          "write_entries": 1
+        }
+      },
+      {
+        "id": "function:verify_archived_event_checksum",
+        "group": "function",
+        "name": "verify_archived_event_checksum",
+        "params": {
+          "mutating": "false",
+          "profile": "read_cached_state"
+        },
+        "metrics": {
+          "event_bytes": 0,
+          "instructions": 50840,
+          "mem_bytes": 42124,
+          "read_bytes": 0,
+          "read_entries": 1,
+          "rent_bumps": 0,
+          "rent_ledger_bytes": 0,
+          "write_bytes": 0,
+          "write_entries": 0
+        }
+      },
+      {
+        "id": "function:verify_integrity",
+        "group": "function",
+        "name": "verify_integrity",
+        "params": {
+          "mutating": "false",
+          "profile": "read_cached_state"
+        },
+        "metrics": {
+          "event_bytes": 0,
+          "instructions": 50840,
+          "mem_bytes": 42124,
+          "read_bytes": 0,
+          "read_entries": 1,
+          "rent_bumps": 0,
+          "rent_ledger_bytes": 0,
+          "write_bytes": 0,
+          "write_entries": 0
+        }
+      },
+      {
+        "id": "function:verify_integrity_range",
+        "group": "function",
+        "name": "verify_integrity_range",
+        "params": {
+          "mutating": "false",
+          "profile": "read_page"
+        },
+        "metrics": {
+          "event_bytes": 0,
+          "instructions": 834066,
+          "mem_bytes": 200399,
+          "read_bytes": 0,
+          "read_entries": 41,
+          "rent_bumps": 0,
+          "rent_ledger_bytes": 0,
+          "write_bytes": 0,
+          "write_entries": 0
+        }
+      },
+      {
+        "id": "function:verify_snapshot",
+        "group": "function",
+        "name": "verify_snapshot",
+        "params": {
+          "mutating": "false",
+          "profile": "read_cached_state"
+        },
+        "metrics": {
+          "event_bytes": 0,
+          "instructions": 50840,
+          "mem_bytes": 42124,
+          "read_bytes": 0,
+          "read_entries": 1,
+          "rent_bumps": 0,
+          "rent_ledger_bytes": 0,
+          "write_bytes": 0,
+          "write_entries": 0
+        }
+      },
+      {
+        "id": "wasm:contract",
+        "group": "wasm",
+        "name": "contract",
+        "params": {
+          "path": "/Users/maza/Desktop/drips/Decentralized-Audit-Transparency-Ledger/tools/contract-bench/../../target/wasm32-unknown-unknown/release/audit_ledger.wasm",
+          "unavailable": "no compiled contract found; looked in 4 location(s), first /Users/maza/Desktop/drips/Decentralized-Audit-Transparency-Ledger/tools/contract-bench/../../target/wasm32-unknown-unknown/release/audit_ledger.wasm"
+        },
+        "metrics": {}
+      }
+    ]
+  }
+}
