@@ -1,5 +1,15 @@
 # Benchmark Report
 
+> **These observations come from Soroban *test-environment* runs of hand-written
+> test cases, not from a benchmark suite.** They describe the test runtime's
+> behaviour, which is not the deployed contract's behaviour, and the gas and
+> storage operations they call out were never actually captured — see the
+> recommendation at the foot of this file, which is the gap
+> [`tools/contract-bench`](performance/benchmark-methodology.md) now closes.
+>
+> For measured figures with a documented method, see
+> [Contract benchmark methodology](performance/benchmark-methodology.md).
+
 ## Benchmark scenarios
 
 ### Sequential logging
