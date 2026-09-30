@@ -18,6 +18,10 @@
  *   const gen = new ZkProofGenerator();
  *   const proof = await gen.generateEventInclusionProof(eventHash, siblings, root);
  *   const valid = gen.verifyProofLocally(proof, [eventHash, root]);
+ *
+ * CLI integration (issue #355):
+ *   The exported helpers below (computeMerkleRoot, buildMerkleProof,
+ *   encodeProofForCli, decodeProofFromCli) back the `drip proof` commands.
  */
 
 import { createHash } from 'crypto';
@@ -79,6 +83,25 @@ export interface ProofBenchmark {
   p50Ms: number;
   p99Ms: number;
   samples: number;
+}
+
+/**
+ * Serialised proof envelope used by the CLI (`drip proof generate` /
+ * `drip proof verify`) and by the JSON output format.
+ */
+export interface SerializedProof {
+  /** Schema version for forward compatibility. */
+  version: 1;
+  /** Proof type discriminator. */
+  type: 'inclusion' | 'hash-chain' | 'signature';
+  /** The underlying ZK proof (inclusion proofs only). */
+  proof?: ZkProof;
+  /** Batch envelope (inclusion proofs generated in batch mode). */
+  batch?: BatchZkProof;
+  /** Optional contract address the proof is bound to. */
+  contract?: string;
+  /** Optional event id the proof was generated for. */
+  eventId?: string;
 }
 
 // ── Constants ─────────────────────────────────────────────────────────────────
@@ -434,4 +457,70 @@ export function buildMerkleProof(leaves: string[], index: number): string[] {
   }
 
   return proof;
+}
+
+// ── CLI serialisation helpers ─────────────────────────────────────────────────
+
+/**
+ * Encode a proof (or batch) into a stable JSON envelope for the CLI.
+ * Used by `drip proof generate --format json` and by the binary/QR encoders,
+ * which operate on the JSON string produced here.
+ */
+export function encodeProofForCli(
+  input: ZkProof | BatchZkProof,
+  meta?: { contract?: string; eventId?: string },
+): SerializedProof {
+  const isBatch = (input as BatchZkProof).proofs !== undefined;
+  return {
+    version: 1,
+    type: 'inclusion',
+    proof: isBatch ? undefined : (input as ZkProof),
+    batch: isBatch ? (input as BatchZkProof) : undefined,
+    contract: meta?.contract,
+    eventId: meta?.eventId,
+  };
+}
+
+/**
+ * Decode a JSON envelope produced by `encodeProofForCli`.
+ * Throws if the envelope is malformed or an unsupported version.
+ */
+export function decodeProofFromCli(json: string | SerializedProof): SerializedProof {
+  const parsed: SerializedProof =
+    typeof json === 'string' ? (JSON.parse(json) as SerializedProof) : json;
+  if (parsed.version !== 1) {
+    throw new Error(`Unsupported proof envelope version: ${parsed.version}`);
+  }
+  if (parsed.type !== 'inclusion') {
+    throw new Error(`Unsupported proof type for ZK verification: ${parsed.type}`);
+  }
+  if (!parsed.proof && !parsed.batch) {
+    throw new Error('Proof envelope contains neither a proof nor a batch');
+  }
+  return parsed;
+}
+
+/**
+ * Verify a proof envelope produced by the CLI against expected public inputs.
+ * Convenience wrapper around ZkProofGenerator.verifyProofLocally that also
+ * checks the optional contract binding.
+ */
+export function verifySerializedProof(
+  envelope: SerializedProof,
+  publicInputs: string[],
+  expectedContract?: string,
+): boolean {
+  if (expectedContract && envelope.contract) {
+    if (envelope.contract.toLowerCase() !== expectedContract.toLowerCase()) {
+      return false;
+    }
+  }
+  const gen = new ZkProofGenerator();
+  if (envelope.batch) {
+    return envelope.batch.proofs.every((p) => gen.verifyProofLocally(p, publicInputs));
+  }
+  if (envelope.proof) {
+    return gen.verifyProofLocally(envelope.proof, publicInputs);
+  }
+  return false;
 }
