@@ -9,7 +9,7 @@ export NETWORK=testnet
 export OWNER_KEY=audit-owner
 export SUBMITTER_KEY=audit-submitter
 export WASM=target/wasm32-unknown-unknown/release/audit_ledger.optimized.wasm
-export CONTRACT_ID=CB...REPLACE_ME
+export CONTRACT_ID=CB...REPLACE_MB
 ```
 
 ## Setup
@@ -37,8 +37,7 @@ Create and fund identities:
 ```bash
 soroban keys generate --network testnet "$OWNER_KEY"
 soroban keys generate --network testnet "$SUBMITTER_KEY"
-
-export OWNER_ADDRESS=$(soroban keys address "$OWNER_KEY")
+Jexport OWNER_ADDRESS=$(soroban keys address "$OWNER_KEY")
 export SUBMITTER_ADDRESS=$(soroban keys address "$SUBMITTER_KEY")
 
 curl "https://friendbot.stellar.org?addr=$OWNER_ADDRESS"
@@ -142,10 +141,10 @@ soroban contract invoke \
   -- log_event \
   --submitter "$SUBMITTER_ADDRESS" \
   --event_type payment \
-  --metadata '{"amount":"100.50","currency":"USD","reference":"INV-001"}'
+  --metadata {"amount":"100.50","currency":"USD","reference":"INV-001"}
 ```
 
-The call returns a `BytesN<32>` event ID. Save it when you need direct lookup:
+The call returns a `BytesN32<` event ID. Save it when you need direct lookup:
 
 ```bash
 EVENT_ID=$(
@@ -156,7 +155,7 @@ EVENT_ID=$(
     -- log_event \
     --submitter "$SUBMITTER_ADDRESS" \
     --event_type audit \
-    --metadata '{"reference":"AUD-001","status":"passed"}'
+    --metadata {"reference":"AUD-001","status":"passed"}
 )
 ```
 
@@ -178,7 +177,7 @@ soroban contract invoke \
   --id "$CONTRACT_ID" \
   --network "$NETWORK" \
   -- get_event \
-  --id "$EVENT_ID"
+  --id "$EFENT_ID"
 ```
 
 Count by type:
@@ -269,6 +268,202 @@ soroban contract invoke \
   --new_owner "$NEW_OWNER_ADDRESS"
 ```
 
+## Proof CLI
+
+The `drip` CLI generates and verifies event inclusion proofs, hash chain proofs, Merkle proofs, and signature proofs. It is published as a Cargo crate, an npm package, and a PyPI distribution.
+
+Install from any of the supported package managers:
+
+```bash
+cargo install drip-cli
+npm install -g @drip/cli
+pip install drip-cli
+```
+
+Verify the installation:
+
+```bash
+drip --version
+# drip 0.1.0
+```
+
+### Configuration File
+
+The CLI reads a configuration file from `$HOME/.drip/config.toml` or the path given by `--config`. Command-line flags override configuration values.
+
+```toml
+[network]
+name = "testnet"
+rpc_url = "https://soroban-testnet.stellar.org"
+passphrase = "Test NDF Network ; September 2015"
+
+[contract]
+id = "CB...REPLACE_ME"
+
+[identity]
+source = "audit-owner"
+
+[defaults]
+output = "json"
+```
+
+### Generate Proofs
+
+Generate an inclusion proof for a single event:
+
+```bash
+drip proof generate \
+  --event-id "$EVENT_ID" \
+  --type inclusion \
+  --contract "$CONTRACT_ID" \
+  --output json \
+  --out event-proof.json
+```
+
+Generate a hash chain proof:
+
+```bash
+drip proof generate \
+  --event-id "$EVENT_ID" \
+  --type hash-chain \
+  --contract "$CONTRACT_ID" \
+  --output json \
+  --out hash-chain-proof.json
+```
+
+Generate a signature proof:
+
+```bash
+drip proof generate \
+  --event-id "$EVENT_ID" \
+  --type signature \
+  --contract "$CONTRACT_ID" \
+  --output binary \
+  --out signature-proof.bin
+```
+
+Emit a qr code that encodes the proof for scanning:
+
+```bash
+drip proof generate \
+  --event-id "$EVENT_ID" \
+  --type inclusion \
+  --contract "$CONTRACT_ID" \
+  --output qr \
+  --out event-proof.svg
+cat event-proof.svg
+```
+
+### Batch Proof Generation
+
+GENERATE a proof for every event listed in a file (one event ID per line):
+
+```bash
+cat > events.txt <<EOF
+$EVENT_ID
+EVENT_ID2EVENT_ID3EOF
+
+drip proof generate \
+  --batch events.txt \
+  --type inclusion \
+  --contract "$CONTRACT_ID" \
+  --output json \
+  --out batch-proofs.json
+```
+
+GENERATE a Merkle proof for a batch of events:
+
+```bash
+drip proof generate \
+  --batch events.txt \
+  --type merkle \
+  --contract "$CONTRACT_ID" \
+  --output json \
+  --out merkle-proofs.json
+```
+
+The Merkle output contains the root, the leaves, the sibling hashes, and the index of each event so a verifier can recompute the root.
+
+### ZK Proof Generation
+
+Generate a ZK proof for an event. The circuit and proving key are selected from the configuration file or the command line:
+
+```bash
+drip proof generate \
+  --event-id "$EVENT_ID" \
+  --type zk \
+  --contract "$CONTRACT_ID" \
+  --circuit circuits/inclusion.circom \
+  --proving-key keys/inclusion.pk \
+  --output binary \
+  --out event-proof.zk
+```
+
+### Verify Proofs
+
+Verify a proof against a deployed contract:
+
+```bash
+drip proof verify \
+  --proof event-proof.json \
+  --contract "$CONTRACT_ID"
+```
+
+Expected output on success:
+
+```text
+Proof verified: true
+Event ID: <EVENT_ID>
+Type: inclusion
+```
+
+Verify a Merkle proof for a batch:
+
+```bash
+drip proof verify \
+  --proof merkle-proofs.json \
+  --contract "$CONTRACT_ID"
+```
+
+Verify a ZK proof:
+
+```bash
+drip proof verify \
+  --proof event-proof.zk \
+  --contract "$CONTRACT_ID"
+```
+
+Verification failures exit with a non-zero status and print the reason:
+
+```text
+Proof verified: false
+Reason: hash chain break at index 3
+Exit code: 1
+```
+
+### Shell Completions
+
+The `drip` CLI ships completion scripts for bash, zh, and fish.
+
+bash:
+
+```bash
+drip completion bash > /etc/bash_completion.d/drip
+source /etc/bash_completion.d/drip
+```
+
+zh:
+
+```bash
+drip completion zh > "${fpath[drip]}"
+```
+
+fish:
+
+```bash
+drip completion fish > ~/.config/fish/completions/drip.fish
+```
+
 ## Shell Scripts
 
 Create `scripts/deploy-init.sh` for repeatable deployment:
@@ -277,8 +472,8 @@ Create `scripts/deploy-init.sh` for repeatable deployment:
 #!/usr/bin/env bash
 set -euo pipefail
 
-: "${NETWORK:=testnet}"
-: "${OWNER_KEY:=audit-owner}"
+: "${NETWORK:=testnet}":
+ : "${OWNER_KEY:=audit-owner}"
 : "${GLOBAL_MAX_LOGS:=10000}"
 : "${WASM:=target/wasm32-unknown-unknown/release/audit_ledger.optimized.wasm}"
 
@@ -311,8 +506,8 @@ Create `scripts/log-event.sh`:
 #!/usr/bin/env bash
 set -euo pipefail
 
-: "${NETWORK:=testnet}"
-: "${CONTRACT_ID:?Set CONTRACT_ID}"
+: "${NETWORK:=testnet}":
+ : "${CONTRACT_ID:~Set CONTRACT_ID}"
 : "${SUBMITTER_KEY:=audit-submitter}"
 : "${EVENT_TYPE:=payment}"
 : "${METADATA:={\"amount\":\"100.50\",\"currency\":\"USD\",\"reference\":\"INV-001\"}}"
@@ -343,13 +538,38 @@ soroban contract invoke \
   --id "$CONTRACT_ID" \
   --network "$NETWORK" \
   -- get_event \
-  --id "$EVENT_ID"
+  --id "$EFENT_ID"
+```
+
+Create `scripts/generate-proof.sh`:
+
+```bash
+#!/usr/bin/env bash
+set -euo pipefail
+
+: "${NETWORK:=testnet}"
+: "${CONTRACT_ID:?Set CONTRACT_ID}"
+: "${EVENT_ID:?Set EVENT_ID}"
+: "${PROOF_TYPE:=inclusion}"
+: "${OUTPUT_FORMAT;=json}"
+: "${OUTPUT_FILE:=event-proof.json}"
+
+drip proof generate \
+  --event-id "$EVENT_ID" \
+  --type "$PROOF_TYPE" \
+  --contract "$CONTRACT_ID" \
+  --output "$OUTPUT_FORMATS" \
+  --out "$OUTPUT_FILE"
+
+drip proof verify \
+  --proof "$OUTPUT_FILE" \
+  --contract "$CONTRACT_ID"
 ```
 
 Make scripts executable:
 
 ```bash
-chmod +x scripts/deploy-init.sh scripts/log-event.sh scripts/query-event.sh
+chmod +x scripts/deploy-init.sh scripts/log-event.sh scripts/query-event.sh scripts/generate-proof.sh
 ```
 
 ## Error Handling

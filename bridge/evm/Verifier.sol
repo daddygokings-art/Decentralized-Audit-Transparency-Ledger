@@ -18,6 +18,11 @@ pragma solidity ^0.8.24;
  * Proof format:
  *   (uint64 ledgerSeq, bytes32 txHash, uint32 eventIndex,
  *    bytes32 eventHash, bytes[] signatures)
+ *
+ * CLI integration (#355):
+ *   - `verifyProofBatch` verifies multiple event proofs in a single call.
+ *   - `verifyMerkleProof` verifies Merkle inclusion proofs for event batches.
+ *   - `verifyZkProof` verifies ZK proof commitments (issue #374 integration).
  */
 
 // ── Proxy Storage Layout (EIP-1967) ──────────────────────────────────────────
@@ -174,6 +179,15 @@ contract AuditLedgerVerifier {
     /// @dev Authorised upgrade admin (separate from operational owner).
     address public upgradeAdmin;
 
+    /// @dev Trusted ZK verifier contract address (issue #374). Zero = disabled.
+    address public zkVerifier;
+
+    /// @dev Maps batchId → Merkle root for event batch inclusion proofs.
+    mapping(bytes32 => bytes32) public batchMerkleRoots;
+
+    /// @dev Maps batchId → verified status for batch-level replay protection.
+    mapping(bytes32 => bool) public verifiedBatches;
+
     // ── Events ────────────────────────────────────────────────────────────────
 
     event EventVerified(bytes32 indexed eventHash, uint64 ledgerSeq, uint32 eventIndex);
@@ -189,6 +203,18 @@ contract AuditLedgerVerifier {
     /// @dev Emitted when the upgrade admin is rotated.
     event UpgradeAdminChanged(address indexed oldAdmin, address indexed newAdmin);
 
+    /// @dev Emitted when a batch of event proofs is verified in one call.
+    event BatchVerified(bytes32 indexed batchId, uint256 count);
+
+    /// @dev Emitted when a Merkle inclusion proof is verified.
+    event MerkleProofVerified(bytes32 indexed batchId, bytes32 indexed eventHash);
+
+    /// @dev Emitted when a ZK proof is verified for an event.
+    event ZkProofVerified(bytes32 indexed eventHash, address indexed verifier);
+
+    /// @dev Emitted when the trusted ZK verifier address is updated.
+    event ZkVerifierUpdated(address indexed oldVerifier, address indexed newVerifier);
+
     // ── Errors ────────────────────────────────────────────────────────────────
 
     error InvalidProof();
@@ -202,6 +228,8 @@ contract AuditLedgerVerifier {
     error MigrationAlreadyApplied();
     error NotUpgradeAdmin();
     error InvalidAddress();
+    error InvalidMerkleProof();
+    error ZkVerifierNotSet();
 
     // ── Modifiers ─────────────────────────────────────────────────────────────
 
@@ -384,6 +412,174 @@ contract AuditLedgerVerifier {
 
         emit EventVerified(eventHash, ledgerSeq, eventIndex);
         return true;
+    }
+
+    /**
+     * @notice Verify multiple event proofs in a single transaction (batch mode).
+     * @dev    Each proof is verified with the same threshold-signature rules as
+     *         `verifyEvent`. Reverts if any individual proof fails.
+     * @param ledgerSeqs   Array of Stellar ledger sequences.
+     * @param txHashes     Array of Stellar transaction hashes.
+     * @param eventIndexes Array of event indices.
+     * @param eventHashes  Array of event hashes.
+     * @param signatures   Array of signature arrays, one per event.
+     * @return count       Number of successfully verified events.
+     */
+    function verifyProofBatch(
+        uint64[] calldata ledgerSeqs,
+        bytes32[] calldata txHashes,
+        uint32[] calldata eventIndexes,
+        bytes32[] calldata eventHashes,
+        bytes[][] calldata signatures
+    ) external returns (uint256 count) {
+        uint256 n = eventHashes.length;
+        if (
+            ledgerSeqs.length != n ||
+            txHashes.length != n ||
+            eventIndexes.length != n ||
+            signatures.length != n
+        ) revert InvalidProof();
+
+        for (uint256 i = 0; i < n; i++) {
+            _verifySingle(
+                ledgerSeqs[i],
+                txHashes[i],
+                eventIndexes[i],
+                eventHashes[i],
+                signatures[i]
+            );
+            count++;
+        }
+    }
+
+    /**
+     * @notice Register the Merkle root for an event batch.
+     * @dev    Only the owner may register roots. Roots are used by
+     *         `verifyMerkleProof` to validate inclusion of individual events.
+     * @param batchId  Identifier for the batch (e.g. keccak256 of batch metadata).
+     * @param root     Merkle root of the batch's event hashes.
+     */
+    function registerBatchRoot(bytes32 batchId, bytes32 root) external onlyOwner {
+        if (batchId == bytes32(0) || root == bytes32(0)) revert InvalidProof();
+        batchMerkleRoots[batchId] = root;
+    }
+
+    /**
+     * @notice Verify a Merkle inclusion proof for an event within a batch.
+     * @param batchId   Identifier of the batch whose root was registered.
+     * @param eventHash Leaf hash (event hash) being proven.
+     * @param proof     Sibling hashes from leaf to root.
+     * @param index     Position of the leaf in the batch (for left/right ordering).
+     * @return true if the proof is valid.
+     */
+    function verifyMerkleProof(
+        bytes32 batchId,
+        bytes32 eventHash,
+        bytes32[] calldata proof,
+        uint256 index
+    ) external returns (bool) {
+        bytes32 root = batchMerkleRoots[batchId];
+        if (root == bytes32(0)) revert InvalidProof();
+
+        bytes32 computed = eventHash;
+        for (uint256 i = 0; i < proof.length; i++) {
+            if ((index >> i) & 1 == 1) {
+                computed = keccak256(abi.encodePacked(proof[i], computed));
+            } else {
+                computed = keccak256(abi.encodePacked(computed, proof[i]));
+            }
+        }
+
+        if (computed != root) revert InvalidMerkleProof();
+
+        verifiedEvents[eventHash] = true;
+        emit MerkleProofVerified(batchId, eventHash);
+        return true;
+    }
+
+    /**
+     * @notice Verify a ZK proof for an event (issue #374 integration).
+     * @dev    Delegates to the configured trusted ZK verifier contract. The
+     *         verifier is expected to expose `verify(bytes,bytes32[]) returns (bool)`.
+     * @param eventHash  Event hash the ZK proof attests to.
+     * @param zkProof    Opaque ZK proof bytes (SNARK/STARK encoding).
+     * @param publicInputs Public inputs bound to the proof.
+     * @return true if the ZK proof is valid.
+     */
+    function verifyZkProof(
+        bytes32 eventHash,
+        bytes calldata zkProof,
+        bytes32[] calldata publicInputs
+    ) external returns (bool) {
+        address verifier = zkVerifier;
+        if (verifier == address(0)) revert ZkVerifierNotSet();
+
+        (bool ok, bytes memory ret) = verifier.call(
+            abi.encodeWithSignature("verify(bytes,bytes32[])", zkProof, publicInputs)
+        );
+        if (!ok || ret.length < 32) revert InvalidProof();
+        bool valid = abi.decode(ret, (bool));
+        if (!valid) revert InvalidProof();
+
+        verifiedEvents[eventHash] = true;
+        emit ZkProofVerified(eventHash, verifier);
+        return true;
+    }
+
+    /**
+     * @notice Update the trusted ZK verifier contract address.
+     * @param newVerifier  Address of the ZK verifier (zero disables ZK proofs).
+     */
+    function updateZkVerifier(address newVerifier) external onlyOwner {
+        emit ZkVerifierUpdated(zkVerifier, newVerifier);
+        zkVerifier = newVerifier;
+    }
+
+    /**
+     * @dev Internal single-proof verification shared by `verifyEvent` and
+     *      `verifyProofBatch`. Mirrors the public `verifyEvent` logic.
+     */
+    function _verifySingle(
+        uint64 ledgerSeq,
+        bytes32 txHash,
+        uint32 eventIndex,
+        bytes32 eventHash,
+        bytes[] calldata signatures
+    ) internal {
+        if (verifiedEvents[eventHash]) revert AlreadyVerified();
+
+        if (
+            latestAcceptedLedger > 0 &&
+            latestAcceptedLedger > ledgerSeq &&
+            latestAcceptedLedger - ledgerSeq > maxLedgerAge
+        ) revert ProofTooOld();
+
+        bytes32 digest = keccak256(abi.encodePacked(ledgerSeq, txHash, eventHash));
+        bytes32 ethSignedDigest = keccak256(
+            abi.encodePacked("\x19Ethereum Signed Message:\n32", digest)
+        );
+
+        address[] memory recoveredSigners = new address[](signatures.length);
+        uint8 validCount = 0;
+
+        for (uint256 i = 0; i < signatures.length; i++) {
+            address recovered = _recover(ethSignedDigest, signatures[i]);
+            if (!isSigner[recovered]) revert InvalidProof();
+
+            for (uint256 j = 0; j < i; j++) {
+                if (recoveredSigners[j] == recovered) revert DuplicateSigner();
+            }
+
+            recoveredSigners[i] = recovered;
+            validCount++;
+        }
+
+        if (validCount < threshold) revert InvalidSignature();
+
+        verifiedEvents[eventHash] = true;
+        if (ledgerSeq > latestAcceptedLedger) latestAcceptedLedger = ledgerSeq;
+
+        emit EventVerified(eventHash, ledgerSeq, eventIndex);
     }
 
     /**
