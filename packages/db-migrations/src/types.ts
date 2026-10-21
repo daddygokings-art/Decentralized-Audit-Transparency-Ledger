@@ -59,6 +59,8 @@ export interface LockAnalysis {
   lockLevel: 'EXCLUSIVE' | 'SHARE' | 'ROW_EXCLUSIVE' | 'NONE';
   potentialDowntime: boolean;
   risk: 'low' | 'medium' | 'high';
+  isDestructive?: boolean;
+  destructiveViolation?: boolean;
   recommendation?: string;
 }
 
