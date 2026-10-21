@@ -52,21 +52,12 @@ use soroban_sdk::{
     Vec,
 };
 
-pub mod rbac;
 pub mod cross_chain_bridge;
 
 pub mod supply_chain;
-// Fine-grained RBAC role gating shared by mutating modules (supply chain,
-// cross-contract router) and susbmitter suspension controls (issue #865).
-pub mod rbac;
 pub mod digital_passport;
 pub mod carbon_credits;
 pub mod esg_reporting;
-pub mod rbac;
-
-// Role-Based Access Control (#686 #689 #688 #687): granular roles with
-// precedence hierarchies shared by supply chain and ML feature store.
-pub mod rbac;
 
 // On-chain ML feature vector lineage and hash anchoring
 // (issues #854, #855, #857).
@@ -2119,6 +2110,7 @@ impl AuditLedger {
         for i in 0..owners.len() {
             let o = owners.get(i).unwrap();
             env.storage().instance().set(&DataKey::Role(o), &Role::Admin);
+            crate::rbac::RbacManager::initialize_admin(&env, &o);
         }
     }
 
@@ -6471,8 +6463,22 @@ impl AuditLedger {
             Self::require_owner_or_multisig(&env, &caller);
         }
         match role {
-            Some(r) => env.storage().instance().set(&DataKey::Role(target.clone()), &r),
-            None => env.storage().instance().remove(&DataKey::Role(target.clone())),
+            Some(r) => {
+                env.storage().instance().set(&DataKey::Role(target.clone()), &r);
+                let rbac_role = match r {
+                    Role::Admin => crate::rbac::Role::Admin,
+                    Role::Auditor => crate::rbac::Role::Auditor,
+                    Role::Submitter => crate::rbac::Role::Submitter,
+                    Role::Viewer => crate::rbac::Role::Viewer,
+                };
+                crate::rbac::RbacManager::set_role(&env, &caller, &target, rbac_role)
+                    .unwrap_or_else(|error| panic_with_error!(&env, error));
+            }
+            None => {
+                env.storage().instance().remove(&DataKey::Role(target.clone()));
+                crate::rbac::RbacManager::revoke_role(&env, &caller, &target)
+                .unwrap_or_else(|error| panic_with_error!(&env, error));
+            }
         }
         env.events().publish(
             (Symbol::new(&env, "rbac"), Symbol::new(&env, "role_set")),
@@ -6950,6 +6956,14 @@ impl AuditLedger {
     pub fn cqrs_log_event(env: Env, cmd: LogEventCommand) -> CommandResult {
         Self::require_initialized(&env);
         Self::require_log_events_not_paused(&env);
+        if let Err(error) = CqrsEngine::authorize_mutation(
+            &env,
+            &cmd.submitter,
+            crate::rbac::Role::Submitter,
+            "log",
+        ) {
+            return CqrsEngine::authorization_denied_result(&env, &cmd.submitter, "log", error);
+        }
 
         // Check command-level idempotency
         if let Some(ref idemp) = cmd.idempotency_key {
@@ -6974,7 +6988,13 @@ impl AuditLedger {
         );
 
         // Append to CQRS event store and update projection
-        CqrsEngine::record_log_event(&env, event_id, &cmd, env.ledger().timestamp())
+        CqrsEngine::record_log_event(
+            &env,
+            event_id,
+            &cmd,
+            env.ledger().timestamp(),
+            &cmd.submitter,
+        )
     }
 
     /// Command: Update an event's metadata through the CQRS write model.
@@ -6982,6 +7002,14 @@ impl AuditLedger {
         Self::require_initialized(&env);
         Self::require_log_events_not_paused(&env);
         cmd.caller.require_auth();
+        if let Err(error) = CqrsEngine::authorize_mutation(
+            &env,
+            &cmd.caller,
+            crate::rbac::Role::Admin,
+            "update",
+        ) {
+            return CqrsEngine::authorization_denied_result(&env, &cmd.caller, "update", error);
+        }
         Self::require_owner_or_multisig(&env, &cmd.caller);
 
         let evt: Event = match env
@@ -7025,6 +7053,19 @@ impl AuditLedger {
         Self::require_initialized(&env);
         Self::require_governance_not_paused(&env);
         cmd.caller.require_auth();
+        if let Err(error) = CqrsEngine::authorize_mutation(
+            &env,
+            &cmd.caller,
+            crate::rbac::Role::Admin,
+            "governance",
+        ) {
+            return CqrsEngine::authorization_denied_result(
+                &env,
+                &cmd.caller,
+                "governance",
+                error,
+            );
+        }
         Self::require_owner_or_multisig(&env, &cmd.caller);
 
         // Execute recognized governance action
@@ -7057,8 +7098,16 @@ impl AuditLedger {
     pub fn cqrs_create_snapshot(env: Env, caller: Address) -> u32 {
         Self::require_initialized(&env);
         caller.require_auth();
+        if let Err(error) = CqrsEngine::authorize_mutation(
+            &env,
+            &caller,
+            crate::rbac::Role::Admin,
+            "snapshot",
+        ) {
+            panic_with_error!(&env, error);
+        }
         Self::require_owner_or_multisig(&env, &caller);
-        CqrsEngine::create_snapshot(&env)
+        CqrsEngine::create_snapshot(&env, &caller)
     }
 
     /// Command: Rebuild projection state by replaying all sequenced events from the log.
@@ -7068,6 +7117,14 @@ impl AuditLedger {
     pub fn cqrs_rebuild_projection(env: Env, caller: Address, from_snapshot: bool) -> EventProjection {
         Self::require_initialized(&env);
         caller.require_auth();
+        if let Err(error) = CqrsEngine::authorize_mutation(
+            &env,
+            &caller,
+            crate::rbac::Role::Admin,
+            "rebuild",
+        ) {
+            panic_with_error!(&env, error);
+        }
         Self::require_owner_or_multisig(&env, &caller);
 
         let current_cqrs_seq: u32 = env
@@ -7089,13 +7146,13 @@ impl AuditLedger {
                             idempotency_key: None,
                             force: true,
                         };
-                        CqrsEngine::record_log_event(&env, id, &cmd, evt.timestamp);
+                        CqrsEngine::record_log_event(&env, id, &cmd, evt.timestamp, &caller);
                     }
                 }
             }
         }
 
-        CqrsEngine::rebuild_projection(&env, from_snapshot)
+        CqrsEngine::rebuild_projection(&env, from_snapshot, &caller)
     }
 
     // ── CQRS Query Side (Read Path) ─────────────────────────────────────────
@@ -7261,9 +7318,6 @@ pub mod ml_feature_store;
 // FinOps Module
 pub mod finops;
 
-// Role-Based Access Control (issue #686 #689 #688 #687)
-pub mod rbac;
-
 // Storage layout snapshot for upgrade safety validation (issue #414).
 pub mod storage_layout;
 
@@ -7290,10 +7344,6 @@ mod issue365_368_tests;
 
 #[cfg(test)]
 mod rbac_regression_coverage_tests;
-
-// RBAC gating integration tests for state-mutating entrypoints (issue #875).
-#[cfg(test)]
-mod rbac_gating_tests;
 
 // Property-based invariant tests for the ML feature store (issue #858).
 #[cfg(test)]

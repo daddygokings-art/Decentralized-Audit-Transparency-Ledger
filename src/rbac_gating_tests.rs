@@ -10,8 +10,9 @@
 use super::esg_reporting::*;
 use super::rbac::*;
 use super::supply_chain::*;
+use super::{AuditLedger, AuditLedgerClient, LogEventCommand, Role as LedgerRole};
 use soroban_sdk::testutils::{Address as _, Events as _};
-use soroban_sdk::{Address, Env, IntoVal, String, Symbol};
+use soroban_sdk::{Address, Bytes, Env, IntoVal, String, Symbol};
 
 #[test]
 fn test_rbac_roles_and_privilege_ladder() {
@@ -393,4 +394,125 @@ fn test_supply_chain_emits_audit_events_on_success_and_rejection() {
     assert_eq!(err, Err(RbacError::InsufficientRole));
     let after = env.events().all().len();
     assert!(after > before);
+}
+
+// ---------------------------------------------------------------------------
+// CQRS RBAC matrix integration tests (#800)
+// ---------------------------------------------------------------------------
+
+fn cqrs_setup() -> (Env, Address, Address, AuditLedgerClient<'static>) {
+    let env = Env::default();
+    let admin = Address::generate(&env);
+    let contract_id = env.register(AuditLedger, ());
+    let client = AuditLedgerClient::new(&env, &contract_id);
+    env.mock_all_auths();
+    let mut owners = soroban_sdk::Vec::new(&env);
+    owners.push_back(admin.clone());
+    client.initialize(&owners, &256, &1024);
+    (env, admin, contract_id, client)
+}
+
+fn cqrs_command(env: &Env, submitter: &Address, event_type: &str) -> LogEventCommand {
+    LogEventCommand {
+        submitter: submitter.clone(),
+        event_type: Symbol::new(env, event_type),
+        metadata: Bytes::new(env),
+        category: None,
+        sub_event_type: None,
+        idempotency_key: None,
+        force: true,
+    }
+}
+
+fn assert_cqrs_audit(env: &Env, action: &str, expected_outcome: &str, expected_code: u32) {
+    let events = env.events().all();
+    let mut found = false;
+    for (_contract, topics, data) in events.iter() {
+        if topics.len() < 2 {
+            continue;
+        }
+        let topic: Symbol = topics.get(0).unwrap().into_val(env);
+        let operation: Symbol = topics.get(1).unwrap().into_val(env);
+        if topic != Symbol::new(env, "cqrs_audit")
+            || operation != Symbol::new(env, action)
+        {
+            continue;
+        }
+        let (_caller, _timestamp, digest, outcome, code):
+            (Address, u64, soroban_sdk::BytesN<32>, Symbol, u32) = data.into_val(env);
+        assert_eq!(digest.len(), 32);
+        assert_eq!(outcome, Symbol::new(env, expected_outcome));
+        assert_eq!(code, expected_code);
+        found = true;
+    }
+    assert!(found, "expected structured CQRS audit event");
+}
+
+#[test]
+fn test_cqrs_rbac_hierarchy_revocation_and_audit_matrix() {
+    let (env, admin, _contract_id, client) = cqrs_setup();
+    let submitter = Address::generate(&env);
+    let auditor = Address::generate(&env);
+    let viewer = Address::generate(&env);
+    let stranger = Address::generate(&env);
+
+    client.set_role(&admin, &submitter, &Some(LedgerRole::Submitter));
+    client.set_role(&admin, &auditor, &Some(LedgerRole::Auditor));
+    client.set_role(&admin, &viewer, &Some(LedgerRole::Viewer));
+
+    let accepted = client.cqrs_log_event(&cqrs_command(&env, &submitter, "submitter"));
+    assert!(accepted.success);
+    assert_cqrs_audit(&env, "log", "ok", 0);
+
+    // Auditor outranks Submitter and inherits submission permission.
+    let accepted = client.cqrs_log_event(&cqrs_command(&env, &auditor, "auditor"));
+    assert!(accepted.success);
+
+    let denied_viewer = client.cqrs_log_event(&cqrs_command(&env, &viewer, "viewer"));
+    assert_eq!(
+        denied_viewer.error_code,
+        Some(RbacError::InsufficientRole as u32)
+    );
+    assert_cqrs_audit(
+        &env,
+        "log",
+        "denied",
+        RbacError::InsufficientRole as u32,
+    );
+
+    let denied_unknown = client.cqrs_log_event(&cqrs_command(&env, &stranger, "stranger"));
+    assert_eq!(
+        denied_unknown.error_code,
+        Some(RbacError::UnauthorizedSubmitter as u32)
+    );
+
+    // Revocation is reflected in the shared contract and CQRS role stores.
+    client.set_role(&admin, &submitter, &None);
+    let revoked = client.cqrs_log_event(&cqrs_command(&env, &submitter, "revoked"));
+    assert_eq!(
+        revoked.error_code,
+        Some(RbacError::UnauthorizedSubmitter as u32)
+    );
+}
+
+#[test]
+fn test_cqrs_suspended_submitter_is_rejected_with_audit() {
+    let (env, admin, contract_id, client) = cqrs_setup();
+    let submitter = Address::generate(&env);
+    client.set_role(&admin, &submitter, &Some(LedgerRole::Submitter));
+    env.as_contract(&contract_id, || {
+        RbacManager::suspend_submitter(&env, &admin, &submitter).unwrap();
+    });
+
+    let denied = client.cqrs_log_event(&cqrs_command(&env, &submitter, "suspended"));
+    assert_eq!(
+        denied.error_code,
+        Some(RbacError::SubmitterSuspended as u32)
+    );
+    assert_cqrs_audit(
+        &env,
+        "log",
+        "denied",
+        RbacError::SubmitterSuspended as u32,
+    );
 }
