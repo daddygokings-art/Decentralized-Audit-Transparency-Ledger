@@ -90,3 +90,15 @@ export interface PerformanceMetrics {
   bridgeLagMs: number;
   bridgeQueueDepth: number;
 }
+
+export interface MarketUpdateEvent {
+  marketId: string;
+  yesPrice: number;
+  noPrice: number;
+  totalLiquidity: number;
+  volume24h: number;
+  status: "Active" | "Closed" | "Pending" | "Resolved" | "Settled";
+  resolvedOutcome?: "Yes" | "No" | "Invalid";
+  timestamp: number;
+  sequence: number;
+}
