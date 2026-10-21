@@ -3,6 +3,7 @@
 use super::*;
 use soroban_sdk::testutils::{Address as _, Ledger};
 use soroban_sdk::{Address, Bytes, BytesN, Env, Symbol, Vec};
+use proptest::prelude::*;
 
 fn create_ledger() -> (Env, Address, AuditLedgerClient<'static>) {
     let env = Env::default();
@@ -17,10 +18,15 @@ fn create_ledger() -> (Env, Address, AuditLedgerClient<'static>) {
     (env, owner, client)
 }
 
+fn assign_submitter(client: &AuditLedgerClient<'static>, owner: &Address, submitter: &Address) {
+    client.set_role(owner, submitter, &Some(Role::Submitter));
+}
+
 #[test]
 fn test_cqrs_log_event_command_appends_to_event_store_and_updates_projection() {
-    let (env, _owner, client) = create_ledger();
+    let (env, owner, client) = create_ledger();
     let submitter = Address::generate(&env);
+    assign_submitter(&client, &owner, &submitter);
     env.ledger().set_timestamp(1000);
 
     let cmd = LogEventCommand {
@@ -67,8 +73,9 @@ fn test_cqrs_log_event_command_appends_to_event_store_and_updates_projection() {
 
 #[test]
 fn test_cqrs_query_separation_does_not_mutate_state() {
-    let (env, _owner, client) = create_ledger();
+    let (env, owner, client) = create_ledger();
     let submitter = Address::generate(&env);
+    assign_submitter(&client, &owner, &submitter);
     env.ledger().set_timestamp(1000);
 
     let cmd = LogEventCommand {
@@ -97,8 +104,9 @@ fn test_cqrs_query_separation_does_not_mutate_state() {
 
 #[test]
 fn test_cqrs_command_idempotency() {
-    let (env, _owner, client) = create_ledger();
+    let (env, owner, client) = create_ledger();
     let submitter = Address::generate(&env);
+    assign_submitter(&client, &owner, &submitter);
     env.ledger().set_timestamp(1000);
 
     let idemp_key = BytesN::from_array(&env, &[42u8; 32]);
@@ -130,6 +138,7 @@ fn test_cqrs_command_idempotency() {
 fn test_cqrs_update_event_command() {
     let (env, owner, client) = create_ledger();
     let submitter = Address::generate(&env);
+    assign_submitter(&client, &owner, &submitter);
     env.ledger().set_timestamp(1000);
 
     let log_cmd = LogEventCommand {
@@ -199,9 +208,11 @@ fn test_cqrs_governance_command() {
 
 #[test]
 fn test_cqrs_materialized_views_and_query_filtering() {
-    let (env, _owner, client) = create_ledger();
+    let (env, owner, client) = create_ledger();
     let alice = Address::generate(&env);
     let bob = Address::generate(&env);
+    assign_submitter(&client, &owner, &alice);
+    assign_submitter(&client, &owner, &bob);
     env.ledger().set_timestamp(1000);
 
     // Log 2 events for Alice (type "security")
@@ -277,6 +288,7 @@ fn test_cqrs_materialized_views_and_query_filtering() {
 fn test_cqrs_snapshot_and_projection_rebuilding() {
     let (env, owner, client) = create_ledger();
     let submitter = Address::generate(&env);
+    assign_submitter(&client, &owner, &submitter);
     env.ledger().set_timestamp(1000);
 
     // Log 3 events
@@ -365,4 +377,60 @@ fn test_cqrs_rebuild_projection_from_primary_ledger_events() {
     let view = client.cqrs_get_event_by_sequence(&1).unwrap();
     assert_eq!(view.event_type, Symbol::new(&env, "legacy"));
     assert_eq!(view.metadata, Bytes::from_slice(&env, b"legacy_event_1"));
+}
+
+proptest! {
+    #[test]
+    fn cqrs_sequence_allocation_never_wraps_or_exceeds_limit(current in any::<u32>()) {
+        let expected = current
+            .checked_add(1)
+            .filter(|sequence| *sequence <= MAX_CQRS_EVENTS);
+        prop_assert_eq!(CqrsEngine::checked_next_sequence(current), expected);
+    }
+
+    #[test]
+    fn cqrs_metadata_length_is_bounded(length in any::<u32>()) {
+        prop_assert_eq!(
+            CqrsEngine::metadata_size_is_valid(length),
+            length <= MAX_CQRS_METADATA_BYTES
+        );
+    }
+}
+
+#[test]
+fn test_cqrs_exact_resource_boundaries() {
+    assert_eq!(
+        CqrsEngine::checked_next_sequence(MAX_CQRS_EVENTS - 1),
+        Some(MAX_CQRS_EVENTS)
+    );
+    assert_eq!(CqrsEngine::checked_next_sequence(MAX_CQRS_EVENTS), None);
+    assert_eq!(CqrsEngine::checked_next_sequence(u32::MAX), None);
+    assert!(CqrsEngine::metadata_size_is_valid(MAX_CQRS_METADATA_BYTES));
+    assert!(!CqrsEngine::metadata_size_is_valid(MAX_CQRS_METADATA_BYTES + 1));
+}
+
+#[test]
+fn test_cqrs_extreme_timestamp_and_digest_inputs_are_deterministic() {
+    let env = Env::default();
+    let caller = Address::generate(&env);
+    env.ledger().set_timestamp(u64::MAX);
+    assert_eq!(env.ledger().timestamp(), u64::MAX);
+
+    let operation = Symbol::new(&env, "extreme_diff");
+    let digest = crate::rbac::RbacManager::state_diff_digest(
+        &env,
+        &caller,
+        &operation,
+        i128::MAX,
+        i128::MIN,
+    );
+    let repeated = crate::rbac::RbacManager::state_diff_digest(
+        &env,
+        &caller,
+        &operation,
+        i128::MAX,
+        i128::MIN,
+    );
+    assert_eq!(digest.len(), 32);
+    assert_eq!(digest, repeated);
 }

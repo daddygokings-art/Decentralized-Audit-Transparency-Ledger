@@ -1,4 +1,4 @@
-//! # Contract Event Sourcing with CQRS Pattern (Issue #412)
+//! # Contract Event Sourcing with CQRS Pattern (Issues #412, #799, #800)
 //!
 //! Implements Command Query Responsibility Segregation (CQRS) with event sourcing
 //! for `AuditLedger`.
@@ -13,10 +13,67 @@
 //!   or fast-forwarding from the latest snapshot.
 //! - **Snapshotting**: Point-in-time state capture for performant projection reconstruction.
 //! - **Materialized Views**: Per-type and per-submitter indexes for low-gas query operations.
+//!
+//! ## Authorization and audit trail
+//!
+//! Every state-mutating engine entrypoint authenticates the acting address and
+//! checks the minimum RBAC role. Event submission requires `Submitter`; updates,
+//! governance, rebuilding, and snapshot creation require `Admin`. Suspended,
+//! unassigned, and under-privileged callers are rejected with stable
+//! [`crate::rbac::RbacError`] codes. Successful mutations and role rejections
+//! emit `cqrs_audit` events containing caller, ledger timestamp, outcome, error
+//! code, and a SHA-256 state-diff digest.
+//!
+//! ## Deterministic bounds
+//!
+//! Stored event count is capped at [`MAX_CQRS_EVENTS`], metadata at
+//! [`MAX_CQRS_METADATA_BYTES`] bytes per event, per-key indexes at
+//! [`MAX_CQRS_INDEX_ENTRIES`], projection keys at
+//! [`MAX_CQRS_PROJECTION_KEYS`], snapshots at [`MAX_CQRS_SNAPSHOTS`], and
+//! query results at [`MAX_CQRS_QUERY_RESULTS`]. Thus a rebuild examines at
+//! most `MAX_CQRS_EVENTS` event records and bounded projection keys; no
+//! materialized index or result vector grows without a fixed limit. At the
+//! configured maxima, raw event metadata is bounded by 256 KiB; this excludes
+//! Soroban key/value encoding overhead. Each event contributes at most 32
+//! bytes to its type index and 4 bytes to its submitter index, before key/value
+//! encoding. A projection stores at most 32 type-count and 32 submitter-count
+//! entries; at most 16 snapshots can each copy those bounded vectors.
+//!
+//! Worst-case operation counts are bounded as follows: query fallback scans at
+//! most 256 event sequences and returns at most 50 views; materialized-index
+//! queries inspect at most 256 index entries and return at most 50; projection
+//! rebuild replays at most 256 events and scans no more than 32 entries in
+//! either aggregate-count vector per logged event. Exact Soroban instruction
+//! and encoded storage costs depend on SDK/protocol versions and must be
+//! measured with network-target benchmarks before deployment; this module
+//! does not claim a measured gas figure.
+//!
+//! ## Regulator compliance mapping
+//!
+//! | Requirement | CQRS control |
+//! |---|---|
+//! | SOX §404 / SOC 2 CC6.1 | Role-gated writes and administrative projections |
+//! | SOC 2 CC7.2 / ISO 27001 A.8.15 | Append-only event records and digest audit events |
+//! | MiCA Art. 66 | Timestamped, queryable records and projection snapshots |
 
 use soroban_sdk::{
-    contracterror, contracttype, Address, Bytes, BytesN, Env, Symbol, Vec,
+    contracterror, contracttype, panic_with_error, Address, Bytes, BytesN, Env, Symbol, Vec,
 };
+
+use crate::rbac::{RbacError, RbacManager, Role};
+
+/// Maximum metadata payload retained by a CQRS event.
+pub const MAX_CQRS_METADATA_BYTES: u32 = 1024;
+/// Maximum number of CQRS events replayed or stored.
+pub const MAX_CQRS_EVENTS: u32 = 256;
+/// Maximum entries in a per-type or per-submitter materialized index.
+pub const MAX_CQRS_INDEX_ENTRIES: u32 = 256;
+/// Maximum distinct keys tracked by each projection count vector.
+pub const MAX_CQRS_PROJECTION_KEYS: u32 = 32;
+/// Maximum number of projection snapshots.
+pub const MAX_CQRS_SNAPSHOTS: u32 = 16;
+/// Maximum results returned by a CQRS query.
+pub const MAX_CQRS_QUERY_RESULTS: u32 = 50;
 
 // ── Error Codes ─────────────────────────────────────────────────────────────
 
@@ -33,6 +90,9 @@ pub enum CqrsError {
     SubmitterBlocked = 606,
     InvalidCommand = 607,
     DuplicateEvent = 608,
+    SequenceOverflow = 609,
+    CollectionLimitExceeded = 610,
+    SnapshotLimitExceeded = 612,
 }
 
 // ── Command Side Models (Write Path) ────────────────────────────────────────
@@ -195,13 +255,23 @@ impl CqrsEngine {
         event_id: BytesN<32>,
         cmd: &LogEventCommand,
         timestamp: u64,
+        caller: &Address,
     ) -> CommandResult {
+        if let Err(error) = Self::check_role(env, caller, Role::Submitter, "log") {
+            return Self::denied_result(env, caller, "log", error);
+        }
+        if !Self::metadata_size_is_valid(cmd.metadata.len()) {
+            panic_with_error!(env, CqrsError::MetadataTooLarge);
+        }
+
         let current_seq: u32 = env
             .storage()
             .instance()
             .get(&CqrsStorageKey::EventSequence)
             .unwrap_or(0);
-        let next_seq = current_seq.saturating_add(1);
+        let next_seq = Self::checked_next_sequence(current_seq)
+            .unwrap_or_else(|| panic_with_error!(env, CqrsError::SequenceOverflow));
+        Self::ensure_index_capacity(env, &cmd.event_type, &cmd.submitter);
 
         let stored = CqrsStoredEvent {
             sequence: next_seq,
@@ -247,6 +317,8 @@ impl CqrsEngine {
             .instance()
             .set(&CqrsStorageKey::Projection, &proj);
 
+        Self::emit_audit_event(env, caller, "log", current_seq as i128, next_seq as i128, "ok", 0);
+
         let result = CommandResult {
             success: true,
             event_id: Some(event_id.clone()),
@@ -271,6 +343,16 @@ impl CqrsEngine {
         result
     }
 
+    pub(crate) fn checked_next_sequence(current: u32) -> Option<u32> {
+        current
+            .checked_add(1)
+            .filter(|sequence| *sequence <= MAX_CQRS_EVENTS)
+    }
+
+    pub(crate) fn metadata_size_is_valid(length: u32) -> bool {
+        length <= MAX_CQRS_METADATA_BYTES
+    }
+
     /// Record an event update in the append-only log and advance projection.
     pub fn record_update_event(
         env: &Env,
@@ -282,12 +364,19 @@ impl CqrsEngine {
         new_version: u32,
         timestamp: u64,
     ) -> CommandResult {
+        if let Err(error) = Self::check_role(env, &caller, Role::Admin, "update") {
+            return Self::denied_result(env, &caller, "update", error);
+        }
+        if !Self::metadata_size_is_valid(new_metadata.len()) {
+            panic_with_error!(env, CqrsError::MetadataTooLarge);
+        }
         let current_seq: u32 = env
             .storage()
             .instance()
             .get(&CqrsStorageKey::EventSequence)
             .unwrap_or(0);
-        let next_seq = current_seq.saturating_add(1);
+        let next_seq = Self::checked_next_sequence(current_seq)
+            .unwrap_or_else(|| panic_with_error!(env, CqrsError::SequenceOverflow));
 
         let stored = CqrsStoredEvent {
             sequence: next_seq,
@@ -327,6 +416,8 @@ impl CqrsEngine {
             .instance()
             .set(&CqrsStorageKey::Projection, &proj);
 
+        Self::emit_audit_event(env, &stored.submitter, "update", current_seq as i128, next_seq as i128, "ok", 0);
+
         let result = CommandResult {
             success: true,
             event_id: Some(new_event_id.clone()),
@@ -350,12 +441,16 @@ impl CqrsEngine {
         action: Symbol,
         timestamp: u64,
     ) -> CommandResult {
+        if let Err(error) = Self::check_role(env, &caller, Role::Admin, "governance") {
+            return Self::denied_result(env, &caller, "governance", error);
+        }
         let current_seq: u32 = env
             .storage()
             .instance()
             .get(&CqrsStorageKey::EventSequence)
             .unwrap_or(0);
-        let next_seq = current_seq.saturating_add(1);
+        let next_seq = Self::checked_next_sequence(current_seq)
+            .unwrap_or_else(|| panic_with_error!(env, CqrsError::SequenceOverflow));
 
         let stored = CqrsStoredEvent {
             sequence: next_seq,
@@ -384,6 +479,8 @@ impl CqrsEngine {
         env.storage()
             .instance()
             .set(&CqrsStorageKey::Projection, &proj);
+
+        Self::emit_audit_event(env, &stored.submitter, "governance", current_seq as i128, next_seq as i128, "ok", 0);
 
         let result = CommandResult {
             success: true,
@@ -437,6 +534,9 @@ impl CqrsEngine {
             .instance()
             .get(&CqrsStorageKey::EventSequence)
             .unwrap_or(0);
+        if total_seq > MAX_CQRS_EVENTS {
+            panic_with_error!(env, CqrsError::CollectionLimitExceeded);
+        }
         let mut results = Vec::new(env);
         if total_seq == 0 {
             return results;
@@ -444,8 +544,8 @@ impl CqrsEngine {
 
         let eff_limit = if query.limit == 0 {
             20
-        } else if query.limit > 50 {
-            50
+        } else if query.limit > MAX_CQRS_QUERY_RESULTS {
+            MAX_CQRS_QUERY_RESULTS
         } else {
             query.limit
         };
@@ -473,6 +573,9 @@ impl CqrsEngine {
                     .instance()
                     .get::<_, Vec<BytesN<32>>>(&CqrsStorageKey::MaterializedTypeIndex(q_type.clone()))
                 {
+                    if type_event_ids.len() > MAX_CQRS_INDEX_ENTRIES {
+                        panic_with_error!(env, CqrsError::CollectionLimitExceeded);
+                    }
                     for i in 0..type_event_ids.len() {
                         let id = type_event_ids.get(i).unwrap();
                         if let Some(seq) = env
@@ -503,6 +606,9 @@ impl CqrsEngine {
                     .instance()
                     .get::<_, Vec<u32>>(&CqrsStorageKey::MaterializedSubmitterIndex(q_sub.clone()))
                 {
+                    if sub_seqs.len() > MAX_CQRS_INDEX_ENTRIES {
+                        panic_with_error!(env, CqrsError::CollectionLimitExceeded);
+                    }
                     for i in 0..sub_seqs.len() {
                         let seq = sub_seqs.get(i).unwrap();
                         if seq >= start_seq && seq <= end_seq {
@@ -553,12 +659,16 @@ impl CqrsEngine {
     // ── Projection Rebuilding & Snapshotting ────────────────────────────────
 
     /// Rebuild projection state by replaying events from genesis (or from the latest snapshot).
-    pub fn rebuild_projection(env: &Env, from_snapshot: bool) -> EventProjection {
+    pub fn rebuild_projection(env: &Env, from_snapshot: bool, caller: &Address) -> EventProjection {
+        Self::require_role_or_panic(env, caller, Role::Admin, "rebuild");
         let total_seq: u32 = env
             .storage()
             .instance()
             .get(&CqrsStorageKey::EventSequence)
             .unwrap_or(0);
+        if total_seq > MAX_CQRS_EVENTS {
+            panic_with_error!(env, CqrsError::CollectionLimitExceeded);
+        }
 
         let (mut proj, start_seq) = if from_snapshot {
             if let Some(latest_id) = env
@@ -571,6 +681,12 @@ impl CqrsEngine {
                     .instance()
                     .get::<_, ProjectionSnapshot>(&CqrsStorageKey::Snapshot(latest_id))
                 {
+                    if snap.projection.type_counts.len() > MAX_CQRS_PROJECTION_KEYS
+                        || snap.projection.submitter_counts.len() > MAX_CQRS_PROJECTION_KEYS
+                        || snap.sequence > MAX_CQRS_EVENTS
+                    {
+                        panic_with_error!(env, CqrsError::CollectionLimitExceeded);
+                    }
                     (snap.projection, snap.sequence.saturating_add(1))
                 } else {
                     (Self::empty_projection(env), 1)
@@ -616,6 +732,16 @@ impl CqrsEngine {
             .instance()
             .set(&CqrsStorageKey::Projection, &proj);
 
+        Self::emit_audit_event(
+            env,
+            caller,
+            "rebuild",
+            proj.last_sequence as i128,
+            total_seq as i128,
+            "ok",
+            0,
+        );
+
         env.events().publish(
             (Symbol::new(env, "cqrs"), Symbol::new(env, "rebuilt")),
             (proj.last_sequence, proj.total_events),
@@ -625,13 +751,19 @@ impl CqrsEngine {
     }
 
     /// Capture a snapshot of the current projection state.
-    pub fn create_snapshot(env: &Env) -> u32 {
+    pub fn create_snapshot(env: &Env, caller: &Address) -> u32 {
+        Self::require_role_or_panic(env, caller, Role::Admin, "snapshot");
         let count: u32 = env
             .storage()
             .instance()
             .get(&CqrsStorageKey::SnapshotCount)
             .unwrap_or(0);
-        let next_id = count.saturating_add(1);
+        if count >= MAX_CQRS_SNAPSHOTS {
+            panic_with_error!(env, CqrsError::SnapshotLimitExceeded);
+        }
+        let next_id = count
+            .checked_add(1)
+            .unwrap_or_else(|| panic_with_error!(env, CqrsError::SequenceOverflow));
         let proj = Self::get_projection(env);
 
         let snapshot = ProjectionSnapshot {
@@ -654,6 +786,16 @@ impl CqrsEngine {
         env.events().publish(
             (Symbol::new(env, "cqrs"), Symbol::new(env, "snapshot")),
             (next_id, snapshot.sequence),
+        );
+
+        Self::emit_audit_event(
+            env,
+            caller,
+            "snapshot",
+            count as i128,
+            next_id as i128,
+            "ok",
+            0,
         );
 
         next_id
@@ -688,12 +830,16 @@ impl CqrsEngine {
             .instance()
             .get(&CqrsStorageKey::MaterializedTypeIndex(event_type))
             .unwrap_or_else(|| Vec::new(env));
+        if all.len() > MAX_CQRS_INDEX_ENTRIES {
+            panic_with_error!(env, CqrsError::CollectionLimitExceeded);
+        }
         let total = all.len();
         let mut out = Vec::new(env);
         if start >= total || limit == 0 {
             return out;
         }
-        let end = core::cmp::min(start.saturating_add(limit), total);
+        let bounded_limit = core::cmp::min(limit, MAX_CQRS_QUERY_RESULTS);
+        let end = core::cmp::min(start.saturating_add(bounded_limit), total);
         for i in start..end {
             out.push_back(all.get(i).unwrap());
         }
@@ -712,12 +858,16 @@ impl CqrsEngine {
             .instance()
             .get(&CqrsStorageKey::MaterializedSubmitterIndex(submitter))
             .unwrap_or_else(|| Vec::new(env));
+        if all.len() > MAX_CQRS_INDEX_ENTRIES {
+            panic_with_error!(env, CqrsError::CollectionLimitExceeded);
+        }
         let total = all.len();
         let mut out = Vec::new(env);
         if start >= total || limit == 0 {
             return out;
         }
-        let end = core::cmp::min(start.saturating_add(limit), total);
+        let bounded_limit = core::cmp::min(limit, MAX_CQRS_QUERY_RESULTS);
+        let end = core::cmp::min(start.saturating_add(bounded_limit), total);
         for i in start..end {
             out.push_back(all.get(i).unwrap());
         }
@@ -744,6 +894,9 @@ impl CqrsEngine {
             .instance()
             .get(&CqrsStorageKey::MaterializedTypeIndex(event.event_type.clone()))
             .unwrap_or_else(|| Vec::new(env));
+        if type_indices.len() >= MAX_CQRS_INDEX_ENTRIES {
+            panic_with_error!(env, CqrsError::CollectionLimitExceeded);
+        }
         type_indices.push_back(event.event_id.clone());
         env.storage().instance().set(
             &CqrsStorageKey::MaterializedTypeIndex(event.event_type.clone()),
@@ -767,6 +920,9 @@ impl CqrsEngine {
             .instance()
             .get(&CqrsStorageKey::MaterializedSubmitterIndex(event.submitter.clone()))
             .unwrap_or_else(|| Vec::new(env));
+        if sub_indices.len() >= MAX_CQRS_INDEX_ENTRIES {
+            panic_with_error!(env, CqrsError::CollectionLimitExceeded);
+        }
         sub_indices.push_back(sequence);
         env.storage().instance().set(
             &CqrsStorageKey::MaterializedSubmitterIndex(event.submitter.clone()),
@@ -798,6 +954,9 @@ impl CqrsEngine {
             }
         }
         if !found {
+            if list.len() >= MAX_CQRS_PROJECTION_KEYS {
+                panic_with_error!(env, CqrsError::CollectionLimitExceeded);
+            }
             new_list.push_back((key, 1));
         }
         *list = new_list;
@@ -816,8 +975,128 @@ impl CqrsEngine {
             }
         }
         if !found {
+            if list.len() >= MAX_CQRS_PROJECTION_KEYS {
+                panic_with_error!(env, CqrsError::CollectionLimitExceeded);
+            }
             new_list.push_back((key, 1));
         }
         *list = new_list;
+    }
+
+    fn ensure_index_capacity(env: &Env, event_type: &Symbol, submitter: &Address) {
+        let type_len = env
+            .storage()
+            .instance()
+            .get::<_, Vec<BytesN<32>>>(&CqrsStorageKey::MaterializedTypeIndex(event_type.clone()))
+            .map(|index| index.len())
+            .unwrap_or(0);
+        let submitter_len = env
+            .storage()
+            .instance()
+            .get::<_, Vec<u32>>(&CqrsStorageKey::MaterializedSubmitterIndex(submitter.clone()))
+            .map(|index| index.len())
+            .unwrap_or(0);
+        if type_len >= MAX_CQRS_INDEX_ENTRIES || submitter_len >= MAX_CQRS_INDEX_ENTRIES {
+            panic_with_error!(env, CqrsError::CollectionLimitExceeded);
+        }
+    }
+
+    fn check_role(
+        env: &Env,
+        caller: &Address,
+        role: Role,
+        operation: &str,
+    ) -> Result<(), RbacError> {
+        caller.require_auth();
+        let result = if RbacManager::is_suspended(env, caller) {
+            Err(RbacError::SubmitterSuspended)
+        } else if !RbacManager::has_role_min(env, caller, role) {
+            if RbacManager::get_role(env, caller).is_none() {
+                Err(RbacError::UnauthorizedSubmitter)
+            } else {
+                Err(RbacError::InsufficientRole)
+            }
+        } else {
+            Ok(())
+        };
+        if let Err(error) = result {
+            Self::emit_audit_event(env, caller, operation, 0, 0, "denied", error as u32);
+        }
+        result
+    }
+
+    /// Check role and authentication before a contract wrapper performs any
+    /// primary-ledger mutation associated with a CQRS command.
+    pub fn authorize_mutation(
+        env: &Env,
+        caller: &Address,
+        role: Role,
+        operation: &str,
+    ) -> Result<(), RbacError> {
+        Self::check_role(env, caller, role, operation)
+    }
+
+    /// Build a stable failed command result after an authorization rejection.
+    pub fn authorization_denied_result(
+        env: &Env,
+        caller: &Address,
+        operation: &str,
+        error: RbacError,
+    ) -> CommandResult {
+        Self::denied_result(env, caller, operation, error)
+    }
+
+    fn require_role_or_panic(env: &Env, caller: &Address, role: Role, operation: &str) {
+        if let Err(error) = Self::check_role(env, caller, role, operation) {
+            panic_with_error!(env, error);
+        }
+    }
+
+    fn denied_result(
+        env: &Env,
+        _caller: &Address,
+        _operation: &str,
+        error: RbacError,
+    ) -> CommandResult {
+        CommandResult {
+            success: false,
+            event_id: None,
+            sequence_number: env
+                .storage()
+                .instance()
+                .get(&CqrsStorageKey::EventSequence)
+                .unwrap_or(0),
+            error_code: Some(error as u32),
+            message: Some(Symbol::new(env, "rbac_denied")),
+        }
+    }
+
+    fn emit_audit_event(
+        env: &Env,
+        caller: &Address,
+        operation: &str,
+        previous: i128,
+        current: i128,
+        outcome: &str,
+        error_code: u32,
+    ) {
+        let operation = Symbol::new(env, operation);
+        let outcome = Symbol::new(env, outcome);
+        let digest = RbacManager::state_diff_digest(env, caller, &operation, previous, current);
+        let timestamp = env.ledger().timestamp();
+        env.events().publish(
+            (Symbol::new(env, "cqrs_audit"), operation.clone()),
+            (caller.clone(), timestamp, digest.clone(), outcome.clone(), error_code),
+        );
+        soroban_sdk::log!(
+            env,
+            "cqrs_audit",
+            caller,
+            timestamp,
+            operation,
+            digest,
+            outcome,
+            error_code
+        );
     }
 }

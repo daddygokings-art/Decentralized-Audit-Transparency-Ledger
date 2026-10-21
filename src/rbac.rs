@@ -88,6 +88,38 @@ impl RbacManager {
         Ok(())
     }
 
+    /// Revokes an assigned role. Caller must be an Admin; the final Admin
+    /// cannot be removed.
+    pub fn revoke_role(
+        env: &Env,
+        caller: &Address,
+        target: &Address,
+    ) -> Result<(), RbacError> {
+        caller.require_auth();
+        if !Self::has_role_min(env, caller, Role::Admin) {
+            return Err(RbacError::InsufficientRole);
+        }
+
+        if Self::get_role(env, target) == Some(Role::Admin) {
+            let admin_count = env
+                .storage()
+                .persistent()
+                .get::<_, u32>(&RbacStorageKey::AdminCount)
+                .unwrap_or(1);
+            if admin_count <= 1 {
+                return Err(RbacError::CannotRevokeLastAdmin);
+            }
+            env.storage()
+                .persistent()
+                .set(&RbacStorageKey::AdminCount, &(admin_count - 1));
+        }
+
+        env.storage()
+            .persistent()
+            .remove(&RbacStorageKey::Role(target.clone()));
+        Ok(())
+    }
+
     /// Retrieves the current role assigned to an address, if any.
     pub fn get_role(env: &Env, address: &Address) -> Option<Role> {
         let key = RbacStorageKey::Role(address.clone());
@@ -131,10 +163,17 @@ impl RbacManager {
     /// Bootstraps initial superadmin role during contract initialization.
     pub fn initialize_admin(env: &Env, admin: &Address) {
         let key = RbacStorageKey::Role(admin.clone());
-        env.storage().persistent().set(&key, &Role::Admin);
-        env.storage()
-            .persistent()
-            .set(&RbacStorageKey::AdminCount, &1u32);
+        if Self::get_role(env, admin) != Some(Role::Admin) {
+            let count = env
+                .storage()
+                .persistent()
+                .get::<_, u32>(&RbacStorageKey::AdminCount)
+                .unwrap_or(0);
+            env.storage().persistent().set(&key, &Role::Admin);
+            env.storage()
+                .persistent()
+                .set(&RbacStorageKey::AdminCount, &count.saturating_add(1));
+        }
     }
 
     /// Alias for initialize_admin

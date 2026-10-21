@@ -189,6 +189,13 @@ line = 75.0
 branch = 65.0
 description = "ESG metrics collection and report generation — RBAC-gated mutations with tamper-evident audit events (issue #875)"
 
+[[module]]
+name = "cqrs"
+path_prefix = "src/cqrs.rs"
+line = 70.0
+branch = 50.0
+description = "Bounded event projections with role-gated mutations and audit events (issues #799 and #800)"
+
 # ─ Tax & VAT ─────────────────────────────────────────────────────────────────
 [[module]]
 name = "tax"
