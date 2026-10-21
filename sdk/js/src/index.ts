@@ -14,3 +14,4 @@ export * from './metrics';
 export * from './confidential';
 export * from './pagination';
 export * from './suptech-rules';
+export * from './dataProvider';
