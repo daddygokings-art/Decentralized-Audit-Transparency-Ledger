@@ -884,4 +884,121 @@ mod tests {
         let gold_compliant = verify_standard_compliance(&env, credit_id, ComplianceStandard::Gold);
         assert!(gold_compliant);
     }
+
+    #[test]
+    #[should_panic(expected = "HostError: Error(Contract, #3015)")]
+    fn test_issue_rejects_counter_overflow() {
+        let env = Env::default();
+        let issuer = Address::random(&env);
+        let admin = Address::random(&env);
+        let verifier = Address::random(&env);
+        setup_rbac(&env, &admin, &issuer, &Role::Submitter);
+        env.storage()
+            .persistent()
+            .set(&CarbonCreditKey::CreditCounter, &u32::MAX);
+
+        issue_carbon_credit(
+            &env,
+            issuer,
+            100,
+            create_test_renewable(&env, 200),
+            create_test_offset(&env),
+            create_test_registry(&env, verifier),
+            ComplianceStandard::Vcs,
+        );
+    }
+
+    #[test]
+    #[should_panic(expected = "HostError: Error(Contract, #3014)")]
+    fn test_issue_rejects_full_issuer_index() {
+        let env = Env::default();
+        let issuer = Address::random(&env);
+        let admin = Address::random(&env);
+        let verifier = Address::random(&env);
+        setup_rbac(&env, &admin, &issuer, &Role::Submitter);
+        let mut credits = soroban_sdk::Vec::new(&env);
+        for _ in 0..256 {
+            credits.push_back(BytesN::from_array(&env, &[0u8; 32]));
+        }
+        env.storage()
+            .persistent()
+            .set(&CarbonCreditKey::IssuerCredits(issuer.clone()), &credits);
+
+        issue_carbon_credit(
+            &env,
+            issuer,
+            100,
+            create_test_renewable(&env, 200),
+            create_test_offset(&env),
+            create_test_registry(&env, verifier),
+            ComplianceStandard::Vcs,
+        );
+    }
+
+    #[test]
+    #[should_panic(expected = "HostError: Error(Contract, #3016)")]
+    fn test_issue_rejects_u64_max_expiration() {
+        let env = Env::default();
+        let issuer = Address::random(&env);
+        let admin = Address::random(&env);
+        let verifier = Address::random(&env);
+        setup_rbac(&env, &admin, &issuer, &Role::Submitter);
+        let mut offset = create_test_offset(&env);
+        offset.expiration_date = u64::MAX;
+
+        issue_carbon_credit(
+            &env,
+            issuer,
+            100,
+            create_test_renewable(&env, 200),
+            offset,
+            create_test_registry(&env, verifier),
+            ComplianceStandard::Vcs,
+        );
+    }
+
+    #[test]
+    #[should_panic(expected = "HostError: Error(Contract, #3015)")]
+    fn test_retirement_rejects_counter_overflow() {
+        let env = Env::default();
+        let issuer = Address::random(&env);
+        let admin = Address::random(&env);
+        let verifier = Address::random(&env);
+        setup_rbac(&env, &admin, &issuer, &Role::Submitter);
+        let credit_id = issue_carbon_credit(
+            &env,
+            issuer.clone(),
+            100,
+            create_test_renewable(&env, 200),
+            create_test_offset(&env),
+            create_test_registry(&env, verifier),
+            ComplianceStandard::Vcs,
+        );
+        env.storage()
+            .persistent()
+            .set(&CarbonCreditKey::RetiredCount, &u32::MAX);
+
+        retire_credit(&env, issuer, credit_id, bytes!(env, b"Retirement"));
+    }
+
+    #[test]
+    #[should_panic(expected = "HostError: Error(Contract, #3011)")]
+    fn test_tokenization_rejects_values_above_i128_max() {
+        let env = Env::default();
+        let issuer = Address::random(&env);
+        let admin = Address::random(&env);
+        let verifier = Address::random(&env);
+        setup_rbac(&env, &admin, &issuer, &Role::Submitter);
+        let credit_id = issue_carbon_credit(
+            &env,
+            issuer.clone(),
+            100,
+            create_test_renewable(&env, 200),
+            create_test_offset(&env),
+            create_test_registry(&env, verifier),
+            ComplianceStandard::Vcs,
+        );
+
+        tokenize_credit(&env, credit_id, issuer, i128::MAX as u128 + 1, 15);
+    }
 }
