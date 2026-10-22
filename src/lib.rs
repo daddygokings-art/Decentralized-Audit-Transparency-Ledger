@@ -62,6 +62,7 @@ pub mod rbac;
 pub mod digital_passport;
 pub mod carbon_credits;
 pub mod esg_reporting;
+pub mod reputation_system;
 pub mod rbac;
 
 // Role-Based Access Control (#686 #689 #688 #687): granular roles with
@@ -7323,3 +7324,6 @@ mod marketplace_tests;
 
 #[cfg(test)]
 mod cbdc_privacy_tests;
+
+#[cfg(test)]
+mod chaos_tests;
