@@ -131,7 +131,7 @@ impl IntegrationManager {
         input.append(&Bytes::from_slice(env, framework.code().as_bytes()));
         input.append(&Bytes::from_slice(env, b"ENDPOINT"));
 
-        env.crypto().sha256(&input).to_bytes()
+        env.crypto().sha256(&input)
     }
 
     /// Create transmission record
@@ -172,7 +172,7 @@ impl IntegrationManager {
         input.append(&destination.to_xdr(env));
         input.append(&Bytes::from_slice(env, &env.ledger().timestamp().to_le_bytes()));
 
-        env.crypto().sha256(&input).to_bytes()
+        env.crypto().sha256(&input)
     }
 
     /// Acknowledge transmission (regulator confirms receipt)

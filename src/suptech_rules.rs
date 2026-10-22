@@ -319,7 +319,7 @@ impl RulesEngine {
         input.append(&Bytes::from_slice(env, framework.code().as_bytes()));
         input.append(name);
 
-        env.crypto().sha256(&input).to_bytes()
+        env.crypto().sha256(&input)
     }
 
     /// Evaluate rule against context
@@ -379,7 +379,7 @@ impl RulesEngine {
         input.append(&institution.to_xdr(env));
         input.append(&Bytes::from_slice(env, &env.ledger().timestamp().to_le_bytes()));
 
-        env.crypto().sha256(&input).to_bytes()
+        env.crypto().sha256(&input)
     }
 
     /// Update rule condition (for dynamic rules)
@@ -436,7 +436,7 @@ impl RulesEngine {
         input.append(&Bytes::from_slice(env, framework.code().as_bytes()));
         input.append(&Bytes::from_slice(env, b"RULESET"));
 
-        env.crypto().sha256(&input).to_bytes()
+        env.crypto().sha256(&input)
     }
 
     /// Add rule to set

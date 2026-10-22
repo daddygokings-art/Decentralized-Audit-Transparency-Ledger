@@ -383,10 +383,12 @@ impl PrivacyManager {
         env: &Env,
         transaction: &CBDCTransaction,
     ) -> BytesN<32> {
+        
         let mut input = Bytes::new(env);
         input.append(&transaction.tx_id.to_bytes());
         input.append(&Bytes::from_slice(env, &transaction.timestamp.to_le_bytes()));
-        env.crypto().sha256(&input).to_bytes()
+
+        env.crypto().sha256(&input)
     }
 
     /// Encrypt transaction data based on privacy tier.
@@ -402,16 +404,19 @@ impl PrivacyManager {
                 encrypted.append(&Bytes::from_slice(env, &transaction.source_pilot.to_le_bytes()));
                 encrypted.append(&Bytes::from_slice(env, &transaction.dest_pilot.to_le_bytes()));
 
-                let mut amount_input = Bytes::new(env);
+                // Hash sensitive amounts
+                                let mut amount_input = Bytes::new(env);
                 amount_input.append(&Bytes::from_slice(env, &transaction.amount_source.to_le_bytes()));
                 amount_input.append(&Bytes::from_slice(env, &transaction.exchange_rate.to_le_bytes()));
-                let amount_hash = env.crypto().sha256(&amount_input).to_bytes();
-                encrypted.append(&amount_hash.to_bytes());
+                let amount_hash = env.crypto().sha256(&amount_input);
+                encrypted.append(&Bytes::from_slice(env, amount_hash.as_ref()));
 
                 Ok(encrypted)
             }
             PrivacyTier::Private => {
-                let mut sensitive_input = Bytes::new(env);
+                // Encrypt everything except ID and timestamp
+                                let mut sensitive_input = Bytes::new(env);
+
                 sensitive_input.append(&Bytes::from_slice(env, &transaction.source_pilot.to_le_bytes()));
                 sensitive_input.append(&Bytes::from_slice(env, &transaction.dest_pilot.to_le_bytes()));
                 sensitive_input.append(&transaction.from.clone().to_xdr(env));
@@ -419,17 +424,19 @@ impl PrivacyManager {
                 sensitive_input.append(&Bytes::from_slice(env, &transaction.amount_source.to_le_bytes()));
                 sensitive_input.append(&Bytes::from_slice(env, &transaction.amount_dest.to_le_bytes()));
 
-                let encrypted_hash = env.crypto().sha256(&sensitive_input).to_bytes();
-                Ok(encrypted_hash.to_bytes())
+                let encrypted_hash = env.crypto().sha256(&sensitive_input);
+                Ok(Bytes::from_slice(env, encrypted_hash.as_ref()))
             }
             PrivacyTier::RegulatoryConfidential => {
-                let mut full_input = Bytes::new(env);
-                full_input.append(&transaction.tx_id.to_bytes());
+                // Minimal exposure, full encryption
+                                let mut full_input = Bytes::new(env);
+
+                full_input.append(&Bytes::from_slice(env, transaction.tx_id.as_ref()));
                 full_input.append(&Bytes::from_slice(env, &transaction.timestamp.to_le_bytes()));
                 full_input.append(&transaction.metadata);
 
-                let encrypted_hash = env.crypto().sha256(&full_input).to_bytes();
-                Ok(encrypted_hash.to_bytes())
+                let encrypted_hash = env.crypto().sha256(&full_input);
+                Ok(Bytes::from_slice(env, encrypted_hash.as_ref()))
             }
             PrivacyTier::Public => {
                 Err(CbdcPrivacyError::PublicTransactionEncrypted)
@@ -501,10 +508,12 @@ impl PrivacyManager {
 
     /// Compute unique ACL ID.
     pub fn compute_acl_id(env: &Env, transaction_hash: &BytesN<32>) -> BytesN<32> {
+        
         let mut input = Bytes::new(env);
         input.append(&transaction_hash.to_bytes());
         input.append(&Bytes::from_slice(env, b"ACL_V1"));
-        env.crypto().sha256(&input).to_bytes()
+
+        env.crypto().sha256(&input)
     }
 
     /// Validate privacy configuration.

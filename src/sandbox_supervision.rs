@@ -79,7 +79,7 @@ impl SupervisionManager {
         input.append(&participant_id.to_bytes());
         input.append(&Bytes::from_slice(env, &env.ledger().timestamp().to_le_bytes()));
 
-        env.crypto().sha256(&input).to_bytes()
+        env.crypto().sha256(&input)
     }
 
     /// Add corrective actions

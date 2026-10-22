@@ -32,6 +32,10 @@ pub enum CarbonCreditError {
     InvalidTokenization = 3011,
     /// Transfer failed
     TransferFailed = 3012,
+    /// Page limit exceeds maximum allowed (100)
+    PageLimitExceeded = 3013,
+    /// Invalid cursor value
+    InvalidCursor = 3014,
 }
 
 /// Carbon credit status
@@ -250,6 +254,66 @@ pub struct CarbonReductionReport {
 }
 
 // ─────────────────────────────────────────────────────────────────────────────
+// Pagination Types (issue #882)
+// ─────────────────────────────────────────────────────────────────────────────
+
+/// Maximum number of items that can be returned in a single page.
+pub const MAX_PAGE_LIMIT: u32 = 100;
+
+/// Opaque cursor for paginated queries.
+///
+/// Encodes a zero-based index into the ordered credit list.  A value of `0`
+/// means "start from the beginning".  Callers should treat this as an opaque
+/// token obtained from `CreditPage.next_cursor`.
+#[contracttype]
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct PageCursor {
+    /// Zero-based index into the ordered result set.
+    pub index: u32,
+}
+
+/// Requested page size.  Capped at [`MAX_PAGE_LIMIT`] (100).
+#[contracttype]
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct PageLimit {
+    /// Maximum number of items to return (1–100).
+    pub limit: u32,
+}
+
+/// Filter predicates for credit queries.
+///
+/// All fields are optional; `None` means "no filter on this dimension".
+/// When multiple filters are supplied, they are AND-combined.
+#[contracttype]
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct CreditQueryFilter {
+    /// Inclusive lower bound on `creation_date`.
+    pub created_after: Option<u64>,
+    /// Inclusive upper bound on `creation_date`.
+    pub created_before: Option<u64>,
+    /// Filter by credit status.
+    pub status: Option<CreditStatus>,
+    /// Filter by issuer/submitter address.
+    pub submitter: Option<Address>,
+}
+
+/// A page of paginated credit results.
+///
+/// Contains the credit IDs on the current page, the total count of matching
+/// items, and an opaque cursor to fetch the next page.  When `next_cursor`
+/// is `None`, there are no more results.
+#[contracttype]
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct CreditPage {
+    /// Credit IDs on this page.
+    pub items: Vec<BytesN<32>>,
+    /// Total number of credits matching the filter.
+    pub total: u32,
+    /// Cursor to use for the next page, or `None` if this is the last page.
+    pub next_cursor: Option<PageCursor>,
+}
+
+// ─────────────────────────────────────────────────────────────────────────────
 // Storage Keys
 // ─────────────────────────────────────────────────────────────────────────────
 
@@ -278,6 +342,8 @@ pub enum CarbonCreditKey {
     RetiredCount,
     /// Total CO2e retired
     TotalCo2eRetired,
+    /// Sequential list of all credit IDs for deterministic pagination ordering
+    AllCreditIds,
 }
 
 // ─────────────────────────────────────────────────────────────────────────────
@@ -299,12 +365,15 @@ pub fn issue_carbon_credit(
         return BytesN::from_array(&env, &[0u8; 32]);
     }
 
-    // Deterministic binary preimage (strkey bytes + LE numerics): `format!` and
-    // `Display for soroban_sdk::String` are unavailable in the wasm contract build.
-    let mut credit_preimage = Bytes::from_slice(env, &carbon_tonnes.to_le_bytes());
-    credit_preimage.append(&issuer.to_string().to_bytes());
-    credit_preimage.extend_from_slice(&env.ledger().timestamp().to_le_bytes());
-    let credit_id = env.crypto().sha256(&credit_preimage).to_bytes();
+    let mut preimage = Bytes::new(env);
+    preimage.append(&Bytes::from_array(env, b"CREDIT"));
+    // Append carbon_tonnes as 4 bytes LE
+    preimage.append(&Bytes::from_array(env, &carbon_tonnes.to_le_bytes()));
+    // Append issuer string representation
+    preimage.append(&issuer.to_string().to_bytes());
+    // Append timestamp as 8 bytes LE
+    preimage.append(&Bytes::from_array(env, &env.ledger().timestamp().to_le_bytes()));
+    let credit_id: BytesN<32> = env.crypto().sha256(&preimage).into();
 
     let credit = CarbonCredit {
         credit_id: credit_id.clone(),
@@ -343,6 +412,17 @@ pub fn issue_carbon_credit(
     env.storage()
         .persistent()
         .set(&CarbonCreditKey::IssuerCredits(issuer), &issuer_credits);
+
+    // Add to global ordered list for deterministic pagination (issue #882)
+    let mut all_ids: Vec<BytesN<32>> = env
+        .storage()
+        .persistent()
+        .get(&CarbonCreditKey::AllCreditIds)
+        .unwrap_or_else(|| Vec::new(env));
+    all_ids.push_back(credit_id.clone());
+    env.storage()
+        .persistent()
+        .set(&CarbonCreditKey::AllCreditIds, &all_ids);
 
     // Increment counter
     let count: u32 = env
@@ -391,13 +471,13 @@ pub fn verify_renewable_energy(
 
     // Create verification record
     let verification = VerificationRecord {
-        verification_id: env.crypto().sha256(&Bytes::from_slice(&env, b"VERIFY")).to_bytes(),
-        auditor: verifier.clone(),
+        verification_id: env.crypto().sha256(&Bytes::from_array(env, b"VERIFY")).into(),
+        auditor: verifier,
         audit_date: env.ledger().timestamp(),
         verified_amount: credit.carbon_tonnes,
         issues_found: Vec::new(env),
         approved: true,
-        audit_notes: Bytes::from_slice(&env, b"Renewable energy verified"),
+        audit_notes: Bytes::from_array(env, b"Renewable energy verified"),
     };
 
     credit.verification_records.push_back(verification);
@@ -444,10 +524,11 @@ pub fn tokenize_credit(
         .get(&CarbonCreditKey::CarbonCredit(credit_id.clone()))
         .unwrap_or_else(|| panic!("Credit not found"));
 
-    let mut token_preimage = Bytes::from_slice(env, b"TOKEN");
+    let mut token_preimage = Bytes::new(env);
+    token_preimage.append(&Bytes::from_array(env, b"TOKEN"));
     token_preimage.append(&token_owner.to_string().to_bytes());
-    token_preimage.extend_from_slice(&env.ledger().timestamp().to_le_bytes());
-    let token_id = env.crypto().sha256(&token_preimage).to_bytes();
+    token_preimage.append(&Bytes::from_array(env, &env.ledger().timestamp().to_le_bytes()));
+    let token_id: BytesN<32> = env.crypto().sha256(&token_preimage).into();
 
     let tokenization = Tokenization {
         token_id: token_id.clone(),
@@ -665,18 +746,18 @@ pub fn audit_renewable_usage(
         - measured_energy as i32)
         .abs() > 100
     {
-        issues.push_back(Bytes::from_slice(&env, b"Energy mismatch"));
+        issues.push_back(Bytes::from_array(env, b"Energy mismatch"));
         approved = false;
     }
 
     let record = VerificationRecord {
-        verification_id: env.crypto().sha256(&Bytes::from_slice(&env, b"AUDIT")).to_bytes(),
-        auditor: auditor.clone(),
+        verification_id: env.crypto().sha256(&Bytes::from_array(env, b"AUDIT")).into(),
+        auditor,
         audit_date: env.ledger().timestamp(),
         verified_amount: credit.carbon_tonnes,
         issues_found: issues,
         approved,
-        audit_notes: Bytes::from_slice(&env, b"Audit complete"),
+        audit_notes: Bytes::from_array(env, b"Audit complete"),
     };
 
     // Store verification record
@@ -1063,3 +1144,234 @@ pub fn get_total_credits_issued(env: &Env) -> u32 {
         .unwrap_or(0)
 }
 
+// ─────────────────────────────────────────────────────────────────────────────
+// Paginated Query Functions (issue #882)
+// ─────────────────────────────────────────────────────────────────────────────
+
+/// Validate and normalize a [`PageLimit`].
+///
+/// Returns a clamped limit in the range `[1, MAX_PAGE_LIMIT]`.
+fn validate_page_limit(limit: &PageLimit) -> u32 {
+    if limit.limit == 0 {
+        1
+    } else if limit.limit > MAX_PAGE_LIMIT {
+        MAX_PAGE_LIMIT
+    } else {
+        limit.limit
+    }
+}
+
+/// Check whether a credit matches the given filter predicates.
+///
+/// All supplied predicates must match (AND semantics).  `None` fields are
+/// treated as "no constraint on this dimension".
+fn credit_matches_filter(
+    env: &Env,
+    credit_id: &BytesN<32>,
+    filter: &CreditQueryFilter,
+) -> bool {
+    let credit: CarbonCredit = match env
+        .storage()
+        .persistent()
+        .get(&CarbonCreditKey::CarbonCredit(credit_id.clone()))
+    {
+        Some(c) => c,
+        None => return false,
+    };
+
+    // Timestamp range filter
+    if let Some(after) = filter.created_after {
+        if credit.creation_date < after {
+            return false;
+        }
+    }
+    if let Some(before) = filter.created_before {
+        if credit.creation_date > before {
+            return false;
+        }
+    }
+
+    // Status filter
+    if let Some(ref status) = filter.status {
+        if &credit.status != status {
+            return false;
+        }
+    }
+
+    // Submitter (issuer) filter
+    if let Some(ref submitter) = filter.submitter {
+        if &credit.issuer != submitter {
+            return false;
+        }
+    }
+
+    true
+}
+
+/// Paginated query for all carbon credit IDs with optional filtering.
+///
+/// Credits are returned in deterministic insertion order (oldest first),
+/// ensuring stable ordering across ledger upgrades and archival restores.
+///
+/// # Arguments
+/// * `env` — Soroban environment.
+/// * `cursor` — Starting position; pass `PageCursor { index: 0 }` for the first page.
+/// * `limit` — Maximum items per page (clamped to `[1, 100]`).
+/// * `filter` — Optional filter predicates.  All fields `None` = no filtering.
+///
+/// # Returns
+/// A [`CreditPage`] containing matching credit IDs, total count, and an
+/// optional `next_cursor` for the subsequent page.
+///
+/// # CPU/Memory Safety
+/// Page size is hard-capped at 100 to stay within Soroban single-invocation
+/// CPU and memory limits.  The scan is bounded: at most `limit` items are
+/// materialised per call.
+pub fn query_credits_paginated(
+    env: &Env,
+    cursor: PageCursor,
+    limit: PageLimit,
+    filter: CreditQueryFilter,
+) -> CreditPage {
+    let effective_limit = validate_page_limit(&limit);
+
+    let all_ids: Vec<BytesN<32>> = env
+        .storage()
+        .persistent()
+        .get(&CarbonCreditKey::AllCreditIds)
+        .unwrap_or_else(|| Vec::new(env));
+
+    let total_count = all_ids.len();
+    let start = cursor.index;
+
+    // If cursor is past the end, return an empty page
+    if start >= total_count {
+        return CreditPage {
+            items: Vec::new(env),
+            total: total_count,
+            next_cursor: None,
+        };
+    }
+
+    let mut items: Vec<BytesN<32>> = Vec::new(env);
+    let mut scanned = 0u32;
+    let max_scan = total_count; // Safety: never scan beyond the stored list
+
+    let mut idx = start;
+    while idx < max_scan && items.len() < effective_limit {
+        let credit_id = all_ids.get(idx).unwrap();
+
+        if credit_matches_filter(env, &credit_id, &filter) {
+            items.push_back(credit_id);
+        }
+
+        idx += 1;
+        scanned += 1;
+
+        // Guard against unbounded scanning (CPU budget protection)
+        if scanned >= MAX_PAGE_LIMIT * 10 {
+            break;
+        }
+    }
+
+    // Determine next cursor: if we consumed `effective_limit` items and there
+    // are more entries to scan, the next cursor is the current scan position.
+    let next_cursor = if idx < total_count {
+        Some(PageCursor { index: idx })
+    } else {
+        None
+    };
+
+    CreditPage {
+        items,
+        total: total_count,
+        next_cursor,
+    }
+}
+
+/// Paginated query for credit IDs filtered by status only.
+///
+/// Convenience wrapper around [`query_credits_paginated`] for status-only
+/// filtering (e.g., "list all retired credits").
+pub fn query_credits_by_status(
+    env: &Env,
+    cursor: PageCursor,
+    limit: PageLimit,
+    status: CreditStatus,
+) -> CreditPage {
+    query_credits_paginated(
+        env,
+        cursor,
+        limit,
+        CreditQueryFilter {
+            created_after: None,
+            created_before: None,
+            status: Some(status),
+            submitter: None,
+        },
+    )
+}
+
+/// Paginated query for credit IDs filtered by submitter (issuer) address.
+pub fn query_credits_by_submitter(
+    env: &Env,
+    cursor: PageCursor,
+    limit: PageLimit,
+    submitter: Address,
+) -> CreditPage {
+    query_credits_paginated(
+        env,
+        cursor,
+        limit,
+        CreditQueryFilter {
+            created_after: None,
+            created_before: None,
+            status: None,
+            submitter: Some(submitter),
+        },
+    )
+}
+
+/// Paginated query for credit IDs filtered by creation timestamp range.
+pub fn query_credits_by_time_range(
+    env: &Env,
+    cursor: PageCursor,
+    limit: PageLimit,
+    created_after: u64,
+    created_before: u64,
+) -> CreditPage {
+    query_credits_paginated(
+        env,
+        cursor,
+        limit,
+        CreditQueryFilter {
+            created_after: Some(created_after),
+            created_before: Some(created_before),
+            status: None,
+            submitter: None,
+        },
+    )
+}
+
+/// Fetch full credit details for a page of credit IDs.
+///
+/// Given a [`CreditPage`] of IDs, materialises the full [`CarbonCredit`]
+/// structs.  This keeps the paginated query itself lightweight (returning
+/// only IDs) and defers the heavier struct deserialization to this call.
+pub fn get_credits_from_page(
+    env: &Env,
+    page: &CreditPage,
+) -> Vec<CarbonCredit> {
+    let mut credits = Vec::new(env);
+    for i in 0..page.items.len() {
+        let credit_id = page.items.get(i).unwrap();
+        if let Some(credit) = env
+            .storage()
+            .persistent()
+            .get::<_, CarbonCredit>(&CarbonCreditKey::CarbonCredit(credit_id))
+        {
+            credits.push_back(credit);
+        }
+    }
+    credits
+}

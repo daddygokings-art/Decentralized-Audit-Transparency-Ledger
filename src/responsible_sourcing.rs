@@ -176,7 +176,7 @@ pub struct Shipment {
     pub last_transfer_at: u64,
     /// Current custodian
     pub current_custodian: Address,
-    /// Shipment hash: sha256(material_data || quantity || certification_id)
+    /// Shipment hash: env.crypto().sha256(material_data || quantity || certification_id)
     pub shipment_hash: BytesN<32>,
     /// Chain of custody complete (all custody transfers have valid signatures)
     pub custody_verified: bool,
@@ -246,7 +246,7 @@ pub struct TraceabilityCheckpoint {
     pub location: Bytes,
     /// Checkpoint metadata (JSON)
     pub metadata: Bytes,
-    /// Hash chain: sha256(prev_checkpoint_hash || this_data)
+    /// Hash chain: env.crypto().sha256(prev_checkpoint_hash || this_data)
     pub checkpoint_hash: BytesN<32>,
     /// Previous checkpoint hash (chain linkage)
     pub prev_checkpoint_hash: BytesN<32>,
