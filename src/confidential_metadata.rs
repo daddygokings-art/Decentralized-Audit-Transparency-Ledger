@@ -127,6 +127,12 @@ pub enum ConfidentialError {
     InsufficientRole = 9,
     /// The submitter DID is suspended and may not mutate state.
     SubmitterSuspended = 10,
+    /// Encrypted payload or ZK proof exceeds its size cap
+    PayloadTooLarge = 11,
+    /// Access policy contains too many authorized parties
+    PolicyTooLarge = 12,
+    /// Analytics aggregation batch exceeds MAX_AGGREGATE_BATCH
+    BatchTooLarge = 13,
 }
 
 #[contract]
