@@ -9,6 +9,8 @@ use crate::suptech_reporting::*;
 use crate::suptech_api::*;
 use crate::suptech_rules::*;
 use crate::suptech_integration::*;
+use proptest::prelude::*;
+use soroban_sdk::xdr::ToXdr;
 
 fn create_test_env() -> Env {
     Env::default()
@@ -319,6 +321,124 @@ fn test_feed_creation() {
     let feed = FeedManager::create_feed(&env, DataFeedType::TransactionStream, data).unwrap();
     assert!(feed.is_active);
     assert_eq!(feed.update_frequency, 1);
+}
+
+#[test]
+fn test_feed_payload_limits_and_failed_publish_atomicity() {
+    let env = create_test_env();
+    assert_eq!(
+        FeedManager::create_feed(&env, DataFeedType::TransactionStream, Bytes::new(&env)),
+        Err(SuptechFeedError::EmptyPayload)
+    );
+    let maximum_payload = Bytes::from_slice(&env, &vec![7; MAX_FEED_PAYLOAD_BYTES as usize]);
+    let mut feed = FeedManager::create_feed(&env, DataFeedType::TransactionStream, maximum_payload)
+        .unwrap();
+    let previous_data = feed.current_data.clone();
+    let previous_updated = feed.last_updated;
+    let oversized = Bytes::from_slice(&env, &vec![8; MAX_FEED_PAYLOAD_BYTES as usize + 1]);
+
+    assert_eq!(
+        FeedManager::publish_data_point(&env, &mut feed, oversized),
+        Err(SuptechFeedError::PayloadTooLarge)
+    );
+    assert_eq!(feed.current_data, previous_data);
+    assert_eq!(feed.last_updated, previous_updated);
+}
+
+#[test]
+fn test_feed_receipt_timestamp_and_counter_boundaries() {
+    let env = create_test_env();
+    let mut subscription = FeedManager::create_subscription(
+        &env,
+        BytesN::zero(),
+        soroban_sdk::Address::generate(&env),
+    )
+    .unwrap();
+
+    FeedManager::record_data_receipt(&mut subscription, u64::MAX).unwrap();
+    assert_eq!(subscription.last_data_received, Some(u64::MAX));
+    assert_eq!(subscription.data_point_count, 1);
+
+    subscription.data_point_count = u32::MAX;
+    let previous_timestamp = subscription.last_data_received;
+    assert_eq!(
+        FeedManager::record_data_receipt(&mut subscription, 0),
+        Err(SuptechFeedError::SubscriptionCountOverflow)
+    );
+    assert_eq!(subscription.data_point_count, u32::MAX);
+    assert_eq!(subscription.last_data_received, previous_timestamp);
+}
+
+#[test]
+fn test_publisher_feed_collection_limit() {
+    let env = create_test_env();
+    let mut publisher = FeedManager::authorize_publisher(
+        &env,
+        soroban_sdk::Address::generate(&env),
+    )
+    .unwrap();
+
+    for _ in 0..MAX_PUBLISHER_FEEDS {
+        FeedManager::add_published_feed(&mut publisher, BytesN::zero()).unwrap();
+    }
+    assert_eq!(publisher.feeds_published.len(), MAX_PUBLISHER_FEEDS);
+    assert_eq!(
+        FeedManager::add_published_feed(&mut publisher, BytesN::zero()),
+        Err(SuptechFeedError::PublisherFeedLimitReached)
+    );
+    assert_eq!(publisher.feeds_published.len(), MAX_PUBLISHER_FEEDS);
+}
+
+#[test]
+fn test_max_i128_payload_and_maximum_feed_budget() {
+    let env = create_test_env();
+    let maximum_integer_payload = Bytes::from_slice(&env, &i128::MAX.to_le_bytes());
+    assert!(FeedManager::compute_data_hash(&env, &maximum_integer_payload, u64::MAX).is_ok());
+
+    env.cost_estimate().budget().reset_default();
+    let payload = Bytes::from_slice(&env, &vec![0; MAX_FEED_PAYLOAD_BYTES as usize]);
+    let mut feed = FeedManager::create_feed(&env, DataFeedType::TransactionStream, payload.clone())
+        .unwrap();
+    let data_point = FeedManager::publish_data_point(&env, &mut feed, payload).unwrap();
+    let serialized_size = data_point.to_xdr(&env).len();
+    let budget = env.cost_estimate().budget();
+
+    assert!(serialized_size <= MAX_DATA_POINT_XDR_BYTES);
+    assert!(
+        budget.cpu_instruction_cost() < 100_000_000,
+        "maximum feed payload consumed {} CPU instructions",
+        budget.cpu_instruction_cost()
+    );
+    assert!(
+        budget.memory_bytes_cost() < 41_943_040,
+        "maximum feed payload consumed {} memory bytes",
+        budget.memory_bytes_cost()
+    );
+}
+
+proptest! {
+    #![proptest_config(ProptestConfig::with_cases(64))]
+
+    #[test]
+    fn feed_payload_validation_is_bounded(payload in prop::collection::vec(
+        any::<u8>(),
+        0..=MAX_FEED_PAYLOAD_BYTES as usize + 1,
+    )) {
+        let env = create_test_env();
+        let bytes = Bytes::from_slice(&env, &payload);
+        let result = FeedManager::compute_data_hash(&env, &bytes, u64::MAX);
+        let valid = !payload.is_empty() && payload.len() <= MAX_FEED_PAYLOAD_BYTES as usize;
+
+        prop_assert_eq!(result.is_ok(), valid);
+        if !valid {
+            let expected = if payload.is_empty() {
+                SuptechFeedError::EmptyPayload
+            } else {
+                SuptechFeedError::PayloadTooLarge
+            };
+            prop_assert_eq!(result, Err(expected));
+        }
+    }
 }
 
 #[test]
