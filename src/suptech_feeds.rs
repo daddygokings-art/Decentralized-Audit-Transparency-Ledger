@@ -1,8 +1,37 @@
 #![no_std]
 
 use crate::suptech_types::{DataFeed, DataFeedType};
-use soroban_sdk::{contracttype, Bytes, BytesN, Env, Vec};
+use soroban_sdk::{contracterror, contracttype, Bytes, BytesN, Env, Vec};
 use soroban_sdk::xdr::ToXdr;
+
+/// Maximum payload retained or hashed by a feed operation.
+pub const MAX_FEED_PAYLOAD_BYTES: u32 = 4_096;
+/// Maximum feed identifiers retained for one publisher.
+pub const MAX_PUBLISHER_FEEDS: u32 = 64;
+/// Conservative XDR ceiling for a maximum-size data point.
+pub const MAX_DATA_POINT_XDR_BYTES: u32 = 5_120;
+
+/// Deterministic validation and capacity failures for feed operations.
+#[contracterror]
+#[derive(Copy, Clone, Debug, Eq, PartialEq)]
+#[repr(u32)]
+pub enum SuptechFeedError {
+    EmptyPayload = 1,
+    PayloadTooLarge = 2,
+    FeedInactive = 3,
+    SubscriptionInactive = 4,
+    FeedTypeMismatch = 5,
+    SubscriptionCountOverflow = 6,
+    PublisherFeedLimitReached = 7,
+}
+
+/// Resource bounds for maximum-size values:
+/// - A data point contains at most 4,144 bytes of field data (4,096 payload
+///   + 32-byte hash + timestamp, feed type, and payload length); its XDR form
+///   is capped at 5,120 bytes, excluding ledger keys.
+/// - A publisher retains at most 64 fixed 32-byte feed IDs (2,048 raw bytes).
+/// - Payload hashing is O(n) and processes at most 4,104 input bytes, so the
+///   host work is bounded by 65 SHA-256 blocks per call.
 
 /// Storage tier classification for keys managed by this module.
 ///
@@ -101,9 +130,12 @@ impl FeedManager {
         env: &Env,
         feed_type: DataFeedType,
         initial_data: Bytes,
-    ) -> Result<DataFeed, &'static str> {
+    ) -> Result<DataFeed, SuptechFeedError> {
         if initial_data.is_empty() {
-            return Err("Initial data cannot be empty");
+            return Err(SuptechFeedError::EmptyPayload);
+        }
+        if initial_data.len() > MAX_FEED_PAYLOAD_BYTES {
+            return Err(SuptechFeedError::PayloadTooLarge);
         }
 
         let feed_id = Self::compute_feed_id(env, feed_type);
@@ -136,17 +168,20 @@ impl FeedManager {
         env: &Env,
         feed: &mut DataFeed,
         new_data: Bytes,
-    ) -> Result<DataPoint, &'static str> {
+    ) -> Result<DataPoint, SuptechFeedError> {
         if !feed.is_active {
-            return Err("Feed is not active");
+            return Err(SuptechFeedError::FeedInactive);
         }
 
         if new_data.is_empty() {
-            return Err("Data payload cannot be empty");
+            return Err(SuptechFeedError::EmptyPayload);
+        }
+        if new_data.len() > MAX_FEED_PAYLOAD_BYTES {
+            return Err(SuptechFeedError::PayloadTooLarge);
         }
 
         let now = env.ledger().timestamp();
-        let data_hash = Self::compute_data_hash(env, &new_data, now);
+        let data_hash = Self::compute_data_hash(env, &new_data, now)?;
 
         // Update feed
         feed.current_data = new_data.clone();
@@ -161,13 +196,23 @@ impl FeedManager {
     }
 
     /// Compute data point hash
-    pub fn compute_data_hash(env: &Env, data: &Bytes, timestamp: u64) -> BytesN<32> {
-        
+    pub fn compute_data_hash(
+        env: &Env,
+        data: &Bytes,
+        timestamp: u64,
+    ) -> Result<BytesN<32>, SuptechFeedError> {
+        if data.is_empty() {
+            return Err(SuptechFeedError::EmptyPayload);
+        }
+        if data.len() > MAX_FEED_PAYLOAD_BYTES {
+            return Err(SuptechFeedError::PayloadTooLarge);
+        }
+
         let mut input = Bytes::new(env);
         input.append(data);
         input.append(&Bytes::from_slice(env, &timestamp.to_le_bytes()));
 
-        env.crypto().sha256(&input).to_bytes()
+        Ok(env.crypto().sha256(&input).to_bytes())
     }
 
     /// Verify data freshness
@@ -186,7 +231,7 @@ impl FeedManager {
         env: &Env,
         feed_id: BytesN<32>,
         subscriber: soroban_sdk::Address,
-    ) -> Result<FeedSubscription, &'static str> {
+    ) -> Result<FeedSubscription, SuptechFeedError> {
         let subscription_id = Self::compute_subscription_id(env, &feed_id, &subscriber);
 
         Ok(FeedSubscription {
@@ -219,13 +264,17 @@ impl FeedManager {
     pub fn record_data_receipt(
         subscription: &mut FeedSubscription,
         timestamp: u64,
-    ) -> Result<(), &'static str> {
+    ) -> Result<(), SuptechFeedError> {
         if !subscription.is_active {
-            return Err("Subscription is not active");
+            return Err(SuptechFeedError::SubscriptionInactive);
         }
 
+        let next_count = subscription
+            .data_point_count
+            .checked_add(1)
+            .ok_or(SuptechFeedError::SubscriptionCountOverflow)?;
         subscription.last_data_received = Some(timestamp);
-        subscription.data_point_count = subscription.data_point_count.saturating_add(1);
+        subscription.data_point_count = next_count;
 
         Ok(())
     }
@@ -234,13 +283,16 @@ impl FeedManager {
     pub fn validate_data_point(
         data_point: &DataPoint,
         feed: &DataFeed,
-    ) -> Result<(), &'static str> {
+    ) -> Result<(), SuptechFeedError> {
         if data_point.feed_type != feed.feed_type {
-            return Err("Data point feed type mismatch");
+            return Err(SuptechFeedError::FeedTypeMismatch);
         }
 
         if data_point.payload.is_empty() {
-            return Err("Data point payload cannot be empty");
+            return Err(SuptechFeedError::EmptyPayload);
+        }
+        if data_point.payload.len() > MAX_FEED_PAYLOAD_BYTES {
+            return Err(SuptechFeedError::PayloadTooLarge);
         }
 
         Ok(())
@@ -288,7 +340,7 @@ impl FeedManager {
     pub fn authorize_publisher(
         env: &Env,
         publisher_address: soroban_sdk::Address,
-    ) -> Result<FeedPublisher, &'static str> {
+    ) -> Result<FeedPublisher, SuptechFeedError> {
         let publisher_id = Self::compute_publisher_id(env, &publisher_address);
 
         Ok(FeedPublisher {
@@ -301,14 +353,29 @@ impl FeedManager {
         })
     }
 
+    /// Add a feed to the publisher's bounded feed index.
+    pub fn add_published_feed(
+        publisher: &mut FeedPublisher,
+        feed_id: BytesN<32>,
+    ) -> Result<(), SuptechFeedError> {
+        if publisher.feeds_published.len() >= MAX_PUBLISHER_FEEDS {
+            return Err(SuptechFeedError::PublisherFeedLimitReached);
+        }
+        publisher.feeds_published.push_back(feed_id);
+        Ok(())
+    }
+
     /// Compute publisher ID
     pub fn compute_publisher_id(
         env: &Env,
         address: &soroban_sdk::Address,
     ) -> BytesN<32> {
-        
         let mut input = Bytes::new(env);
         input.append(&address.to_xdr(env));
-        input.append(&Bytes::from_slice(env, b"PUBLISH
+        input.append(&Bytes::from_slice(env, b"PUBLISHER"));
+
+        env.crypto().sha256(&input).to_bytes()
+    }
+}
 
 /* … truncated 3093 chars — edit only what you need near the top … */

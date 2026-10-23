@@ -500,7 +500,7 @@ name = "suptech_feeds"
 path_prefix = "src/suptech_feeds.rs"
 line = 90.0
 branch = 90.0
-description = "SupTech real-time regulatory telemetry feed dispatcher — invariant & chaos resilience suite (issue #838)"
+description = "SupTech real-time regulatory telemetry feed dispatcher — deterministic bounds and overflow safety (issue #834)"
 
 [[module]]
 name = "suptech_integration"
