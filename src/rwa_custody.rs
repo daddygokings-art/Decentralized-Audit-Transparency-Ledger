@@ -36,8 +36,38 @@
 use soroban_sdk::{contracttype, Address, Bytes, BytesN, Env, Symbol, Vec};
 
 // ---------------------------------------------------------------------------
+// Error Types
+// ---------------------------------------------------------------------------
+
+/// Deterministic error variants for RWA custody operations.
+#[contracttype]
+#[derive(Copy, Clone, Debug, Eq, PartialEq)]
+#[repr(u32)]
+pub enum CustodyError {
+    /// Action not authorized by custodian role or owner.
+    Unauthorized = 1,
+    /// Custodian not found in active registry.
+    CustodianNotFound = 2,
+    /// Invalid status transition attempted on custodian or settlement.
+    InvalidStatusTransition = 3,
+    /// Degenerate parameters (zero amounts, invalid duration, or empty jurisdiction).
+    DegenerateParameters = 4,
+    /// Asset record not found.
+    AssetNotFound = 5,
+    /// Custodian solvency ratio or coverage below mandatory threshold.
+    SolvencyUndercollateralized = 6,
+    /// Custodian reputation score falls below asset class requirements.
+    ReputationFloorBreached = 7,
+    /// Settlement instruction in invalid or terminal state.
+    SettlementInvalidState = 8,
+    /// Collateral is currently locked or encumbered.
+    CollateralLocked = 9,
+}
+
+// ---------------------------------------------------------------------------
 // Enumerations
 // ---------------------------------------------------------------------------
+
 
 /// Registration and operational status of a custodian.
 ///
@@ -205,9 +235,9 @@ impl SettlementState {
             SettlementState::Settled
                 | SettlementState::Rejected
                 | SettlementState::Cancelled
-                | SettlementState::Revoked
         )
     }
+
 
     /// Whether the settlement has completed successfully.
     pub fn is_complete(&self) -> bool {
@@ -395,7 +425,41 @@ impl CustodianRecord {
     }
 }
 
+/// Validate custodian parameters, rejecting degenerate values early.
+pub fn validate_custodian_params(
+    reputation_score: u32,
+    total_value_held: u128,
+    insurance_coverage: u128,
+) -> Result<(), CustodyError> {
+    if reputation_score > 100 {
+        return Err(CustodyError::DegenerateParameters);
+    }
+    if total_value_held > 0 && insurance_coverage == 0 {
+        return Err(CustodyError::SolvencyUndercollateralized);
+    }
+    Ok(())
+}
+
+/// Validate settlement parameters, rejecting degenerate amounts or invalid transitions.
+pub fn validate_settlement_params(
+    amount: u128,
+    current_state: SettlementState,
+    next_state: SettlementState,
+) -> Result<(), CustodyError> {
+    if amount == 0 {
+        return Err(CustodyError::DegenerateParameters);
+    }
+    if current_state.is_terminal() {
+        return Err(CustodyError::SettlementInvalidState);
+    }
+    if !current_state.can_transition_to(next_state) {
+        return Err(CustodyError::InvalidStatusTransition);
+    }
+    Ok(())
+}
+
 /// Storage record for a custodied real-world asset.
+
 #[contracttype]
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub struct AssetStorageRecord {
@@ -1236,4 +1300,51 @@ mod tests {
         // 100% coverage floor
         assert_eq!(config.min_insurance_coverage_bps, 10_000);
     }
+
+    #[test]
+    fn test_validate_custodian_params_invariants() {
+        // Valid params
+        assert_eq!(validate_custodian_params(85, 10_000, 10_000), Ok(()));
+        assert_eq!(validate_custodian_params(0, 0, 0), Ok(()));
+
+        // Degenerate reputation > 100
+        assert_eq!(
+            validate_custodian_params(101, 1_000, 1_000),
+            Err(CustodyError::DegenerateParameters)
+        );
+
+        // Undercollateralized / zero insurance for held value
+        assert_eq!(
+            validate_custodian_params(90, 50_000, 0),
+            Err(CustodyError::SolvencyUndercollateralized)
+        );
+    }
+
+    #[test]
+    fn test_validate_settlement_params_invariants() {
+        // Zero amount rejected early
+        assert_eq!(
+            validate_settlement_params(0, SettlementState::Initiated, SettlementState::AwaitingConfirmation),
+            Err(CustodyError::DegenerateParameters)
+        );
+
+        // Terminal state cannot transition
+        assert_eq!(
+            validate_settlement_params(100, SettlementState::Settled, SettlementState::Initiated),
+            Err(CustodyError::SettlementInvalidState)
+        );
+
+        // Invalid transition rejected
+        assert_eq!(
+            validate_settlement_params(100, SettlementState::Initiated, SettlementState::Settled),
+            Err(CustodyError::InvalidStatusTransition)
+        );
+
+        // Valid transition accepted
+        assert_eq!(
+            validate_settlement_params(500, SettlementState::Initiated, SettlementState::AwaitingConfirmation),
+            Ok(())
+        );
+    }
 }
+
