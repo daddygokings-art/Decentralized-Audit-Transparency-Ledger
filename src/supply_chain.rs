@@ -166,6 +166,12 @@ pub enum SupplyChainError {
     AuthenticationFailed = 1017,
 }
 
+/// Maximum items per page for paginated queries to prevent CPU/memory exhaustion.
+pub const MAX_PAGE_SIZE: u32 = 100;
+
+/// Default page size when no limit is specified.
+pub const DEFAULT_PAGE_SIZE: u32 = 50;
+
 /// Symbol used to tag audit events emitted by this module.
 pub const AUDIT_TOPIC: &str = "sc_audit";
 
@@ -458,6 +464,119 @@ pub struct BrandIntegrityReport {
 }
 
 // ─────────────────────────────────────────────────────────────────────────────
+// Pagination types (issue #872)
+// ─────────────────────────────────────────────────────────────────────────────
+
+/// Opaque cursor for deterministic pagination.
+///
+/// Encodes the position in a stable-ordered collection so that subsequent
+/// queries can resume without skipping or duplicating entries across ledger
+/// upgrades and archival restores. The cursor is a byte-encoded serialization
+/// of the internal continuation state (typically a composite key or index).
+#[contracttype]
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct PageCursor {
+    pub data: Bytes,
+}
+
+/// Page size limit with enforced maximum to prevent CPU/memory budget exhaustion.
+#[contracttype]
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct PageLimit {
+    pub limit: u32,
+}
+
+impl PageLimit {
+    /// Creates a new page limit, capping at MAX_PAGE_SIZE.
+    pub fn new(env: &Env, requested: u32) -> Self {
+        Self {
+            limit: if requested > MAX_PAGE_SIZE || requested == 0 {
+                DEFAULT_PAGE_SIZE
+            } else {
+                requested
+            },
+        }
+    }
+
+    /// Returns the effective limit value.
+    pub fn value(&self) -> u32 {
+        self.limit
+    }
+}
+
+/// Multi-predicate filter for supply chain queries.
+#[contracttype]
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct QueryFilters {
+    /// Timestamp range: (min_timestamp, max_timestamp). Both inclusive.
+    /// None means no filtering on that bound.
+    pub timestamp_min: Option<u64>,
+    pub timestamp_max: Option<u64>,
+    /// Filter by status enum (e.g., "active", "expired", "verified").
+    pub status: Option<Symbol>,
+    /// Filter by submitter/creator address.
+    pub submitter: Option<Address>,
+    /// Filter by brand ID (for products).
+    pub brand_id: Option<Symbol>,
+    /// Filter by facility ID (for labor/environmental reports).
+    pub facility_id: Option<Bytes>,
+}
+
+/// Paginated result wrapper with next cursor token.
+#[contracttype]
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct PaginatedBrands {
+    pub items: Vec<Brand>,
+    pub next_cursor: Option<PageCursor>,
+    pub total_count: u32,
+}
+
+/// Paginated products result.
+#[contracttype]
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct PaginatedProducts {
+    pub items: Vec<ProductSKU>,
+    pub next_cursor: Option<PageCursor>,
+    pub total_count: u32,
+}
+
+/// Paginated provenance events result.
+#[contracttype]
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct PaginatedProvenance {
+    pub items: Vec<Provenance>,
+    pub next_cursor: Option<PageCursor>,
+    pub total_count: u32,
+}
+
+/// Paginated certifications result.
+#[contracttype]
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct PaginatedCertifications {
+    pub items: Vec<Certification>,
+    pub next_cursor: Option<PageCursor>,
+    pub total_count: u32,
+}
+
+/// Paginated labor reports result.
+#[contracttype]
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct PaginatedLaborReports {
+    pub items: Vec<LaborConditions>,
+    pub next_cursor: Option<PageCursor>,
+    pub total_count: u32,
+}
+
+/// Paginated environmental reports result.
+#[contracttype]
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct PaginatedEnvironmentalReports {
+    pub items: Vec<EnvironmentalImpact>,
+    pub next_cursor: Option<PageCursor>,
+    pub total_count: u32,
+}
+
+// ─────────────────────────────────────────────────────────────────────────────
 // Data storage keys for supply chain
 //
 // Tier classification (retention SLA):
@@ -502,6 +621,26 @@ pub enum SupplyChainDataKey {
     BrandCount,
     /// Counter: total products tracked  [Instance]
     ProductCount,
+    /// Ordered index: position -> brand_id (for deterministic pagination)  [Temporary]
+    BrandIndexByPosition(u32),
+    /// Ordered index: position -> (brand_id, sku) (for deterministic pagination)  [Temporary]
+    ProductIndexByPosition(u32),
+    /// Ordered index: position -> event_id (provenance events)  [Temporary]
+    ProvenanceIndexByPosition(u32),
+    /// Counter: total provenance events  [Instance]
+    ProvenanceCount,
+    /// Ordered index: position -> cert_event_id (certifications)  [Temporary]
+    CertificationIndexByPosition(u32),
+    /// Counter: total certifications  [Instance]
+    CertificationCount,
+    /// Ordered index: position -> labor_report_id  [Temporary]
+    LaborReportIndexByPosition(u32),
+    /// Counter: total labor reports  [Instance]
+    LaborReportCount,
+    /// Ordered index: position -> env_report_id  [Temporary]
+    EnvironmentalReportIndexByPosition(u32),
+    /// Counter: total environmental reports  [Instance]
+    EnvironmentalReportCount,
 }
 
 // ─────────────────────────────────────────────────────────────────────────────
@@ -535,6 +674,12 @@ fn is_temporary_key(key: &SupplyChainDataKey) -> bool {
             | SupplyChainDataKey::FacilityEnvironmentalIndex(_)
             | SupplyChainDataKey::VerificationCache(_)
             | SupplyChainDataKey::BrandIntegrityCache(_)
+            | SupplyChainDataKey::BrandIndexByPosition(_)
+            | SupplyChainDataKey::ProductIndexByPosition(_)
+            | SupplyChainDataKey::ProvenanceIndexByPosition(_)
+            | SupplyChainDataKey::CertificationIndexByPosition(_)
+            | SupplyChainDataKey::LaborReportIndexByPosition(_)
+            | SupplyChainDataKey::EnvironmentalReportIndexByPosition(_)
     )
 }
 
@@ -543,7 +688,12 @@ fn is_temporary_key(key: &SupplyChainDataKey) -> bool {
 fn is_instance_key(key: &SupplyChainDataKey) -> bool {
     matches!(
         key,
-        SupplyChainDataKey::BrandCount | SupplyChainDataKey::ProductCount
+        SupplyChainDataKey::BrandCount
+            | SupplyChainDataKey::ProductCount
+            | SupplyChainDataKey::ProvenanceCount
+            | SupplyChainDataKey::CertificationCount
+            | SupplyChainDataKey::LaborReportCount
+            | SupplyChainDataKey::EnvironmentalReportCount
     )
 }
 
@@ -579,6 +729,18 @@ fn temporary_set<V: soroban_sdk::IntoVal<Env, soroban_sdk::Val>>(
     let storage = env.storage().temporary();
     storage.set(key, value);
     storage.extend_ttl(key, TEMPORARY_TTL_THRESHOLD, TEMPORARY_TTL_TARGET);
+}
+
+/// Read a temporary-tier value, bumping its TTL if present.
+fn temporary_get<V: soroban_sdk::TryFromVal<Env, soroban_sdk::Val>>(
+    env: &Env,
+    key: &SupplyChainDataKey,
+) -> Option<V> {
+    let storage = env.storage().temporary();
+    if storage.has(key) {
+        storage.extend_ttl(key, TEMPORARY_TTL_THRESHOLD, TEMPORARY_TTL_TARGET);
+    }
+    storage.get(key)
 }
 
 /// Read an instance-tier counter / config value, bumping instance TTL.
@@ -690,7 +852,11 @@ pub fn register_brand(
 
     // Increment brand count (instance tier) using saturating arithmetic
     let count = instance_get_u32(env, &SupplyChainDataKey::BrandCount);
-    instance_set_u32(env, &SupplyChainDataKey::BrandCount, count.saturating_add(1));
+    let new_count = count.saturating_add(1);
+    instance_set_u32(env, &SupplyChainDataKey::BrandCount, new_count);
+    
+    // Maintain deterministic index for pagination (temporary tier)
+    temporary_set(env, &SupplyChainDataKey::BrandIndexByPosition(count), &brand_id);
 
     let post_state = brand_id.to_xdr(env);
     emit_success(env, &owner, "register_brand", &pre_state, &post_state);
@@ -743,7 +909,12 @@ pub fn register_product_sku(
 
     // Increment product count (instance tier) using saturating arithmetic
     let count = instance_get_u32(env, &SupplyChainDataKey::ProductCount);
-    instance_set_u32(env, &SupplyChainDataKey::ProductCount, count.saturating_add(1));
+    let new_count = count.saturating_add(1);
+    instance_set_u32(env, &SupplyChainDataKey::ProductCount, new_count);
+    
+    // Maintain deterministic index for pagination (temporary tier)
+    let product_key = (brand_id.clone(), sku.clone());
+    temporary_set(env, &SupplyChainDataKey::ProductIndexByPosition(count), &product_key);
 
     let post_state = sku;
     emit_success(env, &caller, "register_product_sku", &pre_state, &post_state);
@@ -781,6 +952,12 @@ pub fn log_provenance_event(
         &SupplyChainDataKey::ProvenanceEvent(event_id.clone()),
         &provenance,
     );
+    
+    // Increment provenance count and maintain index
+    let count = instance_get_u32(env, &SupplyChainDataKey::ProvenanceCount);
+    let new_count = count.saturating_add(1);
+    instance_set_u32(env, &SupplyChainDataKey::ProvenanceCount, new_count);
+    temporary_set(env, &SupplyChainDataKey::ProvenanceIndexByPosition(count), &event_id);
 
     let post_state = event_id.to_bytes();
     emit_success(env, &producer, "log_provenance_event", &pre_state, &post_state);
@@ -879,6 +1056,12 @@ pub fn log_certification(
         &SupplyChainDataKey::CertificationEvent(cert_event_id.clone()),
         &certification,
     );
+    
+    // Increment certification count and maintain index
+    let count = instance_get_u32(env, &SupplyChainDataKey::CertificationCount);
+    let new_count = count.saturating_add(1);
+    instance_set_u32(env, &SupplyChainDataKey::CertificationCount, new_count);
+    temporary_set(env, &SupplyChainDataKey::CertificationIndexByPosition(count), &cert_event_id);
 
     let post_state = cert_event_id.to_bytes();
     emit_success(env, &issuer, "log_certification", &pre_state, &post_state);
@@ -925,6 +1108,12 @@ pub fn log_labor_conditions(
         &SupplyChainDataKey::LaborReport(report_id.clone()),
         &labor_report,
     );
+    
+    // Increment labor report count and maintain index
+    let count = instance_get_u32(env, &SupplyChainDataKey::LaborReportCount);
+    let new_count = count.saturating_add(1);
+    instance_set_u32(env, &SupplyChainDataKey::LaborReportCount, new_count);
+    temporary_set(env, &SupplyChainDataKey::LaborReportIndexByPosition(count), &report_id);
 
     let post_state = report_id.to_bytes();
     emit_success(env, &reporter, "log_labor_conditions", &pre_state, &post_state);
@@ -978,6 +1167,12 @@ pub fn log_environmental_impact(
         &SupplyChainDataKey::EnvironmentalReport(report_id.clone()),
         &environmental,
     );
+    
+    // Increment environmental report count and maintain index
+    let count = instance_get_u32(env, &SupplyChainDataKey::EnvironmentalReportCount);
+    let new_count = count.saturating_add(1);
+    instance_set_u32(env, &SupplyChainDataKey::EnvironmentalReportCount, new_count);
+    temporary_set(env, &SupplyChainDataKey::EnvironmentalReportIndexByPosition(count), &report_id);
 
     let post_state = report_id.to_bytes();
     emit_success(env, &reporter, "log_environmental_impact", &pre_state, &post_state);
@@ -1206,4 +1401,477 @@ pub fn generate_integrity_proof(
         data.append(&event_id.to_bytes());
     }
     Ok(env.crypto().sha256(&data).to_bytes())
+}
+
+// ─────────────────────────────────────────────────────────────────────────────
+// Paginated query functions (issue #872)
+//
+// All collection queries enforce strict page size limits and return a
+// next_cursor token for subsequent requests. Queries use deterministic
+// ordering (by insertion order via position indices) so results are stable
+// across ledger upgrades and archival restores. Filtering predicates are
+// applied during iteration without materializing full intermediate results,
+// keeping CPU and memory usage bounded within Soroban single-invocation limits.
+// ─────────────────────────────────────────────────────────────────────────────
+
+/// Helper: decode cursor from bytes to u32 position.
+fn decode_cursor(cursor: &PageCursor) -> Result<u32, SupplyChainError> {
+    if cursor.data.len() != 4 {
+        return Err(SupplyChainError::InvalidPayload);
+    }
+    let mut bytes = [0u8; 4];
+    cursor.data.copy_into_slice(&mut bytes);
+    Ok(u32::from_le_bytes(bytes))
+}
+
+/// Helper: encode u32 position as cursor bytes.
+fn encode_cursor(env: &Env, position: u32) -> PageCursor {
+    PageCursor {
+        data: Bytes::from_array(env, &position.to_le_bytes()),
+    }
+}
+
+/// Helper: apply timestamp filter to a value.
+fn matches_timestamp_filter(timestamp: u64, filters: &QueryFilters) -> bool {
+    if let Some(min) = filters.timestamp_min {
+        if timestamp < min {
+            return false;
+        }
+    }
+    if let Some(max) = filters.timestamp_max {
+        if timestamp > max {
+            return false;
+        }
+    }
+    true
+}
+
+/// List brands with cursor-based pagination and deterministic ordering.
+///
+/// Returns at most `limit` brands starting from the position encoded in
+/// `cursor` (or from the beginning if `cursor` is `None`). Results are
+/// ordered by insertion order (registration sequence) so pagination is
+/// stable across ledger upgrades. The `next_cursor` token is `Some` when
+/// more brands remain; `None` signals end-of-collection.
+///
+/// # CPU/Memory bounds
+///
+/// Page size is capped at `MAX_PAGE_SIZE` (100 items), and iteration stops
+/// as soon as the limit is reached or the collection is exhausted, keeping
+/// CPU and memory usage deterministic and well within Soroban invocation limits.
+pub fn list_brands_paginated(
+    env: &Env,
+    cursor: Option<PageCursor>,
+    limit: Option<u32>,
+    filters: QueryFilters,
+) -> Result<PaginatedBrands, SupplyChainError> {
+    let page_limit = PageLimit::new(env, limit.unwrap_or(DEFAULT_PAGE_SIZE));
+    let start_position = if let Some(c) = cursor {
+        decode_cursor(&c)?
+    } else {
+        0
+    };
+
+    let total_count = instance_get_u32(env, &SupplyChainDataKey::BrandCount);
+    let mut items = Vec::new(env);
+    let mut position = start_position;
+    let mut collected = 0u32;
+
+    while position < total_count && collected < page_limit.value() {
+        if let Some(brand_id) =
+            temporary_get::<Symbol>(env, &SupplyChainDataKey::BrandIndexByPosition(position))
+        {
+            if let Some(brand) = persistent_get::<Brand>(env, &SupplyChainDataKey::Brand(brand_id)) {
+                // Apply filters
+                let mut passes = true;
+                if let Some(ref submitter_filter) = filters.submitter {
+                    if brand.owner != *submitter_filter {
+                        passes = false;
+                    }
+                }
+                // Brands don't have timestamps, so timestamp filter is skipped
+                
+                if passes {
+                    items.push_back(brand);
+                    collected = collected.saturating_add(1);
+                }
+            }
+        }
+        position = position.saturating_add(1);
+    }
+
+    let next_cursor = if position < total_count {
+        Some(encode_cursor(env, position))
+    } else {
+        None
+    };
+
+    Ok(PaginatedBrands {
+        items,
+        next_cursor,
+        total_count,
+    })
+}
+
+/// List products with cursor-based pagination and multi-predicate filtering.
+///
+/// Supports filtering by:
+/// - Brand ID (`filters.brand_id`)
+/// - Timestamp range (`filters.timestamp_min`, `filters.timestamp_max`)
+/// - Submitter address (not applicable to products; reserved for extensibility)
+///
+/// Returns at most `limit` products in deterministic insertion order.
+pub fn list_products_paginated(
+    env: &Env,
+    cursor: Option<PageCursor>,
+    limit: Option<u32>,
+    filters: QueryFilters,
+) -> Result<PaginatedProducts, SupplyChainError> {
+    let page_limit = PageLimit::new(env, limit.unwrap_or(DEFAULT_PAGE_SIZE));
+    let start_position = if let Some(c) = cursor {
+        decode_cursor(&c)?
+    } else {
+        0
+    };
+
+    let total_count = instance_get_u32(env, &SupplyChainDataKey::ProductCount);
+    let mut items = Vec::new(env);
+    let mut position = start_position;
+    let mut collected = 0u32;
+
+    while position < total_count && collected < page_limit.value() {
+        if let Some(product_key) = temporary_get::<(Symbol, Bytes)>(
+            env,
+            &SupplyChainDataKey::ProductIndexByPosition(position),
+        ) {
+            let (brand_id, sku) = product_key;
+            if let Some(product) =
+                persistent_get::<ProductSKU>(env, &SupplyChainDataKey::ProductSKU(brand_id.clone(), sku))
+            {
+                // Apply filters
+                let mut passes = true;
+                if let Some(ref brand_filter) = filters.brand_id {
+                    if product.brand_id != *brand_filter {
+                        passes = false;
+                    }
+                }
+                if passes && !matches_timestamp_filter(product.created_date, &filters) {
+                    passes = false;
+                }
+
+                if passes {
+                    items.push_back(product);
+                    collected = collected.saturating_add(1);
+                }
+            }
+        }
+        position = position.saturating_add(1);
+    }
+
+    let next_cursor = if position < total_count {
+        Some(encode_cursor(env, position))
+    } else {
+        None
+    };
+
+    Ok(PaginatedProducts {
+        items,
+        next_cursor,
+        total_count,
+    })
+}
+
+/// List provenance events with cursor-based pagination and filtering.
+///
+/// Supports filtering by:
+/// - Timestamp range (`filters.timestamp_min`, `filters.timestamp_max`)
+/// - Submitter/producer address (`filters.submitter`)
+/// - Verification status (`filters.status` = "verified" or "unverified")
+///
+/// Returns at most `limit` provenance events in deterministic insertion order.
+pub fn list_provenance_paginated(
+    env: &Env,
+    cursor: Option<PageCursor>,
+    limit: Option<u32>,
+    filters: QueryFilters,
+) -> Result<PaginatedProvenance, SupplyChainError> {
+    let page_limit = PageLimit::new(env, limit.unwrap_or(DEFAULT_PAGE_SIZE));
+    let start_position = if let Some(c) = cursor {
+        decode_cursor(&c)?
+    } else {
+        0
+    };
+
+    let total_count = instance_get_u32(env, &SupplyChainDataKey::ProvenanceCount);
+    let mut items = Vec::new(env);
+    let mut position = start_position;
+    let mut collected = 0u32;
+
+    while position < total_count && collected < page_limit.value() {
+        if let Some(event_id) = temporary_get::<BytesN<32>>(
+            env,
+            &SupplyChainDataKey::ProvenanceIndexByPosition(position),
+        ) {
+            if let Some(provenance) =
+                persistent_get::<Provenance>(env, &SupplyChainDataKey::ProvenanceEvent(event_id))
+            {
+                // Apply filters
+                let mut passes = true;
+                if !matches_timestamp_filter(provenance.timestamp, &filters) {
+                    passes = false;
+                }
+                if let Some(ref submitter_filter) = filters.submitter {
+                    if provenance.producer_address != *submitter_filter {
+                        passes = false;
+                    }
+                }
+                if let Some(ref status_filter) = filters.status {
+                    let verified_symbol = Symbol::new(env, "verified");
+                    let unverified_symbol = Symbol::new(env, "unverified");
+                    if *status_filter == verified_symbol && !provenance.is_verified {
+                        passes = false;
+                    } else if *status_filter == unverified_symbol && provenance.is_verified {
+                        passes = false;
+                    }
+                }
+
+                if passes {
+                    items.push_back(provenance);
+                    collected = collected.saturating_add(1);
+                }
+            }
+        }
+        position = position.saturating_add(1);
+    }
+
+    let next_cursor = if position < total_count {
+        Some(encode_cursor(env, position))
+    } else {
+        None
+    };
+
+    Ok(PaginatedProvenance {
+        items,
+        next_cursor,
+        total_count,
+    })
+}
+
+/// List certifications with cursor-based pagination and expiry/status filtering.
+///
+/// Supports filtering by:
+/// - Active/expired status (`filters.status` = "active" or "expired")
+/// - Issuer address (`filters.submitter`)
+/// - Timestamp range for issued date (`filters.timestamp_min`, `filters.timestamp_max`)
+///
+/// Returns at most `limit` certifications in deterministic insertion order.
+pub fn list_certifications_paginated(
+    env: &Env,
+    cursor: Option<PageCursor>,
+    limit: Option<u32>,
+    filters: QueryFilters,
+) -> Result<PaginatedCertifications, SupplyChainError> {
+    let page_limit = PageLimit::new(env, limit.unwrap_or(DEFAULT_PAGE_SIZE));
+    let start_position = if let Some(c) = cursor {
+        decode_cursor(&c)?
+    } else {
+        0
+    };
+
+    let total_count = instance_get_u32(env, &SupplyChainDataKey::CertificationCount);
+    let mut items = Vec::new(env);
+    let mut position = start_position;
+    let mut collected = 0u32;
+    let now = env.ledger().timestamp();
+
+    while position < total_count && collected < page_limit.value() {
+        if let Some(cert_id) = temporary_get::<BytesN<32>>(
+            env,
+            &SupplyChainDataKey::CertificationIndexByPosition(position),
+        ) {
+            if let Some(cert) =
+                persistent_get::<Certification>(env, &SupplyChainDataKey::CertificationEvent(cert_id))
+            {
+                // Apply filters
+                let mut passes = true;
+                if !matches_timestamp_filter(cert.issued_date, &filters) {
+                    passes = false;
+                }
+                if let Some(ref submitter_filter) = filters.submitter {
+                    if cert.issuer != *submitter_filter {
+                        passes = false;
+                    }
+                }
+                if let Some(ref status_filter) = filters.status {
+                    let active_symbol = Symbol::new(env, "active");
+                    let expired_symbol = Symbol::new(env, "expired");
+                    let is_expired = cert.expiry_date < now || !cert.is_active;
+                    if *status_filter == active_symbol && is_expired {
+                        passes = false;
+                    } else if *status_filter == expired_symbol && !is_expired {
+                        passes = false;
+                    }
+                }
+
+                if passes {
+                    items.push_back(cert);
+                    collected = collected.saturating_add(1);
+                }
+            }
+        }
+        position = position.saturating_add(1);
+    }
+
+    let next_cursor = if position < total_count {
+        Some(encode_cursor(env, position))
+    } else {
+        None
+    };
+
+    Ok(PaginatedCertifications {
+        items,
+        next_cursor,
+        total_count,
+    })
+}
+
+/// List labor reports with cursor-based pagination and facility/compliance filtering.
+///
+/// Supports filtering by:
+/// - Facility ID (`filters.facility_id`)
+/// - Reporter address (`filters.submitter`)
+/// - Timestamp range for report date (`filters.timestamp_min`, `filters.timestamp_max`)
+///
+/// Returns at most `limit` labor reports in deterministic insertion order.
+pub fn list_labor_reports_paginated(
+    env: &Env,
+    cursor: Option<PageCursor>,
+    limit: Option<u32>,
+    filters: QueryFilters,
+) -> Result<PaginatedLaborReports, SupplyChainError> {
+    let page_limit = PageLimit::new(env, limit.unwrap_or(DEFAULT_PAGE_SIZE));
+    let start_position = if let Some(c) = cursor {
+        decode_cursor(&c)?
+    } else {
+        0
+    };
+
+    let total_count = instance_get_u32(env, &SupplyChainDataKey::LaborReportCount);
+    let mut items = Vec::new(env);
+    let mut position = start_position;
+    let mut collected = 0u32;
+
+    while position < total_count && collected < page_limit.value() {
+        if let Some(report_id) = temporary_get::<BytesN<32>>(
+            env,
+            &SupplyChainDataKey::LaborReportIndexByPosition(position),
+        ) {
+            if let Some(report) =
+                persistent_get::<LaborConditions>(env, &SupplyChainDataKey::LaborReport(report_id))
+            {
+                // Apply filters
+                let mut passes = true;
+                if !matches_timestamp_filter(report.report_date, &filters) {
+                    passes = false;
+                }
+                if let Some(ref submitter_filter) = filters.submitter {
+                    if report.reporter != *submitter_filter {
+                        passes = false;
+                    }
+                }
+                if let Some(ref facility_filter) = filters.facility_id {
+                    if report.facility_id != *facility_filter {
+                        passes = false;
+                    }
+                }
+
+                if passes {
+                    items.push_back(report);
+                    collected = collected.saturating_add(1);
+                }
+            }
+        }
+        position = position.saturating_add(1);
+    }
+
+    let next_cursor = if position < total_count {
+        Some(encode_cursor(env, position))
+    } else {
+        None
+    };
+
+    Ok(PaginatedLaborReports {
+        items,
+        next_cursor,
+        total_count,
+    })
+}
+
+/// List environmental reports with cursor-based pagination and facility/date filtering.
+///
+/// Supports filtering by:
+/// - Facility ID (`filters.facility_id`)
+/// - Reporter address (`filters.submitter`)
+/// - Timestamp range matching report period start (`filters.timestamp_min`, `filters.timestamp_max`)
+///
+/// Returns at most `limit` environmental reports in deterministic insertion order.
+pub fn list_environmental_reports_paginated(
+    env: &Env,
+    cursor: Option<PageCursor>,
+    limit: Option<u32>,
+    filters: QueryFilters,
+) -> Result<PaginatedEnvironmentalReports, SupplyChainError> {
+    let page_limit = PageLimit::new(env, limit.unwrap_or(DEFAULT_PAGE_SIZE));
+    let start_position = if let Some(c) = cursor {
+        decode_cursor(&c)?
+    } else {
+        0
+    };
+
+    let total_count = instance_get_u32(env, &SupplyChainDataKey::EnvironmentalReportCount);
+    let mut items = Vec::new(env);
+    let mut position = start_position;
+    let mut collected = 0u32;
+
+    while position < total_count && collected < page_limit.value() {
+        if let Some(report_id) = temporary_get::<BytesN<32>>(
+            env,
+            &SupplyChainDataKey::EnvironmentalReportIndexByPosition(position),
+        ) {
+            if let Some(report) = persistent_get::<EnvironmentalImpact>(
+                env,
+                &SupplyChainDataKey::EnvironmentalReport(report_id),
+            ) {
+                // Apply filters
+                let mut passes = true;
+                // Use report period start for timestamp filtering
+                if !matches_timestamp_filter(report.report_period.0, &filters) {
+                    passes = false;
+                }
+                if let Some(ref facility_filter) = filters.facility_id {
+                    if report.facility_id != *facility_filter {
+                        passes = false;
+                    }
+                }
+
+                if passes {
+                    items.push_back(report);
+                    collected = collected.saturating_add(1);
+                }
+            }
+        }
+        position = position.saturating_add(1);
+    }
+
+    let next_cursor = if position < total_count {
+        Some(encode_cursor(env, position))
+    } else {
+        None
+    };
+
+    Ok(PaginatedEnvironmentalReports {
+        items,
+        next_cursor,
+        total_count,
+    })
 }

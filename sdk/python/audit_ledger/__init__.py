@@ -122,7 +122,21 @@ from .suptech_rules import (
     RuleQueryPage,
     query_rules,
 )
-
+from .supply_chain import (
+    Brand,
+    ProductSKU,
+    Provenance,
+    Certification,
+    LaborConditions,
+    EnvironmentalImpact,
+    Location,
+    CustodyTransfer,
+    AuditEntry,
+    SupplyChainQueryFilters,
+    PaginatedResult,
+    SupplyChainClient,
+    paginate_all_async,
+)
 
 
 __all__ = [
@@ -190,4 +204,18 @@ __all__ = [
     "RuleQueryFilter",
     "RuleQueryPage",
     "query_rules",
+    # Supply chain pagination & filtering (#872)
+    "Brand",
+    "ProductSKU",
+    "Provenance",
+    "Certification",
+    "LaborConditions",
+    "EnvironmentalImpact",
+    "Location",
+    "CustodyTransfer",
+    "AuditEntry",
+    "SupplyChainQueryFilters",
+    "PaginatedResult",
+    "SupplyChainClient",
+    "paginate_all_async",
 ]

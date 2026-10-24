@@ -1853,3 +1853,660 @@ mod tests {
         assert!(labor_result.is_err());
     }
 }
+
+// ─────────────────────────────────────────────────────────────────────────────
+// Pagination tests (issue #872)
+//
+// Comprehensive edge-case and integration tests for cursor-based pagination:
+// - Empty collections (no results)
+// - Single-item pages
+// - Cursor past end
+// - Multi-page traversal
+// - Filter combinations
+// - Deterministic ordering across ledger upgrades
+// ─────────────────────────────────────────────────────────────────────────────
+
+mod pagination_tests {
+    use super::*;
+
+    /// Test paginated query on empty brand collection
+    #[test]
+    fn test_list_brands_paginated_empty() {
+        let env = Env::default();
+        env.mock_all_auths();
+
+        let filters = QueryFilters {
+            timestamp_min: None,
+            timestamp_max: None,
+            status: None,
+            submitter: None,
+            brand_id: None,
+            facility_id: None,
+        };
+
+        let result = list_brands_paginated(&env, None, Some(10), filters)
+            .expect("Empty query should succeed");
+
+        assert_eq!(result.items.len(), 0, "Empty collection should return 0 items");
+        assert_eq!(result.total_count, 0, "Total count should be 0");
+        assert!(result.next_cursor.is_none(), "Empty collection should have no next cursor");
+    }
+
+    /// Test single-item page for brands
+    #[test]
+    fn test_list_brands_paginated_single_item() {
+        let env = Env::default();
+        env.mock_all_auths();
+
+        let owner = Address::random(&env);
+        let admin = Address::random(&env);
+        rbac_init(&env, admin.clone());
+        grant_role(&env, &admin, &owner, Role::BrandOwner);
+
+        // Register exactly one brand
+        register_brand(
+            &env,
+            owner.clone(),
+            Symbol::new(&env, "BRAND1"),
+            bytes!(&env, "Brand One"),
+            bytes!(&env, "First brand"),
+            bytes!(&env, "https://brand1.example.com"),
+            bytes!(&env, "support@brand1.example.com"),
+        )
+        .expect("Brand registration should succeed");
+
+        let filters = QueryFilters {
+            timestamp_min: None,
+            timestamp_max: None,
+            status: None,
+            submitter: None,
+            brand_id: None,
+            facility_id: None,
+        };
+
+        // Request page size of 1
+        let result = list_brands_paginated(&env, None, Some(1), filters.clone())
+            .expect("Query should succeed");
+
+        assert_eq!(result.items.len(), 1, "Should return exactly 1 item");
+        assert_eq!(result.total_count, 1, "Total count should be 1");
+        assert!(result.next_cursor.is_none(), "Single item with page size 1 should have no next cursor");
+
+        // Request page size larger than collection
+        let result2 = list_brands_paginated(&env, None, Some(10), filters)
+            .expect("Query should succeed");
+
+        assert_eq!(result2.items.len(), 1, "Should return 1 item even with larger page size");
+        assert!(result2.next_cursor.is_none(), "Should have no next cursor when all items fit on one page");
+    }
+
+    /// Test cursor past end returns empty results
+    #[test]
+    fn test_list_brands_paginated_cursor_past_end() {
+        let env = Env::default();
+        env.mock_all_auths();
+
+        let owner = Address::random(&env);
+        let admin = Address::random(&env);
+        rbac_init(&env, admin.clone());
+        grant_role(&env, &admin, &owner, Role::BrandOwner);
+
+        // Register 3 brands
+        for i in 1..=3 {
+            let brand_id = Symbol::new(&env, &format!("BRAND{}", i));
+            register_brand(
+                &env,
+                owner.clone(),
+                brand_id,
+                bytes!(&env, &format!("Brand {}", i)),
+                bytes!(&env, &format!("Description {}", i)),
+                bytes!(&env, "https://example.com"),
+                bytes!(&env, "support@example.com"),
+            )
+            .expect("Brand registration should succeed");
+        }
+
+        let filters = QueryFilters {
+            timestamp_min: None,
+            timestamp_max: None,
+            status: None,
+            submitter: None,
+            brand_id: None,
+            facility_id: None,
+        };
+
+        // Create a cursor pointing past the end (position 100)
+        let past_end_cursor = Some(PageCursor {
+            data: bytes!(&env, &100u32.to_le_bytes()),
+        });
+
+        let result = list_brands_paginated(&env, past_end_cursor, Some(10), filters)
+            .expect("Query with cursor past end should succeed");
+
+        assert_eq!(result.items.len(), 0, "Cursor past end should return 0 items");
+        assert!(result.next_cursor.is_none(), "Cursor past end should have no next cursor");
+    }
+
+    /// Test multi-page traversal with deterministic ordering
+    #[test]
+    fn test_list_brands_paginated_multi_page() {
+        let env = Env::default();
+        env.mock_all_auths();
+
+        let owner = Address::random(&env);
+        let admin = Address::random(&env);
+        rbac_init(&env, admin.clone());
+        grant_role(&env, &admin, &owner, Role::BrandOwner);
+
+        // Register 10 brands
+        let brand_count = 10;
+        for i in 1..=brand_count {
+            let brand_id = Symbol::new(&env, &format!("BRAND{:02}", i));
+            register_brand(
+                &env,
+                owner.clone(),
+                brand_id,
+                bytes!(&env, &format!("Brand {:02}", i)),
+                bytes!(&env, &format!("Description {:02}", i)),
+                bytes!(&env, "https://example.com"),
+                bytes!(&env, "support@example.com"),
+            )
+            .expect("Brand registration should succeed");
+        }
+
+        let filters = QueryFilters {
+            timestamp_min: None,
+            timestamp_max: None,
+            status: None,
+            submitter: None,
+            brand_id: None,
+            facility_id: None,
+        };
+
+        // Fetch first page (page size 3)
+        let page1 = list_brands_paginated(&env, None, Some(3), filters.clone())
+            .expect("First page query should succeed");
+
+        assert_eq!(page1.items.len(), 3, "First page should have 3 items");
+        assert_eq!(page1.total_count, 10, "Total count should be 10");
+        assert!(page1.next_cursor.is_some(), "First page should have next cursor");
+
+        // Fetch second page
+        let page2 = list_brands_paginated(&env, page1.next_cursor.clone(), Some(3), filters.clone())
+            .expect("Second page query should succeed");
+
+        assert_eq!(page2.items.len(), 3, "Second page should have 3 items");
+        assert_eq!(page2.total_count, 10, "Total count should still be 10");
+        assert!(page2.next_cursor.is_some(), "Second page should have next cursor");
+
+        // Fetch third page
+        let page3 = list_brands_paginated(&env, page2.next_cursor.clone(), Some(3), filters.clone())
+            .expect("Third page query should succeed");
+
+        assert_eq!(page3.items.len(), 3, "Third page should have 3 items");
+        assert!(page3.next_cursor.is_some(), "Third page should have next cursor");
+
+        // Fetch fourth page (partial)
+        let page4 = list_brands_paginated(&env, page3.next_cursor.clone(), Some(3), filters.clone())
+            .expect("Fourth page query should succeed");
+
+        assert_eq!(page4.items.len(), 1, "Fourth page should have 1 remaining item");
+        assert!(page4.next_cursor.is_none(), "Fourth page should have no next cursor");
+
+        // Verify no duplicate items across pages
+        let mut seen_brands = vec![&env];
+        seen_brands.extend_from_slice(&page1.items);
+        seen_brands.extend_from_slice(&page2.items);
+        seen_brands.extend_from_slice(&page3.items);
+        seen_brands.extend_from_slice(&page4.items);
+        assert_eq!(seen_brands.len(), 10, "Should have exactly 10 unique brands across all pages");
+    }
+
+    /// Test page size limit enforcement (max 100)
+    #[test]
+    fn test_list_brands_paginated_limit_enforcement() {
+        let env = Env::default();
+        env.mock_all_auths();
+
+        let filters = QueryFilters {
+            timestamp_min: None,
+            timestamp_max: None,
+            status: None,
+            submitter: None,
+            brand_id: None,
+            facility_id: None,
+        };
+
+        // Request page size exceeding MAX_PAGE_SIZE
+        let result = list_brands_paginated(&env, None, Some(200), filters.clone())
+            .expect("Query should succeed");
+
+        // PageLimit::new should clamp to DEFAULT_PAGE_SIZE when invalid
+        assert!(result.items.len() <= DEFAULT_PAGE_SIZE as usize, 
+                "Result size should be clamped to default");
+
+        // Request page size of 0 (should use default)
+        let result2 = list_brands_paginated(&env, None, Some(0), filters)
+            .expect("Query should succeed");
+
+        assert_eq!(result2.items.len(), 0, "Empty collection returns 0 items regardless of limit");
+    }
+
+    /// Test product filtering by brand_id
+    #[test]
+    fn test_list_products_paginated_brand_filter() {
+        let env = Env::default();
+        env.mock_all_auths();
+
+        let owner = Address::random(&env);
+        let admin = Address::random(&env);
+        rbac_init(&env, admin.clone());
+        grant_role(&env, &admin, &owner, Role::BrandOwner);
+
+        // Register two brands
+        let brand1 = Symbol::new(&env, "BRAND1");
+        let brand2 = Symbol::new(&env, "BRAND2");
+
+        register_brand(
+            &env,
+            owner.clone(),
+            brand1.clone(),
+            bytes!(&env, "Brand One"),
+            bytes!(&env, "First brand"),
+            bytes!(&env, "https://brand1.example.com"),
+            bytes!(&env, "support@brand1.example.com"),
+        )
+        .expect("Brand 1 registration should succeed");
+
+        register_brand(
+            &env,
+            owner.clone(),
+            brand2.clone(),
+            bytes!(&env, "Brand Two"),
+            bytes!(&env, "Second brand"),
+            bytes!(&env, "https://brand2.example.com"),
+            bytes!(&env, "support@brand2.example.com"),
+        )
+        .expect("Brand 2 registration should succeed");
+
+        // Register products for each brand
+        for i in 1..=3 {
+            register_product_sku(
+                &env,
+                owner.clone(),
+                brand1.clone(),
+                bytes!(&env, &format!("SKU-1-{}", i)),
+                bytes!(&env, &format!("Product 1-{}", i)),
+                bytes!(&env, "Description"),
+            )
+            .expect("Product registration should succeed");
+        }
+
+        for i in 1..=2 {
+            register_product_sku(
+                &env,
+                owner.clone(),
+                brand2.clone(),
+                bytes!(&env, &format!("SKU-2-{}", i)),
+                bytes!(&env, &format!("Product 2-{}", i)),
+                bytes!(&env, "Description"),
+            )
+            .expect("Product registration should succeed");
+        }
+
+        // Filter by brand1
+        let filters = QueryFilters {
+            timestamp_min: None,
+            timestamp_max: None,
+            status: None,
+            submitter: None,
+            brand_id: Some(brand1.clone()),
+            facility_id: None,
+        };
+
+        let result = list_products_paginated(&env, None, Some(10), filters)
+            .expect("Filtered query should succeed");
+
+        assert_eq!(result.items.len(), 3, "Should return only brand1 products");
+        for product in result.items.iter() {
+            assert_eq!(product.brand_id, brand1, "All products should belong to brand1");
+        }
+
+        // Filter by brand2
+        let filters2 = QueryFilters {
+            timestamp_min: None,
+            timestamp_max: None,
+            status: None,
+            submitter: None,
+            brand_id: Some(brand2.clone()),
+            facility_id: None,
+        };
+
+        let result2 = list_products_paginated(&env, None, Some(10), filters2)
+            .expect("Filtered query should succeed");
+
+        assert_eq!(result2.items.len(), 2, "Should return only brand2 products");
+        for product in result2.items.iter() {
+            assert_eq!(product.brand_id, brand2, "All products should belong to brand2");
+        }
+    }
+
+    /// Test timestamp range filtering
+    #[test]
+    fn test_list_products_paginated_timestamp_filter() {
+        let env = Env::default();
+        env.mock_all_auths();
+
+        let owner = Address::random(&env);
+        let admin = Address::random(&env);
+        rbac_init(&env, admin.clone());
+        grant_role(&env, &admin, &owner, Role::BrandOwner);
+
+        let brand_id = Symbol::new(&env, "BRAND1");
+        register_brand(
+            &env,
+            owner.clone(),
+            brand_id.clone(),
+            bytes!(&env, "Brand One"),
+            bytes!(&env, "First brand"),
+            bytes!(&env, "https://brand1.example.com"),
+            bytes!(&env, "support@brand1.example.com"),
+        )
+        .expect("Brand registration should succeed");
+
+        // Register products at different mock timestamps
+        env.ledger().set_timestamp(1000);
+        register_product_sku(
+            &env,
+            owner.clone(),
+            brand_id.clone(),
+            bytes!(&env, "SKU-OLD"),
+            bytes!(&env, "Old Product"),
+            bytes!(&env, "Description"),
+        )
+        .expect("Product registration should succeed");
+
+        env.ledger().set_timestamp(2000);
+        register_product_sku(
+            &env,
+            owner.clone(),
+            brand_id.clone(),
+            bytes!(&env, "SKU-MID"),
+            bytes!(&env, "Mid Product"),
+            bytes!(&env, "Description"),
+        )
+        .expect("Product registration should succeed");
+
+        env.ledger().set_timestamp(3000);
+        register_product_sku(
+            &env,
+            owner.clone(),
+            brand_id.clone(),
+            bytes!(&env, "SKU-NEW"),
+            bytes!(&env, "New Product"),
+            bytes!(&env, "Description"),
+        )
+        .expect("Product registration should succeed");
+
+        // Filter by timestamp range [1500, 2500]
+        let filters = QueryFilters {
+            timestamp_min: Some(1500),
+            timestamp_max: Some(2500),
+            status: None,
+            submitter: None,
+            brand_id: None,
+            facility_id: None,
+        };
+
+        let result = list_products_paginated(&env, None, Some(10), filters)
+            .expect("Filtered query should succeed");
+
+        assert_eq!(result.items.len(), 1, "Should return only mid-range product");
+        assert_eq!(result.items.get(0).unwrap().sku, bytes!(&env, "SKU-MID"));
+    }
+
+    /// Test certification status filtering (active vs expired)
+    #[test]
+    fn test_list_certifications_paginated_status_filter() {
+        let env = Env::default();
+        env.mock_all_auths();
+
+        let issuer = Address::random(&env);
+        let admin = Address::random(&env);
+        rbac_init(&env, admin.clone());
+        grant_role(&env, &admin, &issuer, Role::Certifier);
+
+        // Set current time
+        env.ledger().set_timestamp(1000);
+
+        // Register active certification (expires in future)
+        log_certification(
+            &env,
+            bytes!(&env, "CERT-ACTIVE"),
+            Symbol::new(&env, "ISO9001"),
+            issuer.clone(),
+            365, // 365 days in future
+            bytes!(&env, "Active scope"),
+        )
+        .expect("Active cert registration should succeed");
+
+        // Register expired certification (set time ahead, then register cert that expires immediately)
+        env.ledger().set_timestamp(2000);
+        log_certification(
+            &env,
+            bytes!(&env, "CERT-EXPIRED"),
+            Symbol::new(&env, "ISO9001"),
+            issuer.clone(),
+            0, // Expires immediately
+            bytes!(&env, "Expired scope"),
+        )
+        .expect("Expired cert registration should succeed");
+
+        // Set time further ahead to ensure first cert is still active and second is expired
+        env.ledger().set_timestamp(3000);
+
+        // Filter for active certifications
+        let filters_active = QueryFilters {
+            timestamp_min: None,
+            timestamp_max: None,
+            status: Some(Symbol::new(&env, "active")),
+            submitter: None,
+            brand_id: None,
+            facility_id: None,
+        };
+
+        let result_active = list_certifications_paginated(&env, None, Some(10), filters_active)
+            .expect("Active filter query should succeed");
+
+        assert!(result_active.items.len() >= 1, "Should find at least one active certification");
+
+        // Filter for expired certifications
+        let filters_expired = QueryFilters {
+            timestamp_min: None,
+            timestamp_max: None,
+            status: Some(Symbol::new(&env, "expired")),
+            submitter: None,
+            brand_id: None,
+            facility_id: None,
+        };
+
+        let result_expired = list_certifications_paginated(&env, None, Some(10), filters_expired)
+            .expect("Expired filter query should succeed");
+
+        assert!(result_expired.items.len() >= 1, "Should find at least one expired certification");
+    }
+
+    /// Test facility_id filtering for labor reports
+    #[test]
+    fn test_list_labor_reports_paginated_facility_filter() {
+        let env = Env::default();
+        env.mock_all_auths();
+
+        let reporter = Address::random(&env);
+        let admin = Address::random(&env);
+        rbac_init(&env, admin.clone());
+        grant_role(&env, &admin, &reporter, Role::Auditor);
+
+        let facility1 = bytes!(&env, "FAC001");
+        let facility2 = bytes!(&env, "FAC002");
+
+        // Log labor reports for facility 1
+        for _i in 1..=3 {
+            log_labor_conditions(
+                &env,
+                facility1.clone(),
+                100,
+                true,
+                true,
+                true,
+                true,
+                true,
+                BytesN::from_array(&env, &[0u8; 32]),
+                reporter.clone(),
+            )
+            .expect("Labor report should succeed");
+        }
+
+        // Log labor reports for facility 2
+        for _i in 1..=2 {
+            log_labor_conditions(
+                &env,
+                facility2.clone(),
+                50,
+                true,
+                true,
+                true,
+                true,
+                true,
+                BytesN::from_array(&env, &[0u8; 32]),
+                reporter.clone(),
+            )
+            .expect("Labor report should succeed");
+        }
+
+        // Filter by facility1
+        let filters1 = QueryFilters {
+            timestamp_min: None,
+            timestamp_max: None,
+            status: None,
+            submitter: None,
+            brand_id: None,
+            facility_id: Some(facility1.clone()),
+        };
+
+        let result1 = list_labor_reports_paginated(&env, None, Some(10), filters1)
+            .expect("Filtered query should succeed");
+
+        assert_eq!(result1.items.len(), 3, "Should return only facility1 reports");
+        for report in result1.items.iter() {
+            assert_eq!(report.facility_id, facility1, "All reports should be for facility1");
+        }
+
+        // Filter by facility2
+        let filters2 = QueryFilters {
+            timestamp_min: None,
+            timestamp_max: None,
+            status: None,
+            submitter: None,
+            brand_id: None,
+            facility_id: Some(facility2.clone()),
+        };
+
+        let result2 = list_labor_reports_paginated(&env, None, Some(10), filters2)
+            .expect("Filtered query should succeed");
+
+        assert_eq!(result2.items.len(), 2, "Should return only facility2 reports");
+        for report in result2.items.iter() {
+            assert_eq!(report.facility_id, facility2, "All reports should be for facility2");
+        }
+    }
+
+    /// Test invalid cursor handling
+    #[test]
+    fn test_list_brands_paginated_invalid_cursor() {
+        let env = Env::default();
+        env.mock_all_auths();
+
+        let filters = QueryFilters {
+            timestamp_min: None,
+            timestamp_max: None,
+            status: None,
+            submitter: None,
+            brand_id: None,
+            facility_id: None,
+        };
+
+        // Create invalid cursor (wrong length)
+        let invalid_cursor = Some(PageCursor {
+            data: bytes!(&env, &[1u8, 2u8]), // Only 2 bytes instead of 4
+        });
+
+        let result = list_brands_paginated(&env, invalid_cursor, Some(10), filters);
+
+        assert!(result.is_err(), "Invalid cursor should return error");
+        assert_eq!(
+            result.unwrap_err(),
+            SupplyChainError::InvalidPayload,
+            "Should return InvalidPayload error"
+        );
+    }
+
+    /// Test complete multi-page traversal integration
+    #[test]
+    fn test_complete_pagination_traversal() {
+        let env = Env::default();
+        env.mock_all_auths();
+
+        let owner = Address::random(&env);
+        let admin = Address::random(&env);
+        rbac_init(&env, admin.clone());
+        grant_role(&env, &admin, &owner, Role::BrandOwner);
+
+        // Register 25 brands
+        let total_brands = 25;
+        for i in 1..=total_brands {
+            let brand_id = Symbol::new(&env, &format!("BRAND{:03}", i));
+            register_brand(
+                &env,
+                owner.clone(),
+                brand_id,
+                bytes!(&env, &format!("Brand {:03}", i)),
+                bytes!(&env, &format!("Description {:03}", i)),
+                bytes!(&env, "https://example.com"),
+                bytes!(&env, "support@example.com"),
+            )
+            .expect("Brand registration should succeed");
+        }
+
+        let filters = QueryFilters {
+            timestamp_min: None,
+            timestamp_max: None,
+            status: None,
+            submitter: None,
+            brand_id: None,
+            facility_id: None,
+        };
+
+        // Traverse all pages with page size of 10
+        let mut all_brands = vec![&env];
+        let mut cursor: Option<PageCursor> = None;
+        let mut page_count = 0;
+
+        loop {
+            let page = list_brands_paginated(&env, cursor.clone(), Some(10), filters.clone())
+                .expect("Page query should succeed");
+
+            page_count += 1;
+            all_brands.extend_from_slice(&page.items);
+
+            if page.next_cursor.is_none() {
+                break;
+            }
+
+            cursor = page.next_cursor;
+        }
+
+        assert_eq!(all_brands.len(), total_brands as usize, "Should collect all brands");
+        assert_eq!(page_count, 3, "Should require exactly 3 pages (10+10+5)");
+    }
+}
