@@ -1,7 +1,82 @@
 #![allow(dead_code)]
 
 use crate::rbac::{RbacManager, Role};
-use soroban_sdk::{contracterror, contracttype, Address, Bytes, BytesN, Env, String, Symbol, Vec};
+use soroban_sdk::{contracterror, contracttype, panic_with_error, Address, Bytes, BytesN, Env, String, Symbol, Vec};
+
+const MAX_CREDITS_PER_ACCOUNT: u32 = 256;
+const MAX_VERIFICATION_RECORDS: u32 = 64;
+const MAX_EVIDENCE_ITEMS: u32 = 32;
+const MAX_INPUT_BYTES: u32 = 1024;
+const MAX_CARBON_TONNES: u32 = 1_000_000;
+const MAX_ENERGY_MWH: u32 = 1_000_000;
+const MAX_OFFSET_VALIDITY_SECONDS: u64 = 10 * 365 * 24 * 60 * 60;
+
+// Raw issuance payloads are capped at 39 KiB (32 KiB certifications plus seven
+// 1 KiB fields), before Soroban encoding overhead. Validation scans at most 32
+// certifications; portfolios scan 256 credits and each credit keeps 64 audits.
+
+fn enforce_collection_limit(env: &Env, length: u32, maximum: u32) {
+    if length > maximum {
+        panic_with_error!(env, CarbonCreditError::CollectionLimitExceeded);
+    }
+}
+
+fn enforce_bytes_limit(env: &Env, value: &Bytes) {
+    if value.len() > MAX_INPUT_BYTES {
+        panic_with_error!(env, CarbonCreditError::InputTooLarge);
+    }
+}
+
+fn checked_add(env: &Env, left: u32, right: u32) -> u32 {
+    left.checked_add(right)
+        .unwrap_or_else(|| panic_with_error!(env, CarbonCreditError::ArithmeticOverflow))
+}
+
+fn checked_mul(env: &Env, left: u32, right: u32) -> u32 {
+    left.checked_mul(right)
+        .unwrap_or_else(|| panic_with_error!(env, CarbonCreditError::ArithmeticOverflow))
+}
+
+fn validate_issue_payload(
+    env: &Env,
+    carbon_tonnes: u32,
+    renewable_source: &RenewableEnergySource,
+    offset: &Offset,
+    registry: &RegistryEntry,
+) {
+    if carbon_tonnes == 0 || carbon_tonnes > MAX_CARBON_TONNES {
+        panic_with_error!(env, CarbonCreditError::InvalidCarbonAmount);
+    }
+    if renewable_source.energy_generated_mwh > MAX_ENERGY_MWH {
+        panic_with_error!(env, CarbonCreditError::InvalidInput);
+    }
+    if renewable_source.capacity_mw > MAX_ENERGY_MWH || offset.tonnes_co2e > MAX_CARBON_TONNES {
+        panic_with_error!(env, CarbonCreditError::InvalidInput);
+    }
+    let now = env.ledger().timestamp();
+    let max_expiration = now
+        .checked_add(MAX_OFFSET_VALIDITY_SECONDS)
+        .unwrap_or_else(|| panic_with_error!(env, CarbonCreditError::ArithmeticOverflow));
+    if renewable_source.verification_date > now
+        || offset.verification_date > now
+        || offset.expiration_date < now
+        || offset.expiration_date > max_expiration
+        || registry.issuance_date > now
+    {
+        panic_with_error!(env, CarbonCreditError::InvalidInput);
+    }
+    enforce_collection_limit(env, renewable_source.certifications.len(), MAX_EVIDENCE_ITEMS);
+    for certification in renewable_source.certifications.iter() {
+        enforce_bytes_limit(env, &certification);
+    }
+    enforce_bytes_limit(env, &renewable_source.facility_id);
+    enforce_bytes_limit(env, &renewable_source.location);
+    enforce_bytes_limit(env, &offset.project_id);
+    enforce_bytes_limit(env, &offset.project_location);
+    enforce_bytes_limit(env, &registry.registry_id);
+    enforce_bytes_limit(env, &registry.registry_name);
+    enforce_bytes_limit(env, &registry.registry_url);
+}
 
 /// Carbon credit tracking error types
 #[contracterror]
@@ -32,6 +107,14 @@ pub enum CarbonCreditError {
     InvalidTokenization = 3011,
     /// Transfer failed
     TransferFailed = 3012,
+    /// Input exceeds the deterministic payload bounds
+    InputTooLarge = 3013,
+    /// A collection exceeds its configured maximum length
+    CollectionLimitExceeded = 3014,
+    /// Checked arithmetic overflowed
+    ArithmeticOverflow = 3015,
+    /// Input values are outside supported bounds
+    InvalidInput = 3016,
 }
 
 /// Carbon credit status
@@ -299,11 +382,30 @@ pub fn issue_carbon_credit(
         return BytesN::from_array(&env, &[0u8; 32]);
     }
 
+    validate_issue_payload(env, carbon_tonnes, &renewable_source, &offset, &registry);
+
+    let count: u32 = env
+        .storage()
+        .persistent()
+        .get(&CarbonCreditKey::CreditCounter)
+        .unwrap_or(0);
+    let next_count = checked_add(env, count, 1);
+
+    let mut issuer_credits: Vec<BytesN<32>> = env
+        .storage()
+        .persistent()
+        .get(&CarbonCreditKey::IssuerCredits(issuer.clone()))
+        .unwrap_or_else(|| Vec::new(env));
+    if issuer_credits.len() >= MAX_CREDITS_PER_ACCOUNT {
+        panic_with_error!(env, CarbonCreditError::CollectionLimitExceeded);
+    }
+
     // Deterministic binary preimage (strkey bytes + LE numerics): `format!` and
     // `Display for soroban_sdk::String` are unavailable in the wasm contract build.
     let mut credit_preimage = Bytes::from_slice(env, &carbon_tonnes.to_le_bytes());
     credit_preimage.append(&issuer.to_string().to_bytes());
     credit_preimage.extend_from_slice(&env.ledger().timestamp().to_le_bytes());
+    credit_preimage.extend_from_slice(&count.to_le_bytes());
     let credit_id = env.crypto().sha256(&credit_preimage).to_bytes();
 
     let credit = CarbonCredit {
@@ -334,25 +436,14 @@ pub fn issue_carbon_credit(
         .set(&CarbonCreditKey::CarbonCredit(credit_id.clone()), &credit);
 
     // Add to issuer index
-    let mut issuer_credits: Vec<BytesN<32>> = env
-        .storage()
-        .persistent()
-        .get(&CarbonCreditKey::IssuerCredits(issuer.clone()))
-        .unwrap_or_else(|| Vec::new(env));
     issuer_credits.push_back(credit_id.clone());
     env.storage()
         .persistent()
         .set(&CarbonCreditKey::IssuerCredits(issuer), &issuer_credits);
 
-    // Increment counter
-    let count: u32 = env
-        .storage()
-        .persistent()
-        .get(&CarbonCreditKey::CreditCounter)
-        .unwrap_or(0);
     env.storage()
         .persistent()
-        .set(&CarbonCreditKey::CreditCounter, &(count + 1));
+        .set(&CarbonCreditKey::CreditCounter, &next_count);
 
     emit_carbon_credit_event(
         env,
@@ -374,6 +465,9 @@ pub fn verify_renewable_energy(
     energy_mwh: u32,
 ) -> bool {
     verifier.require_auth();
+    if energy_mwh > MAX_ENERGY_MWH {
+        panic_with_error!(env, CarbonCreditError::InvalidInput);
+    }
     if RbacManager::require_role_min(env, &verifier, Role::Auditor).is_err() {
         return false;
     }
@@ -382,7 +476,11 @@ pub fn verify_renewable_energy(
         .storage()
         .persistent()
         .get(&CarbonCreditKey::CarbonCredit(credit_id.clone()))
-        .unwrap_or_else(|| panic!("Credit not found"));
+        .unwrap_or_else(|| panic_with_error!(env, CarbonCreditError::CreditNotFound));
+
+    if credit.verification_records.len() >= MAX_VERIFICATION_RECORDS {
+        panic_with_error!(env, CarbonCreditError::CollectionLimitExceeded);
+    }
 
     // Verify energy generation matches
     if credit.renewable_source.energy_generated_mwh != energy_mwh {
@@ -437,12 +535,15 @@ pub fn tokenize_credit(
     if RbacManager::require_role_min(env, &token_owner, Role::Submitter).is_err() {
         return BytesN::from_array(&env, &[0u8; 32]);
     }
+    if tokens_to_issue == 0 || tokens_to_issue > i128::MAX as u128 {
+        panic_with_error!(env, CarbonCreditError::InvalidTokenization);
+    }
 
     let mut credit: CarbonCredit = env
         .storage()
         .persistent()
         .get(&CarbonCreditKey::CarbonCredit(credit_id.clone()))
-        .unwrap_or_else(|| panic!("Credit not found"));
+        .unwrap_or_else(|| panic_with_error!(env, CarbonCreditError::CreditNotFound));
 
     let mut token_preimage = Bytes::from_slice(env, b"TOKEN");
     token_preimage.append(&token_owner.to_string().to_bytes());
@@ -459,7 +560,7 @@ pub fn tokenize_credit(
     };
 
     credit.tokenization = tokenization;
-    credit.version += 1;
+    credit.version = checked_add(env, credit.version, 1);
 
     env.storage()
         .persistent()
@@ -489,6 +590,7 @@ pub fn retire_credit(
     _retire_reason: Bytes,
 ) -> bool {
     caller.require_auth();
+    enforce_bytes_limit(env, &_retire_reason);
     if RbacManager::require_role_min(env, &caller, Role::Submitter).is_err() {
         return false;
     }
@@ -497,13 +599,26 @@ pub fn retire_credit(
         .storage()
         .persistent()
         .get(&CarbonCreditKey::CarbonCredit(credit_id.clone()))
-        .unwrap_or_else(|| panic!("Credit not found"));
+        .unwrap_or_else(|| panic_with_error!(env, CarbonCreditError::CreditNotFound));
 
     if credit.status == CreditStatus::Retired {
         return false; // Already retired
     }
 
     let carbon_tonnes = credit.carbon_tonnes;
+    let retired: u32 = env
+        .storage()
+        .persistent()
+        .get(&CarbonCreditKey::RetiredCount)
+        .unwrap_or(0);
+    let next_retired = checked_add(env, retired, 1);
+    let total_co2e: u32 = env
+        .storage()
+        .persistent()
+        .get(&CarbonCreditKey::TotalCo2eRetired)
+        .unwrap_or(0);
+    let next_total_co2e = checked_add(env, total_co2e, carbon_tonnes);
+
     credit.status = CreditStatus::Retired;
     credit.retirement_date = Some(env.ledger().timestamp());
 
@@ -511,28 +626,13 @@ pub fn retire_credit(
         .persistent()
         .set(&CarbonCreditKey::CarbonCredit(credit_id.clone()), &credit);
 
-    // Update global retired count
-    let retired: u32 = env
-        .storage()
-        .persistent()
-        .get(&CarbonCreditKey::RetiredCount)
-        .unwrap_or(0);
     env.storage()
         .persistent()
-        .set(&CarbonCreditKey::RetiredCount, &(retired + 1));
+        .set(&CarbonCreditKey::RetiredCount, &next_retired);
 
-    // Update total CO2e retired
-    let total_co2e: u32 = env
-        .storage()
-        .persistent()
-        .get(&CarbonCreditKey::TotalCo2eRetired)
-        .unwrap_or(0);
     env.storage()
         .persistent()
-        .set(
-            &CarbonCreditKey::TotalCo2eRetired,
-            &(total_co2e + carbon_tonnes),
-        );
+        .set(&CarbonCreditKey::TotalCo2eRetired, &next_total_co2e);
 
     emit_carbon_credit_event(
         env,
@@ -552,7 +652,7 @@ pub fn check_retirement_status(env: &Env, credit_id: BytesN<32>) -> bool {
         .storage()
         .persistent()
         .get(&CarbonCreditKey::CarbonCredit(credit_id))
-        .unwrap_or_else(|| panic!("Credit not found"));
+        .unwrap_or_else(|| panic_with_error!(env, CarbonCreditError::CreditNotFound));
 
     credit.status == CreditStatus::Retired
 }
@@ -571,7 +671,7 @@ pub fn transfer_credit(
         .storage()
         .persistent()
         .get(&CarbonCreditKey::CarbonCredit(credit_id.clone()))
-        .unwrap_or_else(|| panic!("Credit not found"));
+        .unwrap_or_else(|| panic_with_error!(env, CarbonCreditError::CreditNotFound));
 
     if credit.status == CreditStatus::Retired {
         return false; // Can't transfer retired credits
@@ -582,17 +682,19 @@ pub fn transfer_credit(
         credit.tokenization.token_owner = to.clone();
     }
 
-    env.storage()
-        .persistent()
-        .set(&CarbonCreditKey::CarbonCredit(credit_id.clone()), &credit);
-
     // Update holder index
     let mut to_credits: Vec<BytesN<32>> = env
         .storage()
         .persistent()
         .get(&CarbonCreditKey::HolderCredits(to.clone()))
         .unwrap_or_else(|| Vec::new(env));
+    if to_credits.len() >= MAX_CREDITS_PER_ACCOUNT {
+        panic_with_error!(env, CarbonCreditError::CollectionLimitExceeded);
+    }
     to_credits.push_back(credit_id);
+    env.storage()
+        .persistent()
+        .set(&CarbonCreditKey::CarbonCredit(credit_id.clone()), &credit);
     env.storage()
         .persistent()
         .set(&CarbonCreditKey::HolderCredits(to), &to_credits);
@@ -617,6 +719,17 @@ pub fn verify_sustainability_claim(
 ) -> bool {
     verifier.require_auth();
 
+    enforce_collection_limit(
+        _env,
+        claim.supporting_evidence.len(),
+        MAX_EVIDENCE_ITEMS,
+    );
+    enforce_bytes_limit(_env, &claim.claim_id);
+    enforce_bytes_limit(_env, &claim.claim_description);
+    for evidence in claim.supporting_evidence.iter() {
+        enforce_bytes_limit(_env, &evidence);
+    }
+
     // Verify claim has supporting evidence
     if claim.supporting_evidence.is_empty() {
         return false;
@@ -638,6 +751,9 @@ pub fn audit_renewable_usage(
     measured_energy: u32,
 ) -> VerificationRecord {
     auditor.require_auth();
+    if measured_energy > MAX_ENERGY_MWH {
+        panic_with_error!(env, CarbonCreditError::InvalidInput);
+    }
     if RbacManager::require_role_min(env, &auditor, Role::Auditor).is_err() {
         // Return a rejected record when the auditor lacks the required role.
         return VerificationRecord {
@@ -655,15 +771,17 @@ pub fn audit_renewable_usage(
         .storage()
         .persistent()
         .get(&CarbonCreditKey::CarbonCredit(credit_id.clone()))
-        .unwrap_or_else(|| panic!("Credit not found"));
+        .unwrap_or_else(|| panic_with_error!(env, CarbonCreditError::CreditNotFound));
 
     let mut issues = Vec::new(env);
     let mut approved = true;
 
     // Check if measured energy matches recorded
-    if (credit.renewable_source.energy_generated_mwh as i32
-        - measured_energy as i32)
-        .abs() > 100
+    if credit
+        .renewable_source
+        .energy_generated_mwh
+        .abs_diff(measured_energy)
+        > 100
     {
         issues.push_back(Bytes::from_slice(&env, b"Energy mismatch"));
         approved = false;
@@ -685,6 +803,9 @@ pub fn audit_renewable_usage(
         .persistent()
         .get(&CarbonCreditKey::VerificationRecords(credit_id.clone()))
         .unwrap_or_else(|| Vec::new(env));
+    if records.len() >= MAX_VERIFICATION_RECORDS {
+        panic_with_error!(env, CarbonCreditError::CollectionLimitExceeded);
+    }
     records.push_back(record.clone());
     env.storage()
         .persistent()
@@ -715,7 +836,7 @@ pub fn verify_offset_authenticity(
         .storage()
         .persistent()
         .get(&CarbonCreditKey::CarbonCredit(credit_id))
-        .unwrap_or_else(|| panic!("Credit not found"));
+        .unwrap_or_else(|| panic_with_error!(env, CarbonCreditError::CreditNotFound));
 
     // Verify offset has valid verifier
     if credit.offset.verification_body != verifier {
@@ -738,6 +859,7 @@ pub fn register_credit(
     registry_id: Bytes,
 ) -> bool {
     caller.require_auth();
+    enforce_bytes_limit(env, &registry_id);
     if RbacManager::require_role_min(env, &caller, Role::Submitter).is_err() {
         return false;
     }
@@ -746,7 +868,7 @@ pub fn register_credit(
         .storage()
         .persistent()
         .get(&CarbonCreditKey::CarbonCredit(credit_id.clone()))
-        .unwrap_or_else(|| panic!("Credit not found"));
+        .unwrap_or_else(|| panic_with_error!(env, CarbonCreditError::CreditNotFound));
 
     // Update registry registration date
     credit.registry.registry_id = registry_id.clone();
@@ -823,7 +945,7 @@ pub fn link_to_standard(
         .storage()
         .persistent()
         .get(&CarbonCreditKey::CarbonCredit(credit_id.clone()))
-        .unwrap_or_else(|| panic!("Credit not found"));
+        .unwrap_or_else(|| panic_with_error!(env, CarbonCreditError::CreditNotFound));
 
     credit.registry.compliance_standard = standard;
 
@@ -852,7 +974,7 @@ pub fn verify_registry_compliance(
         .storage()
         .persistent()
         .get(&CarbonCreditKey::CarbonCredit(credit_id))
-        .unwrap_or_else(|| panic!("Credit not found"));
+        .unwrap_or_else(|| panic_with_error!(env, CarbonCreditError::CreditNotFound));
 
     // Check if credit is registered
     if credit.registry.registry_id.is_empty() {
@@ -876,7 +998,7 @@ pub fn calculate_carbon_reduction(
         .storage()
         .persistent()
         .get(&CarbonCreditKey::CarbonCredit(credit_id))
-        .unwrap_or_else(|| panic!("Credit not found"));
+        .unwrap_or_else(|| panic_with_error!(env, CarbonCreditError::CreditNotFound));
 
     credit.carbon_tonnes
 }
@@ -914,6 +1036,7 @@ pub fn get_portfolio_status(
         .persistent()
         .get(&CarbonCreditKey::HolderCredits(holder.clone()))
         .unwrap_or_else(|| Vec::new(env));
+    enforce_collection_limit(env, credits.len(), MAX_CREDITS_PER_ACCOUNT);
 
     let mut active = 0;
     let mut retired = 0;
@@ -926,10 +1049,10 @@ pub fn get_portfolio_status(
             .get::<_, CarbonCredit>(&CarbonCreditKey::CarbonCredit(credit_id))
         {
             if credit.status == CreditStatus::Retired {
-                retired += 1;
-                total_co2e_retired += credit.carbon_tonnes;
+                retired = checked_add(env, retired, 1);
+                total_co2e_retired = checked_add(env, total_co2e_retired, credit.carbon_tonnes);
             } else if credit.status == CreditStatus::Active {
-                active += 1;
+                active = checked_add(env, active, 1);
             }
         }
     }
@@ -940,16 +1063,22 @@ pub fn get_portfolio_status(
         active_credits: active,
         retired_credits: retired,
         total_co2e_retired,
-        portfolio_value_usd: active * 15, // Assuming $15 per credit
+        portfolio_value_usd: checked_mul(env, active, 15), // Assuming $15 per credit
         last_updated: env.ledger().timestamp(),
     }
 }
 
 /// Validate sustainability claim
 pub fn validate_claim(
-    _env: &Env,
+    env: &Env,
     claim: SustainabilityClaim,
 ) -> bool {
+    enforce_collection_limit(env, claim.supporting_evidence.len(), MAX_EVIDENCE_ITEMS);
+    enforce_bytes_limit(env, &claim.claim_id);
+    enforce_bytes_limit(env, &claim.claim_description);
+    for evidence in claim.supporting_evidence.iter() {
+        enforce_bytes_limit(env, &evidence);
+    }
     // Check claim has description
     if claim.claim_description.is_empty() {
         return false;
@@ -978,7 +1107,7 @@ pub fn verify_standard_compliance(
         .storage()
         .persistent()
         .get(&CarbonCreditKey::CarbonCredit(credit_id))
-        .unwrap_or_else(|| panic!("Credit not found"));
+        .unwrap_or_else(|| panic_with_error!(env, CarbonCreditError::CreditNotFound));
 
     credit.registry.compliance_standard == standard
 }
@@ -992,7 +1121,7 @@ pub fn check_data_integrity(
         .storage()
         .persistent()
         .get(&CarbonCreditKey::CarbonCredit(credit_id))
-        .unwrap_or_else(|| panic!("Credit not found"));
+        .unwrap_or_else(|| panic_with_error!(env, CarbonCreditError::CreditNotFound));
 
     // Verify carbon amount is reasonable
     if credit.carbon_tonnes == 0 || credit.carbon_tonnes > 1_000_000 {
@@ -1026,7 +1155,7 @@ pub fn get_credit_status(env: &Env, credit_id: BytesN<32>) -> CreditStatus {
         .storage()
         .persistent()
         .get(&CarbonCreditKey::CarbonCredit(credit_id))
-        .unwrap_or_else(|| panic!("Credit not found"));
+        .unwrap_or_else(|| panic_with_error!(env, CarbonCreditError::CreditNotFound));
 
     credit.status
 }
@@ -1036,7 +1165,7 @@ pub fn get_credit_details(env: &Env, credit_id: BytesN<32>) -> CarbonCredit {
     env.storage()
         .persistent()
         .get(&CarbonCreditKey::CarbonCredit(credit_id))
-        .unwrap_or_else(|| panic!("Credit not found"))
+        .unwrap_or_else(|| panic_with_error!(env, CarbonCreditError::CreditNotFound))
 }
 
 /// Get issuer credits
