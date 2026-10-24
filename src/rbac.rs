@@ -295,6 +295,29 @@ pub fn check_role(env: &Env, address: &Address, min_role: Role) -> Result<(), Rb
     RbacManager::require_active_role_min(env, address, min_role)
 }
 
+/// Generic permission check that maps a permission Symbol to the appropriate Role.
+///
+/// This function bridges the gap between string-based permission names used in
+/// ESG reporting and the Role enum. It provides a unified interface for all
+/// modules that need RBAC gating.
+pub fn check_permission(env: &Env, address: &Address, permission: &soroban_sdk::Symbol) -> Result<(), RbacError> {
+    use soroban_sdk::Symbol;
+    
+    // Map permission symbols to minimum required roles
+    let min_role = if permission == &Symbol::new(env, "EsgDataWrite") {
+        Role::Submitter
+    } else if permission == &Symbol::new(env, "EsgReportGenerate") {
+        Role::Submitter
+    } else if permission == &Symbol::new(env, "EsgFrameworkAlign") {
+        Role::Auditor
+    } else {
+        // Default: require Submitter role for unknown permissions
+        Role::Submitter
+    };
+    
+    RbacManager::require_active_role_min(env, address, min_role)
+}
+
 /// Call-site friendly RBAC shim mirroring the concise API used by integration
 /// test suites: `init_admin`, `get_role`, `set_role`, `has_role_min`,
 /// `suspend` / `reinstate`. Thin delegates over [`RbacManager`].
