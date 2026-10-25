@@ -26,6 +26,7 @@ nav:
   - Compliance Events: docs/contract-events/compliance-events.md
   - Financial & RWA Events: docs/contract-events/financial-events.md
   - Governance & Identity Events: docs/contract-events/governance-events.md
+  - Oracle & Dispute Bonds: docs/ORACLE_AND_DISPUTE_RESOLUTION_BONDS.md
 - Compliance:
   - SOC 2: docs/compliance/soc2.md
   - ISO 27001: docs/compliance/iso27001.md
