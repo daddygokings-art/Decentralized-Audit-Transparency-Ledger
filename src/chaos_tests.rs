@@ -698,3 +698,343 @@ fn chaos_recovery_after_cap_removal() {
     client.log_event(&submitter, &payment, &Bytes::from_slice(&env, b"tx3"), &None, &None, &false);
     assert_eq!(client.event_count(&payment), 3);
 }
+
+// ── Merkle Proof and Hash-Chain Integrity Verification (issue #876, #831, #830, #827) ──
+
+fn hash_sorted_pair(env: &Env, a: &BytesN<32>, b: &BytesN<32>) -> BytesN<32> {
+    let (left, right) = if a.to_array() <= b.to_array() {
+        (a, b)
+    } else {
+        (b, a)
+    };
+    let mut concat = Bytes::new(env);
+    concat.append(&left.clone().into());
+    concat.append(&right.clone().into());
+    env.crypto().sha256(&concat)
+}
+
+fn compute_event_merkle_root(env: &Env, leaves: &Vec<BytesN<32>>) -> BytesN<32> {
+    if leaves.is_empty() {
+        return BytesN::from_array(env, &[0u8; 32]);
+    }
+    let mut current_level = leaves.clone();
+    while current_level.len() > 1 {
+        let mut next_level = Vec::new(env);
+        let len = current_level.len();
+        let mut i = 0;
+        while i < len {
+            let left = current_level.get(i).unwrap();
+            let right = if i + 1 < len {
+                current_level.get(i + 1).unwrap()
+            } else {
+                left.clone()
+            };
+            next_level.push_back(hash_sorted_pair(env, &left, &right));
+            i += 2;
+        }
+        current_level = next_level;
+    }
+    current_level.get(0).unwrap()
+}
+
+fn build_event_merkle_proof(env: &Env, leaves: &Vec<BytesN<32>>, index: u32) -> Vec<BytesN<32>> {
+    let mut proof = Vec::new(env);
+    if leaves.is_empty() || index >= leaves.len() {
+        return proof;
+    }
+    let mut current_level = leaves.clone();
+    let mut curr_idx = index;
+
+    while current_level.len() > 1 {
+        let len = current_level.len();
+        let sibling_idx = if curr_idx % 2 == 0 {
+            if curr_idx + 1 < len { curr_idx + 1 } else { curr_idx }
+        } else {
+            curr_idx - 1
+        };
+        proof.push_back(current_level.get(sibling_idx).unwrap());
+
+        let mut next_level = Vec::new(env);
+        let mut i = 0;
+        while i < len {
+            let left = current_level.get(i).unwrap();
+            let right = if i + 1 < len {
+                current_level.get(i + 1).unwrap()
+            } else {
+                left.clone()
+            };
+            next_level.push_back(hash_sorted_pair(env, &left, &right));
+            i += 2;
+        }
+        current_level = next_level;
+        curr_idx /= 2;
+    }
+    proof
+}
+
+fn verify_event_merkle_proof(
+    env: &Env,
+    leaf: &BytesN<32>,
+    proof: &Vec<BytesN<32>>,
+    expected_root: &BytesN<32>,
+) -> bool {
+    let mut current = leaf.clone();
+    for sibling in proof.iter() {
+        current = hash_sorted_pair(env, &current, &sibling);
+    }
+    &current == expected_root
+}
+
+#[test]
+fn chaos_audit_registry_recovery_preserves_hash_chain_and_merkle_root() {
+    let (env, owner, client) = create_ledger();
+    let submitter = Address::generate(&env);
+
+    env.mock_all_auths();
+
+    // 1. Log sequenced events across multiple ledgers
+    env.ledger().set_timestamp(1000);
+    client.log_event(
+        &submitter,
+        &symbol_short!("ev1"),
+        &Bytes::from_slice(&env, b"payload-1"),
+        &None,
+        &None,
+        &false,
+    );
+    env.ledger().set_timestamp(2000);
+    client.log_event(
+        &submitter,
+        &symbol_short!("ev2"),
+        &Bytes::from_slice(&env, b"payload-2"),
+        &None,
+        &None,
+        &false,
+    );
+    env.ledger().set_timestamp(3000);
+    client.log_event(
+        &submitter,
+        &symbol_short!("ev3"),
+        &Bytes::from_slice(&env, b"payload-3"),
+        &None,
+        &None,
+        &false,
+    );
+    env.ledger().set_timestamp(4000);
+    client.log_event(
+        &submitter,
+        &symbol_short!("ev4"),
+        &Bytes::from_slice(&env, b"payload-4"),
+        &None,
+        &None,
+        &false,
+    );
+
+    assert_eq!(client.total_events(), 4);
+    assert!(client.verify_integrity(), "hash-chain must be intact prior to recovery");
+
+    // Extract leaf hashes and compute pre-recovery Merkle root
+    let mut leaves = Vec::new(&env);
+    for i in 0..4 {
+        let evt = client.get_event_by_order(&i);
+        leaves.push_back(evt.event_hash);
+    }
+    let pre_root = compute_event_merkle_root(&env, &leaves);
+
+    // Verify initial Merkle proofs for all leaves
+    for i in 0..4 {
+        let leaf = leaves.get(i).unwrap();
+        let proof = build_event_merkle_proof(&env, &leaves, i);
+        assert!(verify_event_merkle_proof(&env, &leaf, &proof, &pre_root));
+    }
+
+    // 2. Simulate failure / pause event
+    client.pause(&owner);
+    let fail_result = client.try_log_event(
+        &submitter,
+        &symbol_short!("fail"),
+        &Bytes::from_slice(&env, b"unauthorized-mid-pause"),
+        &None,
+        &None,
+        &false,
+    );
+    assert!(fail_result.is_err(), "must reject event logs during pause");
+
+    // 3. Simulated recovery cycle (unpause & re-verify state)
+    client.unpause(&owner);
+
+    // Re-verify hash-chain integrity
+    assert!(client.verify_integrity(), "hash-chain must verify after simulated recovery");
+
+    // Ensure links and order hashes remained continuous
+    for i in 1..4 {
+        let current_evt = client.get_event_by_order(&i);
+        let prev_evt = client.get_event_by_order(&(i - 1));
+        assert_eq!(
+            current_evt.prev_hash, prev_evt.event_hash,
+            "link integrity preserved"
+        );
+    }
+
+    // Re-derive Merkle tree after recovery and ensure root match
+    let mut recovered_leaves = Vec::new(&env);
+    for i in 0..4 {
+        let evt = client.get_event_by_order(&i);
+        recovered_leaves.push_back(evt.event_hash);
+    }
+    let recovered_root = compute_event_merkle_root(&env, &recovered_leaves);
+    assert_eq!(recovered_root, pre_root, "merkle root must remain identical post-recovery");
+
+    // Re-verify Merkle proofs on recovered tree
+    for i in 0..4 {
+        let leaf = recovered_leaves.get(i).unwrap();
+        let proof = build_event_merkle_proof(&env, &recovered_leaves, i);
+        assert!(
+            verify_event_merkle_proof(&env, &leaf, &proof, &recovered_root),
+            "proof for leaf {i} must verify post-recovery"
+        );
+    }
+
+    // 4. Log subsequent event post-recovery to guarantee chain continuity
+    env.ledger().set_timestamp(5000);
+    client.log_event(
+        &submitter,
+        &symbol_short!("ev5"),
+        &Bytes::from_slice(&env, b"payload-5"),
+        &None,
+        &None,
+        &false,
+    );
+    assert_eq!(client.total_events(), 5);
+    assert!(client.verify_integrity(), "hash-chain must verify after appending post-recovery");
+}
+
+#[test]
+fn chaos_audit_registry_merkle_proof_rejects_tampered_recovery() {
+    let (env, _owner, client) = create_ledger();
+    let submitter = Address::generate(&env);
+
+    env.mock_all_auths();
+
+    for i in 0..3 {
+        client.log_event(
+            &submitter,
+            &symbol_short!("ev"),
+            &Bytes::from_slice(&env, &[i as u8]),
+            &None,
+            &None,
+            &false,
+        );
+    }
+
+    let mut leaves = Vec::new(&env);
+    for i in 0..3 {
+        leaves.push_back(client.get_event_by_order(&i).event_hash);
+    }
+
+    let root = compute_event_merkle_root(&env, &leaves);
+    let target_idx = 1u32;
+    let target_leaf = leaves.get(target_idx).unwrap();
+    let proof = build_event_merkle_proof(&env, &leaves, target_idx);
+
+    // Valid proof verifies
+    assert!(verify_event_merkle_proof(&env, &target_leaf, &proof, &root));
+
+    // Tampered leaf hash must be rejected
+    let mut tampered_bytes = target_leaf.to_array();
+    tampered_bytes[0] ^= 0xff;
+    let tampered_leaf = BytesN::from_array(&env, &tampered_bytes);
+    assert!(
+        !verify_event_merkle_proof(&env, &tampered_leaf, &proof, &root),
+        "tampered leaf must be rejected"
+    );
+
+    // Tampered root must be rejected
+    let mut tampered_root_bytes = root.to_array();
+    tampered_root_bytes[0] ^= 0xff;
+    let tampered_root = BytesN::from_array(&env, &tampered_root_bytes);
+    assert!(
+        !verify_event_merkle_proof(&env, &target_leaf, &proof, &tampered_root),
+        "tampered root must be rejected"
+    );
+
+    // Tampered proof sibling must be rejected
+    let mut tampered_proof = proof.clone();
+    if !tampered_proof.is_empty() {
+        let mut bad_sibling = tampered_proof.get(0).unwrap().to_array();
+        bad_sibling[1] ^= 0xff;
+        tampered_proof.set(0, BytesN::from_array(&env, &bad_sibling));
+        assert!(
+            !verify_event_merkle_proof(&env, &target_leaf, &tampered_proof, &root),
+            "tampered proof sibling must be rejected"
+        );
+    }
+}
+
+#[test]
+fn chaos_reputation_engine_recovery_and_overflow_bounds() {
+    let env = Env::default();
+    let owner = Address::generate(&env);
+    let submitter = Address::generate(&env);
+    let reviewer = Address::generate(&env);
+
+    env.mock_all_auths();
+
+    // Initialize reputation system
+    crate::reputation_system::ReputationSystem::initialize(env.clone(), owner.clone());
+
+    // Record events with saturating bounds
+    for _ in 0..5 {
+        crate::reputation_system::ReputationSystem::update_event_count(
+            env.clone(),
+            owner.clone(),
+            submitter.clone(),
+        );
+    }
+
+    let initial_score = crate::reputation_system::ReputationSystem::get_reputation(env.clone(), submitter.clone());
+    assert_eq!(initial_score.event_count, 5);
+
+    // Submit peer review
+    let review = crate::reputation_system::ReputationSystem::submit_review(
+        env.clone(),
+        reviewer.clone(),
+        submitter.clone(),
+        5,
+        Bytes::from_slice(&env, b"positive audit review"),
+        BytesN::from_array(&env, &[1u8; 32]),
+    );
+    assert_eq!(review.rating, 5);
+
+    let updated_score = crate::reputation_system::ReputationSystem::get_reputation(env.clone(), submitter.clone());
+    assert_eq!(updated_score.positive_reviews, 1);
+    assert!(updated_score.score <= crate::reputation_system::MAX_REPUTATION_SCORE);
+
+    // File dispute and resolve
+    let dispute = crate::reputation_system::ReputationSystem::file_dispute(
+        env.clone(),
+        reviewer.clone(),
+        submitter.clone(),
+        Bytes::from_slice(&env, b"audit discrepancy"),
+    );
+    assert_eq!(dispute.status, Symbol::new(&env, "open"));
+
+    crate::reputation_system::ReputationSystem::resolve_dispute(
+        env.clone(),
+        owner.clone(),
+        dispute.id.clone(),
+        true, // defendant won
+        Bytes::from_slice(&env, b"cleared after verification"),
+    );
+
+    let resolved_dispute = crate::reputation_system::ReputationSystem::get_dispute(env.clone(), dispute.id);
+    assert_eq!(resolved_dispute.status, Symbol::new(&env, "resolved"));
+
+    // Explicit TTL extension
+    crate::reputation_system::ReputationSystem::extend_reputation_ttl(env.clone());
+
+    let final_score = crate::reputation_system::ReputationSystem::get_reputation(env.clone(), submitter);
+    assert_eq!(final_score.disputes_won, 1);
+    assert!(final_score.score <= crate::reputation_system::MAX_REPUTATION_SCORE);
+}
+

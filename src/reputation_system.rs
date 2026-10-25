@@ -97,6 +97,22 @@ pub struct ReputationConfig {
 }
 
 // ============================================================================
+// Deterministic Bounds & Storage TTL Constants (issues #876, #877)
+// ============================================================================
+
+/// Maximum allowable capacity for stored review, dispute, and incentive collections
+pub const MAX_REPUTATION_COLLECTION_SIZE: u32 = 10_000;
+
+/// Maximum allowable reputation score cap to prevent arithmetic overflow
+pub const MAX_REPUTATION_SCORE: u32 = 1_000_000;
+
+/// TTL bump threshold in ledgers before extending reputation records
+pub const REPUTATION_TTL_THRESHOLD_LEDGERS: u32 = 10_000;
+
+/// TTL extension target in ledgers for reputation records
+pub const REPUTATION_TTL_EXTEND_LEDGERS: u32 = 100_000;
+
+// ============================================================================
 // Storage Keys
 // ============================================================================
 
@@ -137,6 +153,8 @@ pub enum ReputationError {
     DisputeAlreadyResolved = 10,
     InsufficientReputation = 11,
     ConfigNotFound = 12,
+    /// Collection size exceeded deterministic limit
+    CollectionLimitExceeded = 13,
 }
 
 // ============================================================================
@@ -208,13 +226,16 @@ impl ReputationSystem {
         Self::require_owner(&env, &caller);
 
         let mut score = Self::get_reputation(env.clone(), submitter.clone());
-        score.event_count += 1;
+        score.event_count = score.event_count.saturating_add(1);
         score.last_updated = env.ledger().timestamp();
         score.tier = Self::compute_tier(&env, &score);
 
         env.storage()
             .instance()
             .set(&ReputationKey::ReputationScore(submitter), &score);
+        env.storage()
+            .instance()
+            .extend_ttl(REPUTATION_TTL_THRESHOLD_LEDGERS, REPUTATION_TTL_EXTEND_LEDGERS);
     }
 
     /// Record a compliance violation for a submitter
@@ -224,7 +245,7 @@ impl ReputationSystem {
         let mut score = Self::get_reputation(env.clone(), submitter.clone());
         let config = Self::get_config(&env);
 
-        score.compliance_violations += 1;
+        score.compliance_violations = score.compliance_violations.saturating_add(1);
         score.score = score.score.saturating_sub(config.compliance_penalty);
         score.last_updated = env.ledger().timestamp();
         score.tier = Self::compute_tier(&env, &score);
@@ -232,6 +253,9 @@ impl ReputationSystem {
         env.storage()
             .instance()
             .set(&ReputationKey::ReputationScore(submitter), &score);
+        env.storage()
+            .instance()
+            .extend_ttl(REPUTATION_TTL_THRESHOLD_LEDGERS, REPUTATION_TTL_EXTEND_LEDGERS);
     }
 
     /// Get reputation configuration
@@ -274,6 +298,15 @@ impl ReputationSystem {
             panic_with_error!(&env, ReputationError::InvalidRating);
         }
 
+        let mut all_ids: Vec<BytesN<32>> = env
+            .storage()
+            .instance()
+            .get(&ReputationKey::AllReviewIds)
+            .unwrap_or_else(|| Vec::new(&env));
+        if all_ids.len() >= MAX_REPUTATION_COLLECTION_SIZE {
+            panic_with_error!(&env, ReputationError::CollectionLimitExceeded);
+        }
+
         let id = Self::get_next_review_id(&env);
         let id_bytes = BytesN::from_array(&env, &sha2_digest(&env, &id.to_le_bytes()));
 
@@ -291,11 +324,6 @@ impl ReputationSystem {
             .instance()
             .set(&ReputationKey::PeerReview(id_bytes.clone()), &review);
 
-        let mut all_ids: Vec<BytesN<32>> = env
-            .storage()
-            .instance()
-            .get(&ReputationKey::AllReviewIds)
-            .unwrap_or_else(|| Vec::new(&env));
         all_ids.push_back(id_bytes.clone());
         env.storage()
             .instance()
@@ -305,10 +333,10 @@ impl ReputationSystem {
         let config = Self::get_config(&env);
 
         if rating >= 3 {
-            score.positive_reviews += 1;
-            score.score += config.review_weight;
+            score.positive_reviews = score.positive_reviews.saturating_add(1);
+            score.score = score.score.saturating_add(config.review_weight).min(MAX_REPUTATION_SCORE);
         } else {
-            score.negative_reviews += 1;
+            score.negative_reviews = score.negative_reviews.saturating_add(1);
             score.score = score.score.saturating_sub(config.review_weight);
         }
 
@@ -318,6 +346,9 @@ impl ReputationSystem {
         env.storage()
             .instance()
             .set(&ReputationKey::ReputationScore(subject), &score);
+        env.storage()
+            .instance()
+            .extend_ttl(REPUTATION_TTL_THRESHOLD_LEDGERS, REPUTATION_TTL_EXTEND_LEDGERS);
 
         log!(
             &env,
@@ -356,6 +387,15 @@ impl ReputationSystem {
     ) -> DisputeRecord {
         plaintiff.require_auth();
 
+        let mut all_ids: Vec<BytesN<32>> = env
+            .storage()
+            .instance()
+            .get(&ReputationKey::AllDisputeIds)
+            .unwrap_or_else(|| Vec::new(&env));
+        if all_ids.len() >= MAX_REPUTATION_COLLECTION_SIZE {
+            panic_with_error!(&env, ReputationError::CollectionLimitExceeded);
+        }
+
         let id = Self::get_next_dispute_id(&env);
         let id_bytes = BytesN::from_array(&env, &sha2_digest(&env, &id.to_le_bytes()));
 
@@ -374,15 +414,13 @@ impl ReputationSystem {
             .instance()
             .set(&ReputationKey::DisputeRecord(id_bytes.clone()), &dispute);
 
-        let mut all_ids: Vec<BytesN<32>> = env
-            .storage()
-            .instance()
-            .get(&ReputationKey::AllDisputeIds)
-            .unwrap_or_else(|| Vec::new(&env));
         all_ids.push_back(id_bytes.clone());
         env.storage()
             .instance()
             .set(&ReputationKey::AllDisputeIds, &all_ids);
+        env.storage()
+            .instance()
+            .extend_ttl(REPUTATION_TTL_THRESHOLD_LEDGERS, REPUTATION_TTL_EXTEND_LEDGERS);
 
         log!(
             &env,
@@ -422,10 +460,10 @@ impl ReputationSystem {
         let config = Self::get_config(&env);
 
         if defendant_won {
-            defendant_score.disputes_won += 1;
-            defendant_score.score += config.dispute_weight;
+            defendant_score.disputes_won = defendant_score.disputes_won.saturating_add(1);
+            defendant_score.score = defendant_score.score.saturating_add(config.dispute_weight).min(MAX_REPUTATION_SCORE);
         } else {
-            defendant_score.disputes_lost += 1;
+            defendant_score.disputes_lost = defendant_score.disputes_lost.saturating_add(1);
             defendant_score.score = defendant_score.score.saturating_sub(config.dispute_weight);
         }
 
@@ -435,6 +473,9 @@ impl ReputationSystem {
         env.storage()
             .instance()
             .set(&ReputationKey::ReputationScore(dispute.defendant), &defendant_score);
+        env.storage()
+            .instance()
+            .extend_ttl(REPUTATION_TTL_THRESHOLD_LEDGERS, REPUTATION_TTL_EXTEND_LEDGERS);
     }
 
     /// Get a dispute by ID
@@ -465,6 +506,15 @@ impl ReputationSystem {
     ) -> IncentiveRecord {
         Self::require_owner(&env, &caller);
 
+        let mut all_ids: Vec<BytesN<32>> = env
+            .storage()
+            .instance()
+            .get(&ReputationKey::AllIncentiveIds)
+            .unwrap_or_else(|| Vec::new(&env));
+        if all_ids.len() >= MAX_REPUTATION_COLLECTION_SIZE {
+            panic_with_error!(&env, ReputationError::CollectionLimitExceeded);
+        }
+
         let id = Self::get_next_incentive_id(&env);
         let id_bytes = BytesN::from_array(&env, &sha2_digest(&env, &id.to_le_bytes()));
 
@@ -481,15 +531,13 @@ impl ReputationSystem {
             .instance()
             .set(&ReputationKey::IncentiveRecord(id_bytes.clone()), &incentive);
 
-        let mut all_ids: Vec<BytesN<32>> = env
-            .storage()
-            .instance()
-            .get(&ReputationKey::AllIncentiveIds)
-            .unwrap_or_else(|| Vec::new(&env));
         all_ids.push_back(id_bytes.clone());
         env.storage()
             .instance()
             .set(&ReputationKey::AllIncentiveIds, &all_ids);
+        env.storage()
+            .instance()
+            .extend_ttl(REPUTATION_TTL_THRESHOLD_LEDGERS, REPUTATION_TTL_EXTEND_LEDGERS);
 
         log!(
             &env,
@@ -512,6 +560,13 @@ impl ReputationSystem {
             .instance()
             .get(&ReputationKey::AllIncentiveIds)
             .unwrap_or_else(|| Vec::new(&env))
+    }
+
+    /// Explicitly extend TTL for reputation system storage instances
+    pub fn extend_reputation_ttl(env: Env) {
+        env.storage()
+            .instance()
+            .extend_ttl(REPUTATION_TTL_THRESHOLD_LEDGERS, REPUTATION_TTL_EXTEND_LEDGERS);
     }
 
     // ========================================================================
