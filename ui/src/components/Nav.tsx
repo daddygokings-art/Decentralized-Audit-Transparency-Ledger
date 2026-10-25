@@ -12,6 +12,7 @@ const NAV = [
   { href: "/export", label: "Export" },
   { href: "/compliance", label: "Compliance" },
   { href: "/governance", label: "Governance" },
+  { href: "/oracle", label: "Oracle Portal" },
   { href: "/webhooks", label: "Webhooks" },
   { href: "/developer", label: "Developer Portal" },
 ];
