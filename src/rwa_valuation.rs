@@ -265,7 +265,7 @@ impl ValuationEngine {
 
     fn compute_valuation_id(env: &Env, token_id: &BytesN<32>, index: u32) -> BytesN<32> {
                 let mut input = Bytes::new(env);
-        input.append(&token_id.to_bytes());
+        input.append(&Bytes::from_slice(env, token_id.as_ref()));
         input.append(&Bytes::from_slice(env, &index.to_le_bytes()));
         input.append(&Bytes::from_slice(
             env,

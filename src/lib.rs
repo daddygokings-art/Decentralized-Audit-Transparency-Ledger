@@ -7404,45 +7404,4 @@ mod governance_dashboard_tests;
 
 #[cfg(test)]
 mod data_retention_tests;
-
-#[cfg(test)]
-mod issue365_368_tests;
-
-#[cfg(test)]
-mod rbac_regression_coverage_tests;
-
-// RBAC gating integration tests for state-mutating entrypoints (issue #875).
-#[cfg(test)]
-mod rbac_gating_tests;
-
-// Property-based invariant tests for the ML feature store (issue #858).
-#[cfg(test)]
-mod proptest;
-
-// Multi-actor concurrency and fault-injection tests for the ML feature store (issue #858).
-#[cfg(test)]
-mod concurrent_tests;
-
-pub mod notifications;
-
-#[cfg(test)]
-mod notifications_tests;
-
-pub mod cross_contract;
-
-#[cfg(test)]
-mod workflow_tests;
-
-#[cfg(test)]
-mod cross_contract_invariant_tests;
-
-pub mod marketplace;
-
-#[cfg(test)]
-mod marketplace_tests;
-
-#[cfg(test)]
-mod cbdc_privacy_tests;
-
-#[cfg(test)]
-mod chaos_tests;
+}

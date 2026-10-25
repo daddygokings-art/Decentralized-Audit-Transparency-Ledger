@@ -399,7 +399,7 @@ impl CustodianRecord {
 #[contracttype]
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub struct AssetStorageRecord {
-    /// Unique asset ID (content-addressed: sha256(custodian||asset_ref||timestamp)).
+    /// Unique asset ID (content-addressed: env.crypto().sha256(custodian||asset_ref||timestamp)).
     pub asset_id: BytesN<32>,
     /// Custodian holding this asset.
     pub custodian: Address,

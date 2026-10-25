@@ -257,13 +257,13 @@ impl InteropManager {
         }
 
         // Generate swap ID
-        let mut input = Bytes::new(env);
-        input.append(&from.to_xdr(env));
-        input.append(&to.to_xdr(env));
+                let mut input = Bytes::new(env);
+        input.append(&Bytes::from_slice(env, from.to_xdr().as_ref()));
+        input.append(&Bytes::from_slice(env, to.to_xdr().as_ref()));
         input.append(&Bytes::from_slice(env, &source_amount.to_le_bytes()));
         input.append(&Bytes::from_slice(env, &dest_amount.to_le_bytes()));
 
-        Ok(env.crypto().sha256(&input).to_bytes())
+        Ok(env.crypto().sha256(&input))
     }
 
     /// Execute hub-and-spoke settlement
@@ -278,12 +278,12 @@ impl InteropManager {
         }
 
         // Generate settlement ID
-        let mut input = Bytes::new(env);
-        input.append(&hub_address.to_xdr(env));
+                let mut input = Bytes::new(env);
+        input.append(&Bytes::from_slice(env, hub_address.to_xdr().as_ref()));
         input.append(&Bytes::from_slice(env, &source_amount.to_le_bytes()));
         input.append(&Bytes::from_slice(env, &dest_amount.to_le_bytes()));
 
-        Ok(env.crypto().sha256(&input).to_bytes())
+        Ok(env.crypto().sha256(&input))
     }
 
     /// Validate settlement instruction

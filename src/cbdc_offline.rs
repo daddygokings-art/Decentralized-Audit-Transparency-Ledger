@@ -396,6 +396,7 @@ impl OfflineManager {
         transaction: &CBDCTransaction,
         nonce: u32,
     ) -> BytesN<32> {
+        
         let mut input = Bytes::new(env);
 
         // Append to the ordered transaction index.
@@ -405,7 +406,7 @@ impl OfflineManager {
             Self::write_tx_index(env, &index);
         }
 
-        Ok(offline_tx)
+        env.crypto().sha256(&input)
     }
 
     /// Retrieve a persisted offline transaction by its hash.
@@ -534,6 +535,7 @@ impl OfflineManager {
 
     /// Compute deterministic batch ID
     pub fn compute_batch_id(env: &Env, tx_ids: &Vec<BytesN<32>>) -> BytesN<32> {
+        
         let mut input = Bytes::new(env);
 
         let mut index = Self::read_batch_index(env);
@@ -542,18 +544,7 @@ impl OfflineManager {
             Self::write_batch_index(env, &index);
         }
 
-        Ok(batch)
-    }
-
-    /// Retrieve a persisted batch settlement by its ID.
-    pub fn get_batch_settlement(
-        env: &Env,
-        batch_id: &BytesN<32>,
-    ) -> Result<BatchSettlement, OfflineError> {
-        env.storage()
-            .persistent()
-            .get(&OfflineStorageKey::Batch(batch_id.clone()))
-            .ok_or(OfflineError::BatchNotFound)
+        env.crypto().sha256(&input)
     }
 
     /// Settle batch on-chain and persist.
