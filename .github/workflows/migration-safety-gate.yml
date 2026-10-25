@@ -1,0 +1,39 @@
+name: Migration Safety Gate & Destructive SQL Check
+
+# Enforces policy:
+# Destructive SQL statements (such as DROP TABLE or column type changes)
+# must be blocked from merging into main/master.
+
+concurrency:
+  group: migration-safety-gate-${{ github.ref }}
+  cancel-in-progress: true
+
+on:
+  push:
+    branches: [master, main]
+    paths:
+      - 'packages/db-migrations/**'
+      - 'scripts/ci/check_destructive_sql.js'
+  pull_request:
+    branches: [master, main]
+    paths:
+      - 'packages/db-migrations/**'
+      - 'scripts/ci/check_destructive_sql.js'
+  workflow_dispatch:
+
+jobs:
+  validate-migration-safety:
+    name: Check for destructive SQL statements
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v4
+
+      - name: Setup Node.js
+        uses: actions/setup-node@v4
+        with:
+          node-version: '20'
+
+      - name: Run Destructive SQL Safety Gate
+        run: |
+          node scripts/ci/check_destructive_sql.js
