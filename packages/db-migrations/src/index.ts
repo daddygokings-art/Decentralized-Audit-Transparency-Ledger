@@ -12,3 +12,4 @@ export { migration as m001 } from './migrations/001_contract_events_core';
 export { migration as m002 } from './migrations/002_event_partitions_and_verification';
 export { migration as m003 } from './migrations/003_event_aggregates_and_dead_letter';
 export { migration as m004 } from './migrations/004_zero_downtime_payload_expansion';
+export { migration as m005 } from './migrations/005_dispute_votes_relational_table';

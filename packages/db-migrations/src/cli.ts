@@ -10,6 +10,7 @@ import { migration as m1 } from './migrations/001_contract_events_core';
 import { migration as m2 } from './migrations/002_event_partitions_and_verification';
 import { migration as m3 } from './migrations/003_event_aggregates_and_dead_letter';
 import { migration as m4 } from './migrations/004_zero_downtime_payload_expansion';
+import { migration as m5 } from './migrations/005_dispute_votes_relational_table';
 
 function createAdapter(): DatabaseAdapter {
   const dialect = process.env.DB_DIALECT || 'postgres';
@@ -40,7 +41,7 @@ export async function main(args: string[] = process.argv.slice(2)): Promise<void
   const runner = new MigrationRunner(adapter);
 
   // Register built-in migrations
-  runner.registerMigrations([m1, m2, m3, m4]);
+  runner.registerMigrations([m1, m2, m3, m4, m5]);
 
   try {
     switch (command) {
