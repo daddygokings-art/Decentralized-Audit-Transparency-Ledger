@@ -369,3 +369,6 @@ This project follows security best practices:
 
 <!-- handsoff-issue-881 -->
 - #881: [carbon-credits] Optimize Soroban storage TTL extension and archival rent footprint for `src/carbon_credits.rs`
+
+<!-- handsoff-issue-882 -->
+- #882: [carbon-credits] Implement cursor-based pagination and filtered batch queries in `src/carbon_credits.rs`
