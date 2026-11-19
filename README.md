@@ -372,3 +372,6 @@ This project follows security best practices:
 
 <!-- handsoff-issue-1048 -->
 - #1048: perf(src/storage): implement compact BitSet encoding for active validator participation maps
+
+<!-- handsoff-issue-1051 -->
+- #1051: security(src/confidential): audit zero-knowledge proof verification constraints against malleability
