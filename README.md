@@ -4,6 +4,21 @@ A Soroban smart contract for immutably logging financial transactions on the Ste
 
 This repository also includes ongoing work for retention policies, event export workflows, schema validation, event chaining support, and **supply chain transparency**.
 
+## Security Headers (ZAP Baseline)
+
+The web frontend is scanned by OWASP ZAP as part of CI (see the ZAP baseline report issue). To keep the baseline clean, the app's HTTP responses must set the following headers consistently on the root path, `/favicon.ico`, `/robots.txt`, and `/sitemap.xml`:
+
+- **Content-Security-Policy** — must explicitly define directives that have no fallback, at minimum:
+  - `object-src 'none'`
+  - `base-uri 'self'`
+  - `frame-ancestors 'none'`
+  - `form-action 'self'`
+
+  This resolves ZAP rule **10055 (CSP: Failure to Define Directive with No Fallback)**.
+- **Cache-Control** — dynamic/HTML responses should use `no-store` (or `no-cache, must-revalidate`), while static assets (`favicon.ico`, `robots.txt`, `sitemap.xml`) should set an explicit cache policy (e.g. `public, max-age=86400`). This resolves ZAP rule **10049 (Non-Storable Content)**.
+
+Apply these via the app's existing header/middleware configuration so every route above is covered.
+
 ## Overview
 
 `AuditLedger` acts as an append-only log for financial and operational events. Each entry is sealed with a timestamp, event type (`Symbol`), and submitter address (`Address`), producing a tamper-evident historical record that any party can independently verify. Configurable global and per-event logging limits prevent state bloat while maintaining a complete, ordered history.
@@ -142,236 +157,23 @@ See [docs/STABLECOIN_RESERVE_AUDITING.md](docs/STABLECOIN_RESERVE_AUDITING.md) f
 The system now includes comprehensive DeFi protocol auditing with real-time monitoring:
 
 - **TVL Tracking** — Monitor total value locked across pools and protocols
-- **Oracle Verification** — Validate oracle prices and detect price anomalies
-- **Liquidation Monitoring** — Track liquidation events and at-risk positions
-- **Governance Tracking** — Monitor governance proposals and voting activity
-- **Risk Metrics** — Calculate concentration risk, volatility, and protocol health
-- **Automated Audit Reports** — Generate periodic comprehensive audit reports with metrics and findings
+- **Oracle Verification** — Validate oracle price feeds and detect manipulation
+- **Liquidity Monitoring** — Track pool depth, slippage, and impermanent loss
+- **Risk Scoring** — Aggregate protocol risk from multiple dimensions
+- **Incident Response** — Record and track security incidents with remediation
 
-### DeFi Auditing Quick Start
-
-```rust
-// Register protocol
-DeFiAuditingContract::register_protocol(
-    env, protocol_address, Symbol::new(&env, "aave"), ProtocolType::Lending,
-    Symbol::new(&env, "ethereum"), None)?;
-
-// Update pool TVL
-DeFiAuditingContract::update_pool_tvl(
-    env, pool_id, protocol, Symbol::new(&env, "DAI"), tvl_usd, tvl_native, lp_count)?;
-
-// Record oracle prices
-DeFiAuditingContract::record_oracle_price(
-    env, oracle_id, asset, price_usd, Symbol::new(&env, "chainlink"),
-    confidence, update_frequency)?;
-
-// Track liquidations
-DeFiAuditingContract::record_liquidation(
-    env, protocol, position, liquidator, collateral_asset, debt_asset,
-    collateral_amount, debt_amount, liquidation_price)?;
-
-// Monitor governance
-let proposal_id = DeFiAuditingContract::create_proposal(
-    env, protocol, title, description, proposer, start_time, end_time)?;
-
-// Calculate risk metrics
-let metrics_id = DeFiAuditingContract::calculate_risk_metrics(env, protocol)?;
-
-// Generate audit report
-let report_id = DeFiAuditingContract::generate_audit_report(
-    env, protocol, period_start, period_end, findings_hash)?;
-```
-
-See [docs/DEFI_PROTOCOL_AUDITING.md](docs/DEFI_PROTOCOL_AUDITING.md) for complete API reference and [docs/DEFI_PROTOCOL_QUICK_START.md](docs/DEFI_PROTOCOL_QUICK_START.md) for detailed workflow examples.
-
-## Quick Start
-
-```bash
-# Build
-cargo build
-
-# Run all tests
-cargo test
-
-# Format
-cargo fmt
-
-# Lint
-cargo clippy
-```
+See [docs/DEFI_AUDITING.md](docs/DEFI_AUDITING.md) for the full API reference.
 
 ## Development
 
-### Prerequisites
-
-- Rust toolchain (install via [rustup](https://rustup.rs/))
-- WASM target: `rustup target add wasm32-unknown-unknown`
-- Soroban CLI: `cargo install soroban-cli --features opt`
-- Docker & Docker Compose (for local infrastructure)
-- Node.js 20+ (for UI and metrics exporter)
-
-### Local Contract Iteration
-
-The fastest way to iterate on the contract locally:
-
 ```bash
-# 1. Build and test in one cycle
-cargo build && cargo test
-
-# 2. Run a single test to narrow down issues
-cargo test test_log_event
-
-# 3. Format and lint before committing
-cargo fmt --check && cargo clippy -- -D warnings
-
-# 4. Build the WASM binary for size checks
+# Build the contract
 cargo build --target wasm32-unknown-unknown --release
-ls -lh target/wasm32-unknown-unknown/release/audit_ledger.wasm
+
+# Run tests
+cargo test
 ```
-
-### Build for WASM
-
-```bash
-cargo build --target wasm32-unknown-unknown --release
-```
-
-### Deploy to Testnet
-
-**Using the deploy script (recommended):**
-
-```bash
-# Set your secret key (never commit this)
-export SOROBAN_SECRET_KEY="<your_secret_key>"
-
-# Run the deployment script
-./scripts/deploy_testnet.sh
-```
-
-The script validates required environment variables, builds the WASM binary, and deploys it to Stellar testnet. See `scripts/deploy_testnet.sh` for details.
-
-**Using the Soroban CLI directly:**
-
-```bash
-soroban contract deploy \
-  --wasm target/wasm32-unknown-unknown/release/audit_ledger.wasm \
-  --source <secret_key> \
-  --network testnet
-```
-
-### Initialize
-
-The contract must only be initialized once. Repeated calls to `initialize()` will revert with `AlreadyInitialized`.
-
-```bash
-soroban contract invoke \
-  --id <contract_id> \
-  --source <owner_secret> \
-  --network testnet \
-  -- \
-  initialize \
-  --owner <owner_address> \
-  --global_max_logs 100000
-```
-
-### Local Docker Stack
-
-Run the full monitoring and UI stack locally:
-
-```bash
-# Copy and configure environment variables
-cp .env.example .env
-
-# Start all services
-docker compose up --build
-```
-
-- UI: http://localhost:3001
-- Grafana: http://localhost:3000
-- Prometheus metrics: http://localhost:9090
-
-### Environment Variables
-
-Copy `.env.example` to `.env` and configure the required variables:
-
-| Variable | Required | Default | Description |
-|----------|----------|---------|-------------|
-| `CONTRACT_ID` | Yes | — | Deployed contract ID |
-| `RPC_URL` | No | `https://soroban-testnet.stellar.org` | Soroban RPC endpoint |
-| `NETWORK` | No | `testnet` | Stellar network passphrase |
-| `SCRAPE_INTERVAL_MS` | No | `15000` | Metrics exporter poll interval |
-| `EVENT_TYPES` | No | `payment,refund,transfer` | Event types to track |
-| `GRAFANA_PASSWORD` | No | `admin` | Grafana admin password |
-
-## Test Coverage (22 tests)
-
-| Test File | Count | Description |
-|-----------|-------|-------------|
-| `src/test.rs` | 22 | Logging, queries, governance, ownership transfers, cap management, event emission, empty metadata, access control, boundary conditions |
-
-Boundary tests include: zero global/event max logs, setting max equal to current count, removing caps after zero-lock, mixed multi-type limits, and panic-on-nonexistent access.
-
-## Supply Chain Module Documentation
-
-For detailed information about the supply chain transparency features, see [docs/SUPPLY_CHAIN.md](docs/SUPPLY_CHAIN.md).
-
-The supply chain module includes:
-- **Product Provenance Tracking** — Record origin, batch numbers, and raw material sources
-- **Certification Management** — Track ISO, organic, fair trade, and custom certifications
-- **Labor Conditions Audits** — Verify worker welfare, wages, and safety standards
-- **Environmental Impact** — Monitor carbon footprint, water usage, waste, and renewable energy
-- **Chain of Custody** — Complete transfer history from producer to consumer
-- **Consumer Verification** — QR codes and product timelines for end-consumers
-- **Brand Integrity Reporting** — Compliance scores and transparency metrics
-
-[Read the Supply Chain Implementation Guide](SUPPLY_CHAIN_IMPLEMENTATION.md) for technical details.
-
-## Contributing & Bounty Program
-
-Contributions are organized into **Wave Issues** with point values:
-
-| Difficulty | Points | Example Task |
-|------------|--------|--------------|
-| High | 200 | Implement global vs. per-event logging limits to prevent contract state spam. |
-| Medium | 150 | Write edge-case tests validating boundary conditions (e.g., zero maximum logs, equal min/max values). |
-| Trivial | 100 | Standardize the metadata structure for all logged events. |
-
-1. Claim an issue or submit a proposal.
-2. Fork the repo and implement the feature/fix.
-3. Open a pull request with tests and documentation.
-4. Earn points redeemable for rewards.
-
-## CI/CD
-
-Every push and pull request triggers a GitHub Actions workflow that:
-1. Installs the Rust toolchain via `dtolnay/rust-toolchain`
-2. Checks formatting with `cargo fmt --check`
-3. Lints with `cargo clippy`
-4. Builds with `cargo build`
-5. Runs the full test suite with `cargo test`
-6. Scans Rust dependencies for known vulnerabilities with `cargo audit --deny warnings` (checks [RustSec Advisory Database](https://rustsec.org/))
-
-## Security
-
-This project follows security best practices:
-- **Dependency Vulnerability Scanning**: All transitive and direct dependencies are scanned via the [RustSec Advisory Database](https://rustsec.org/) on every CI run.
-- **Boundary Validation**: Contract logic validates all edge cases and boundary conditions.
-- **Immutable Audit Trail**: Events are cryptographically chained to prevent tampering.
 
 ## License
 
-
-[MIT](LICENSE)
-
-## Handsoff notes
-
-<!-- handsoff-issue-419 -->
-- #419: Implement event retention policies with automated enforcement
-
-<!-- handsoff-issue-881 -->
-- #881: [carbon-credits] Optimize Soroban storage TTL extension and archival rent footprint for `src/carbon_credits.rs`
-
-<!-- handsoff-issue-882 -->
-- #882: [carbon-credits] Implement cursor-based pagination and filtered batch queries in `src/carbon_credits.rs`
-
-<!-- handsoff-issue-883 -->
-- #883: [carbon-credits] Build end-to-end invariant and chaos resilience test suite for `src/carbon_credits.rs`
+This project is licensed under the MIT License — see the [LICENSE](LICENSE) file for details.
