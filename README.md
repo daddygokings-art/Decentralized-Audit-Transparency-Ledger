@@ -372,3 +372,6 @@ This project follows security best practices:
 
 <!-- handsoff-issue-882 -->
 - #882: [carbon-credits] Implement cursor-based pagination and filtered batch queries in `src/carbon_credits.rs`
+
+<!-- handsoff-issue-883 -->
+- #883: [carbon-credits] Build end-to-end invariant and chaos resilience test suite for `src/carbon_credits.rs`
