@@ -9,6 +9,14 @@
 //! - **Multi-Tenant Quota Tiers**: Dynamic daily event quotas, burst TPS limits, and per-submitter rate-limiting.
 //! - **Predictive Scaling Recommendations**: On-chain anchoring of ML-driven replica and resource sizing decisions.
 //! - **Cost Accounting & Optimization**: Gas and storage cost tracking per submitter tier.
+//!
+//! ## Storage Tiers (retention SLA)
+//! - **Persistent**: archival-critical records (quota tiers, submitter quotas, latest
+//!   recommendation, policy, telemetry count). These are TTL-extended by the
+//!   permissionless [`CapacityPlanning::extend_ttl`] helper.
+//! - **Temporary**: high-churn telemetry snapshots in the ring buffer. They are
+//!   intentionally short-lived and are not TTL-extended.
+//! - **Instance**: reserved for future per-instance config; none currently used.
 
 #![no_std]
 use soroban_sdk::{
@@ -124,6 +132,14 @@ const MAX_MEMORY_MB: u32 = 1_000_000;
 const MAX_FORECAST_HOURS: u32 = 8_760; // 1 year
 const MAX_CONFIDENCE_PCT: u32 = 100;
 
+/// TTL extension policy for archival-critical persistent records.
+///
+/// `TTL_THRESHOLD_LEDGERS` is the minimum remaining TTL before a bump is
+/// performed; `TTL_EXTEND_LEDGERS` is the amount added on each bump. Both are
+/// sized so that active audit records never lapse between maintenance windows.
+const TTL_THRESHOLD_LEDGERS: u32 = 100_000;
+const TTL_EXTEND_LEDGERS: u32 = 500_000;
+
 // ── Capacity Planning Functions ──────────────────────────────────────────
 
 pub struct CapacityPlanning;
@@ -153,16 +169,17 @@ impl CapacityPlanning {
             .unwrap_or(0);
 
         // Ring buffer: deterministic, bounded snapshot count.
+        // Snapshots are high-churn and use the Temporary tier to avoid rent.
         let next_idx = count % MAX_TELEMETRY_SNAPSHOTS;
         let key = CapacityStorageKey::TelemetrySnapshot(next_idx);
-        env.storage().persistent().set(&key, &metric);
+        env.storage().temporary().set(&key, &metric);
 
         let next_count = count
             .checked_add(1)
             .unwrap_or(MAX_TELEMETRY_SNAPSHOTS);
-        env.storage()
-            .persistent()
-            .set(&CapacityStorageKey::TelemetryCount, &next_count);
+        let count_key = CapacityStorageKey::TelemetryCount;
+        env.storage().persistent().set(&count_key, &next_count);
+        Self::bump_persistent_ttl(env, &count_key);
     }
 
     /// Register or update a multi-tenant quota tier
@@ -186,6 +203,7 @@ impl CapacityPlanning {
 
         let key = CapacityStorageKey::Tier(tier.tier_id);
         env.storage().persistent().set(&key, &tier);
+        Self::bump_persistent_ttl(env, &key);
     }
 
     /// Assign a submitter to a quota tier
@@ -213,6 +231,7 @@ impl CapacityPlanning {
 
         let sub_key = CapacityStorageKey::SubmitterQuota(submitter);
         env.storage().persistent().set(&sub_key, &record);
+        Self::bump_persistent_ttl(env, &sub_key);
     }
 
     /// Check and consume quota for a submitter logging batch events
@@ -244,127 +263,28 @@ impl CapacityPlanning {
             }
         };
 
-        let tier_key = CapacityStorageKey::Tier(sub_record.tier_id);
-        let tier: QuotaTier = env.storage().persistent().get(&tier_key).unwrap_or(QuotaTier {
-            tier_id: 1,
-            tier_name: Symbol::new(env, "standard"),
-            max_daily_events: 100_000,
-            max_burst_tps: 50,
-            storage_quota_bytes: 1_000_000_000,
-            max_batch_size: 100,
-            cost_per_m_events_stroops: 5_000_000,
-        });
+        // ── TTL helpers ──────────────────────────────────────────────────
 
-        // Enforce per-batch size cap from the tier's own policy.
-        if event_count > tier.max_batch_size {
-            panic_with_error!(env, CapacityError::InvalidRecommendation);
+        /// Permissionless TTL extension for archival-critical persistent records.
+        ///
+        /// Anyone may call this to keep active audit records from being archived.
+        /// Only persistent keys are extended; temporary telemetry snapshots are
+        /// intentionally left to expire.
+        pub fn extend_ttl(env: &Env, key: CapacityStorageKey) {
+            match key {
+                CapacityStorageKey::TelemetrySnapshot(_) => {
+                    // Temporary tier: no archival guarantee, no bump.
+                }
+                _ => Self::bump_persistent_ttl(env, &key),
+            }
         }
 
-        let now = env.ledger().timestamp();
-        // 24-hour sliding window reset
-        if now >= sub_record.window_start + 86400 {
-            sub_record.events_in_current_window = 0;
-            sub_record.window_start = now;
-            sub_record.is_throttled = false;
+        /// Extend the TTL of a persistent key if it is below the threshold.
+        fn bump_persistent_ttl(env: &Env, key: &CapacityStorageKey) {
+            let storage = env.storage().persistent();
+            if storage.has(key) {
+                storage.extend_ttl(key, TTL_THRESHOLD_LEDGERS, TTL_EXTEND_LEDGERS);
+            }
         }
-
-        let added = event_count as u64;
-        let projected = sub_record
-            .events_in_current_window
-            .checked_add(added)
-            .unwrap_or(u64::MAX);
-
-        if projected > tier.max_daily_events {
-            sub_record.is_throttled = true;
-            env.storage().persistent().set(&sub_key, &sub_record);
-            panic_with_error!(env, CapacityError::QuotaExceeded);
-        }
-
-        sub_record.events_in_current_window = projected;
-
-        // Overflow-safe batch cost: (event_count * cost_per_m) / 1_000_000
-        let batch_cost = added
-            .checked_mul(tier.cost_per_m_events_stroops)
-            .and_then(|v| v.checked_div(1_000_000))
-            .unwrap_or(0);
-
-        let new_total = sub_record
-            .total_cost_billed_stroops
-            .checked_add(batch_cost)
-            .unwrap_or(u64::MAX);
-        sub_record.total_cost_billed_stroops = new_total;
-
-        env.storage().persistent().set(&sub_key, &sub_record);
-        true
-    }
-
-    /// Record predictive scaling recommendation generated by ML forecasting model
-    pub fn record_recommendation(
-        env: &Env,
-        reporter: Address,
-        rec: ScalingRecommendationRecord,
-    ) {
-        reporter.require_auth();
-
-        if rec.recommended_min_replicas == 0
-            || rec.recommended_max_replicas < rec.recommended_min_replicas
-            || rec.recommended_max_replicas > MAX_REPLICAS
-            || rec.recommended_cpu_millicores == 0
-            || rec.recommended_memory_mb > MAX_MEMORY_MB
-            || rec.forecast_horizon_hours == 0
-            || rec.forecast_horizon_hours > MAX_FORECAST_HOURS
-            || rec.confidence_score_percent > MAX_CONFIDENCE_PCT
-        {
-            panic_with_error!(env, CapacityError::InvalidRecommendation);
-        }
-
-        env.storage()
-            .persistent()
-            .set(&CapacityStorageKey::LatestRecommendation, &rec);
-    }
-
-    /// Configure auto-scaling policy parameters
-    pub fn update_policy(
-        env: &Env,
-        admin: Address,
-        policy: CapacityPolicy,
-    ) {
-        admin.require_auth();
-
-        if policy.min_replicas == 0
-            || policy.max_replicas < policy.min_replicas
-            || policy.max_replicas > MAX_REPLICAS
-            || policy.min_replicas > MAX_REPLICAS
-            || policy.target_cpu_percent > MAX_CPU_BASIS_PTS
-            || policy.cooldown_period_seconds == 0
-        {
-            panic_with_error!(env, CapacityError::InvalidPolicyBounds);
-        }
-
-        env.storage()
-            .persistent()
-            .set(&CapacityStorageKey::Policy, &policy);
-    }
-
-    /// Query latest scaling recommendation
-    pub fn get_latest_recommendation(env: &Env) -> Option<ScalingRecommendationRecord> {
-        env.storage().persistent().get(&CapacityStorageKey::LatestRecommendation)
-    }
-
-    /// Query active auto-scaling policy
-    pub fn get_policy(env: &Env) -> Option<CapacityPolicy> {
-        env.storage().persistent().get(&CapacityStorageKey::Policy)
-    }
-
-    /// Query submitter quota record
-    pub fn get_submitter_quota(env: &Env, submitter: Address) -> Option<SubmitterQuotaRecord> {
-        let key = CapacityStorageKey::SubmitterQuota(submitter);
-        env.storage().persistent().get(&key)
-    }
-
-    /// Query quota tier definition
-    pub fn get_quota_tier(env: &Env, tier_id: u32) -> Option<QuotaTier> {
-        let key = CapacityStorageKey::Tier(tier_id);
-        env.storage().persistent().get(&key)
     }
 }
