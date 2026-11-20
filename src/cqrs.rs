@@ -13,6 +13,32 @@
 //!   or fast-forwarding from the latest snapshot.
 //! - **Snapshotting**: Point-in-time state capture for performant projection reconstruction.
 //! - **Materialized Views**: Per-type and per-submitter indexes for low-gas query operations.
+//!
+//! ## Storage tiers & TTL policy
+//!
+//! Every [`CqrsStorageKey`] is assigned to exactly one Soroban storage tier
+//! according to its retention SLA (see [`CqrsStorageKey::tier`]):
+//!
+//! | Tier         | Keys                                                        | Retention SLA |
+//! |--------------|-------------------------------------------------------------|---------------|
+//! | `Instance`   | `Seq`, `Proj`, `SnapCnt`                                    | lives as long as the contract; small, read on every command |
+//! | `Persistent` | `Event`, `IdSeq`, `Snap`, `TypeIdx`, `TypeCnt`, `SubIdx`, `SubCnt` | archival-critical audit records; bumped on write and via the permissionless `extend_*_ttl` helpers |
+//! | `Temporary`  | `Idem`                                                      | idempotency replay window ([`CQRS_IDEMPOTENCY_TTL_LEDGERS`]); safe to expire |
+//!
+//! Previously every key lived in instance storage, so each command re-wrote a
+//! single ledger entry whose size grew with the whole event history. Moving
+//! per-event records to dedicated persistent entries keeps the per-command
+//! write footprint constant.
+//!
+//! ## Serialized layout packing
+//!
+//! Stored records use positional tuple structs ([`PackedCqrsEvent`],
+//! [`PackedProjection`], [`PackedSnapshot`]) which serialise as `ScVec`
+//! instead of an `ScMap` keyed by field-name symbols, the command kind is a
+//! `u32` discriminant ([`CqrsCommandKind`]) instead of a `Symbol`, and the
+//! sequence number / snapshot id are carried only by the storage key. The
+//! public read models (`CqrsStoredEvent`, `EventView`, `EventProjection`,
+//! `ProjectionSnapshot`) are unchanged for callers.
 
 use soroban_sdk::{
     contracterror, contracttype, Address, Bytes, BytesN, Env, Symbol, Vec,
@@ -33,6 +59,49 @@ pub enum CqrsError {
     SubmitterBlocked = 606,
     InvalidCommand = 607,
     DuplicateEvent = 608,
+}
+
+// ── Storage tier & TTL policy ───────────────────────────────────────────────
+
+/// Bump instance storage when its remaining TTL falls below ~1 day.
+pub const CQRS_INSTANCE_TTL_THRESHOLD: u32 = 17_280;
+/// Extend instance storage to ~30 days.
+pub const CQRS_INSTANCE_TTL_EXTEND_TO: u32 = 518_400;
+/// Bump archival-critical persistent records when below ~30 days.
+pub const CQRS_PERSISTENT_TTL_THRESHOLD: u32 = 518_400;
+/// Extend archival-critical persistent records to ~120 days.
+pub const CQRS_PERSISTENT_TTL_EXTEND_TO: u32 = 2_073_600;
+/// Idempotency keys only need to survive the client retry window (~1 day).
+pub const CQRS_IDEMPOTENCY_TTL_LEDGERS: u32 = 17_280;
+
+/// Soroban storage tier a [`CqrsStorageKey`] is written to.
+#[derive(Copy, Clone, Debug, Eq, PartialEq)]
+pub enum CqrsStorageTier {
+    Instance,
+    Persistent,
+    Temporary,
+}
+
+/// Kind of command that produced a stored event. Serialised as a `u32`
+/// discriminant (4 bytes) rather than a `Symbol`.
+#[contracttype]
+#[derive(Copy, Clone, Debug, Eq, PartialEq, PartialOrd, Ord)]
+#[repr(u32)]
+pub enum CqrsCommandKind {
+    Log = 0,
+    Update = 1,
+    Governance = 2,
+}
+
+impl CqrsCommandKind {
+    /// Human-readable symbol for the command kind (`log`, `update`, `governance`).
+    pub fn as_symbol(&self, env: &Env) -> Symbol {
+        match self {
+            CqrsCommandKind::Log => Symbol::new(env, "log"),
+            CqrsCommandKind::Update => Symbol::new(env, "update"),
+            CqrsCommandKind::Governance => Symbol::new(env, "governance"),
+        }
+    }
 }
 
 // ── Command Side Models (Write Path) ────────────────────────────────────────
@@ -85,12 +154,26 @@ pub struct CommandResult {
 
 // ── Event Store (Append-Only Log) ───────────────────────────────────────────
 
-/// Immutable record appended to the CQRS event store.
+/// Position of an event inside its materialized indexes.
+#[contracttype]
+#[derive(Copy, Clone, Debug, Eq, PartialEq)]
+pub enum CqrsIndexPos {
+    /// Not indexed (`Update` / `Governance` commands).
+    Unindexed,
+    /// `(type_index_position, submitter_index_position)` of an indexed `Log` event.
+    At(u32, u32),
+}
+
+/// Logical view of a record in the CQRS event store.
+///
+/// This is the decoded form of [`PackedCqrsEvent`]; `sequence` comes from the
+/// storage key and is not serialised with the record.
 #[contracttype]
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub struct CqrsStoredEvent {
     pub sequence: u32,
-    pub event_id: BytesN<32>,
+    /// `None` for governance commands, which have no content-addressed ID.
+    pub event_id: Option<BytesN<32>>,
     pub timestamp: u64,
     pub event_type: Symbol,
     pub submitter: Address,
@@ -98,7 +181,62 @@ pub struct CqrsStoredEvent {
     pub category: Option<Symbol>,
     pub sub_event_type: Option<Symbol>,
     pub version: u32,
-    pub command_type: Symbol,
+    pub kind: CqrsCommandKind,
+    /// Index positions for `Log` events, so TTL helpers can bump the
+    /// matching materialized index entries.
+    pub index_pos: CqrsIndexPos,
+}
+
+/// Packed on-ledger encoding of [`CqrsStoredEvent`] (positional `ScVec`).
+///
+/// Field order: `event_id, timestamp, event_type, submitter, metadata,
+/// category, sub_event_type, version, kind, index_pos`.
+#[contracttype]
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct PackedCqrsEvent(
+    pub Option<BytesN<32>>,
+    pub u64,
+    pub Symbol,
+    pub Address,
+    pub Bytes,
+    pub Option<Symbol>,
+    pub Option<Symbol>,
+    pub u32,
+    pub CqrsCommandKind,
+    pub CqrsIndexPos,
+);
+
+impl CqrsStoredEvent {
+    pub fn pack(&self) -> PackedCqrsEvent {
+        PackedCqrsEvent(
+            self.event_id.clone(),
+            self.timestamp,
+            self.event_type.clone(),
+            self.submitter.clone(),
+            self.metadata.clone(),
+            self.category.clone(),
+            self.sub_event_type.clone(),
+            self.version,
+            self.kind,
+            self.index_pos,
+        )
+    }
+
+    pub fn unpack(sequence: u32, p: PackedCqrsEvent) -> Self {
+        CqrsStoredEvent {
+            sequence,
+            event_id: p.0,
+            timestamp: p.1,
+            event_type: p.2,
+            submitter: p.3,
+            metadata: p.4,
+            category: p.5,
+            sub_event_type: p.6,
+            version: p.7,
+            kind: p.8,
+            index_pos: p.9,
+        }
+    }
 }
 
 // ── Query Side Models (Read Path) ───────────────────────────────────────────
@@ -140,6 +278,45 @@ pub struct EventProjection {
     pub last_updated: u64,
 }
 
+/// Packed on-ledger encoding of [`EventProjection`].
+///
+/// Field order: `last_sequence, total_events, total_commands, type_counts,
+/// submitter_counts, last_updated`.
+#[contracttype]
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct PackedProjection(
+    pub u32,
+    pub u32,
+    pub u32,
+    pub Vec<(Symbol, u32)>,
+    pub Vec<(Address, u32)>,
+    pub u64,
+);
+
+impl EventProjection {
+    pub fn pack(&self) -> PackedProjection {
+        PackedProjection(
+            self.last_sequence,
+            self.total_events,
+            self.total_commands,
+            self.type_counts.clone(),
+            self.submitter_counts.clone(),
+            self.last_updated,
+        )
+    }
+
+    pub fn unpack(p: PackedProjection) -> Self {
+        EventProjection {
+            last_sequence: p.0,
+            total_events: p.1,
+            total_commands: p.2,
+            type_counts: p.3,
+            submitter_counts: p.4,
+            last_updated: p.5,
+        }
+    }
+}
+
 /// Point-in-time snapshot of the projection state.
 #[contracttype]
 #[derive(Clone, Debug, Eq, PartialEq)]
@@ -150,35 +327,62 @@ pub struct ProjectionSnapshot {
     pub timestamp: u64,
 }
 
+/// Packed on-ledger encoding of [`ProjectionSnapshot`]; the snapshot id is the
+/// storage key and the sequence is `projection.last_sequence`.
+///
+/// Field order: `projection, timestamp`.
+#[contracttype]
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct PackedSnapshot(pub PackedProjection, pub u64);
+
 // ── Storage Keys ────────────────────────────────────────────────────────────
 
+/// CQRS storage keys. Variant names are kept short because the variant name
+/// is serialised as a `Symbol` inside every ledger key.
 #[contracttype]
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub enum CqrsStorageKey {
-    /// Monotonic sequence -> CqrsStoredEvent (immutable event log).
-    EventStore(u32),
-    /// Current highest sequence number (u32).
-    EventSequence,
-    /// Event ID -> sequence number (u32).
-    EventIdToSequence(BytesN<32>),
-    /// Active materialized projection state.
-    Projection,
-    /// Snapshot ID -> ProjectionSnapshot.
-    Snapshot(u32),
-    /// Total snapshots created.
-    SnapshotCount,
-    /// Most recently created snapshot ID.
-    LatestSnapshotId,
-    /// Event type -> list of event IDs (materialized type view).
-    MaterializedTypeIndex(Symbol),
-    /// Event type -> cached event count.
-    MaterializedTypeCount(Symbol),
-    /// Submitter address -> list of sequence numbers.
-    MaterializedSubmitterIndex(Address),
-    /// Submitter address -> cached event count.
-    MaterializedSubmitterCount(Address),
-    /// Idempotency key -> CommandResult.
-    Idempotency(BytesN<32>),
+    /// [Persistent] Monotonic sequence -> `PackedCqrsEvent` (immutable event log).
+    Event(u32),
+    /// [Instance] Current highest sequence number (u32).
+    Seq,
+    /// [Persistent] Event ID -> sequence number (u32).
+    IdSeq(BytesN<32>),
+    /// [Instance] Active materialized projection state (`PackedProjection`).
+    Proj,
+    /// [Persistent] Snapshot ID -> `PackedSnapshot`.
+    Snap(u32),
+    /// [Instance] Total snapshots created; also the latest snapshot ID.
+    SnapCnt,
+    /// [Persistent] (event type, position) -> sequence number.
+    TypeIdx(Symbol, u32),
+    /// [Persistent] Event type -> number of entries in the type index.
+    TypeCnt(Symbol),
+    /// [Persistent] (submitter, position) -> sequence number.
+    SubIdx(Address, u32),
+    /// [Persistent] Submitter -> number of entries in the submitter index.
+    SubCnt(Address),
+    /// [Temporary] Idempotency key -> `CommandResult`.
+    Idem(BytesN<32>),
+}
+
+impl CqrsStorageKey {
+    /// Storage tier this key is classified into (see module docs).
+    pub fn tier(&self) -> CqrsStorageTier {
+        match self {
+            CqrsStorageKey::Seq | CqrsStorageKey::Proj | CqrsStorageKey::SnapCnt => {
+                CqrsStorageTier::Instance
+            }
+            CqrsStorageKey::Idem(_) => CqrsStorageTier::Temporary,
+            CqrsStorageKey::Event(_)
+            | CqrsStorageKey::IdSeq(_)
+            | CqrsStorageKey::Snap(_)
+            | CqrsStorageKey::TypeIdx(_, _)
+            | CqrsStorageKey::TypeCnt(_)
+            | CqrsStorageKey::SubIdx(_, _)
+            | CqrsStorageKey::SubCnt(_) => CqrsStorageTier::Persistent,
+        }
+    }
 }
 
 // ── CQRS Engine Implementation ──────────────────────────────────────────────
@@ -186,6 +390,118 @@ pub enum CqrsStorageKey {
 pub struct CqrsEngine;
 
 impl CqrsEngine {
+    // ── Tiered storage primitives ───────────────────────────────────────────
+
+    fn load<V: soroban_sdk::TryFromVal<Env, soroban_sdk::Val>>(
+        env: &Env,
+        key: &CqrsStorageKey,
+    ) -> Option<V> {
+        match key.tier() {
+            CqrsStorageTier::Instance => env.storage().instance().get(key),
+            CqrsStorageTier::Persistent => env.storage().persistent().get(key),
+            CqrsStorageTier::Temporary => env.storage().temporary().get(key),
+        }
+    }
+
+    fn store<V: soroban_sdk::IntoVal<Env, soroban_sdk::Val>>(
+        env: &Env,
+        key: &CqrsStorageKey,
+        value: &V,
+    ) {
+        match key.tier() {
+            CqrsStorageTier::Instance => env.storage().instance().set(key, value),
+            CqrsStorageTier::Persistent => {
+                env.storage().persistent().set(key, value);
+                env.storage().persistent().extend_ttl(
+                    key,
+                    CQRS_PERSISTENT_TTL_THRESHOLD,
+                    CQRS_PERSISTENT_TTL_EXTEND_TO,
+                );
+            }
+            CqrsStorageTier::Temporary => {
+                env.storage().temporary().set(key, value);
+                env.storage().temporary().extend_ttl(
+                    key,
+                    CQRS_IDEMPOTENCY_TTL_LEDGERS,
+                    CQRS_IDEMPOTENCY_TTL_LEDGERS,
+                );
+            }
+        }
+    }
+
+    /// Extend the TTL of a persistent key if it exists. Returns `false` when
+    /// the key is absent.
+    fn bump_persistent(env: &Env, key: &CqrsStorageKey) -> bool {
+        if env.storage().persistent().has(key) {
+            env.storage().persistent().extend_ttl(
+                key,
+                CQRS_PERSISTENT_TTL_THRESHOLD,
+                CQRS_PERSISTENT_TTL_EXTEND_TO,
+            );
+            true
+        } else {
+            false
+        }
+    }
+
+    fn bump_instance(env: &Env) {
+        env.storage()
+            .instance()
+            .extend_ttl(CQRS_INSTANCE_TTL_THRESHOLD, CQRS_INSTANCE_TTL_EXTEND_TO);
+    }
+
+    /// Current highest sequence number in the event store (0 when empty).
+    pub fn current_sequence(env: &Env) -> u32 {
+        Self::load(env, &CqrsStorageKey::Seq).unwrap_or(0)
+    }
+
+    /// Cached `CommandResult` for an idempotency key, if still live.
+    pub fn get_idempotent_result(env: &Env, key: BytesN<32>) -> Option<CommandResult> {
+        Self::load(env, &CqrsStorageKey::Idem(key))
+    }
+
+    /// Load and decode the stored event at `sequence`.
+    pub fn get_stored_event(env: &Env, sequence: u32) -> Option<CqrsStoredEvent> {
+        let packed: PackedCqrsEvent = Self::load(env, &CqrsStorageKey::Event(sequence))?;
+        Some(CqrsStoredEvent::unpack(sequence, packed))
+    }
+
+    // ── Permissionless TTL helpers ──────────────────────────────────────────
+
+    /// Extend the TTL of an archival-critical event record together with its
+    /// ID lookup and materialized index entries. Permissionless: anyone may pay
+    /// to keep audit history live.
+    pub fn extend_event_ttl(env: &Env, sequence: u32) -> Result<(), CqrsError> {
+        let stored = Self::get_stored_event(env, sequence).ok_or(CqrsError::EventNotFound)?;
+        Self::bump_persistent(env, &CqrsStorageKey::Event(sequence));
+        if let Some(ref id) = stored.event_id {
+            Self::bump_persistent(env, &CqrsStorageKey::IdSeq(id.clone()));
+        }
+        if let CqrsIndexPos::At(type_pos, sub_pos) = stored.index_pos {
+            Self::bump_persistent(
+                env,
+                &CqrsStorageKey::TypeIdx(stored.event_type.clone(), type_pos),
+            );
+            Self::bump_persistent(env, &CqrsStorageKey::TypeCnt(stored.event_type));
+            Self::bump_persistent(
+                env,
+                &CqrsStorageKey::SubIdx(stored.submitter.clone(), sub_pos),
+            );
+            Self::bump_persistent(env, &CqrsStorageKey::SubCnt(stored.submitter));
+        }
+        Self::bump_instance(env);
+        Ok(())
+    }
+
+    /// Extend the TTL of a projection snapshot. Permissionless.
+    pub fn extend_snapshot_ttl(env: &Env, snapshot_id: u32) -> Result<(), CqrsError> {
+        if !Self::bump_persistent(env, &CqrsStorageKey::Snap(snapshot_id)) {
+            return Err(CqrsError::SnapshotNotFound);
+        }
+        Self::bump_instance(env);
+        Ok(())
+    }
+
     // ── Command Side (Write Path) ───────────────────────────────────────────
 
     /// Record a successfully executed event in the append-only event store,
@@ -196,16 +512,11 @@ impl CqrsEngine {
         cmd: &LogEventCommand,
         timestamp: u64,
     ) -> CommandResult {
-        let current_seq: u32 = env
-            .storage()
-            .instance()
-            .get(&CqrsStorageKey::EventSequence)
-            .unwrap_or(0);
-        let next_seq = current_seq.saturating_add(1);
+        let next_seq = Self::current_sequence(env).saturating_add(1);
 
-        let stored = CqrsStoredEvent {
+        let mut stored = CqrsStoredEvent {
             sequence: next_seq,
-            event_id: event_id.clone(),
+            event_id: Some(event_id.clone()),
             timestamp,
             event_type: cmd.event_type.clone(),
             submitter: cmd.submitter.clone(),
@@ -213,23 +524,18 @@ impl CqrsEngine {
             category: cmd.category.clone(),
             sub_event_type: cmd.sub_event_type.clone(),
             version: 1,
-            command_type: Symbol::new(env, "log"),
+            kind: CqrsCommandKind::Log,
+            index_pos: CqrsIndexPos::Unindexed,
         };
 
-        // Append to immutable log
-        env.storage()
-            .instance()
-            .set(&CqrsStorageKey::EventStore(next_seq), &stored);
-        env.storage()
-            .instance()
-            .set(&CqrsStorageKey::EventSequence, &next_seq);
-        env.storage().instance().set(
-            &CqrsStorageKey::EventIdToSequence(event_id.clone()),
-            &next_seq,
-        );
+        // Update materialized index views (records positions on the event)
+        let (type_pos, sub_pos) = Self::add_to_materialized_index(env, &stored, next_seq);
+        stored.index_pos = CqrsIndexPos::At(type_pos, sub_pos);
 
-        // Update materialized index views
-        Self::add_to_materialized_index(env, &stored, next_seq);
+        // Append to immutable log
+        Self::store(env, &CqrsStorageKey::Event(next_seq), &stored.pack());
+        Self::store(env, &CqrsStorageKey::Seq, &next_seq);
+        Self::store(env, &CqrsStorageKey::IdSeq(event_id.clone()), &next_seq);
 
         // Update live projection
         let mut proj = Self::get_projection(env);
@@ -243,9 +549,7 @@ impl CqrsEngine {
             &mut proj.submitter_counts,
             cmd.submitter.clone(),
         );
-        env.storage()
-            .instance()
-            .set(&CqrsStorageKey::Projection, &proj);
+        Self::store(env, &CqrsStorageKey::Proj, &proj.pack());
 
         let result = CommandResult {
             success: true,
@@ -255,12 +559,11 @@ impl CqrsEngine {
             message: Some(Symbol::new(env, "logged")),
         };
 
-        // Record idempotency key if supplied
+        // Record idempotency key if supplied (temporary tier)
         if let Some(ref idemp) = cmd.idempotency_key {
-            env.storage()
-                .instance()
-                .set(&CqrsStorageKey::Idempotency(idemp.clone()), &result);
+            Self::store(env, &CqrsStorageKey::Idem(idemp.clone()), &result);
         }
+        Self::bump_instance(env);
 
         // Publish CQRS event notification
         env.events().publish(
@@ -282,50 +585,35 @@ impl CqrsEngine {
         new_version: u32,
         timestamp: u64,
     ) -> CommandResult {
-        let current_seq: u32 = env
-            .storage()
-            .instance()
-            .get(&CqrsStorageKey::EventSequence)
-            .unwrap_or(0);
-        let next_seq = current_seq.saturating_add(1);
+        let next_seq = Self::current_sequence(env).saturating_add(1);
 
         let stored = CqrsStoredEvent {
             sequence: next_seq,
-            event_id: new_event_id.clone(),
+            event_id: Some(new_event_id.clone()),
             timestamp,
-            event_type: event_type.clone(),
+            event_type,
             submitter: caller,
             metadata: new_metadata,
-            category: Some(Symbol::new(env, "update")),
+            category: None,
             sub_event_type: None,
             version: new_version,
-            command_type: Symbol::new(env, "update"),
+            kind: CqrsCommandKind::Update,
+            index_pos: CqrsIndexPos::Unindexed,
         };
 
         // Append to immutable log
-        env.storage()
-            .instance()
-            .set(&CqrsStorageKey::EventStore(next_seq), &stored);
-        env.storage()
-            .instance()
-            .set(&CqrsStorageKey::EventSequence, &next_seq);
-        env.storage().instance().set(
-            &CqrsStorageKey::EventIdToSequence(new_event_id.clone()),
-            &next_seq,
-        );
-        env.storage().instance().set(
-            &CqrsStorageKey::EventIdToSequence(original_event_id),
-            &next_seq,
-        );
+        Self::store(env, &CqrsStorageKey::Event(next_seq), &stored.pack());
+        Self::store(env, &CqrsStorageKey::Seq, &next_seq);
+        Self::store(env, &CqrsStorageKey::IdSeq(new_event_id.clone()), &next_seq);
+        Self::store(env, &CqrsStorageKey::IdSeq(original_event_id), &next_seq);
 
         // Update live projection
         let mut proj = Self::get_projection(env);
         proj.total_commands = proj.total_commands.saturating_add(1);
         proj.last_sequence = next_seq;
         proj.last_updated = timestamp;
-        env.storage()
-            .instance()
-            .set(&CqrsStorageKey::Projection, &proj);
+        Self::store(env, &CqrsStorageKey::Proj, &proj.pack());
+        Self::bump_instance(env);
 
         let result = CommandResult {
             success: true,
@@ -350,40 +638,31 @@ impl CqrsEngine {
         action: Symbol,
         timestamp: u64,
     ) -> CommandResult {
-        let current_seq: u32 = env
-            .storage()
-            .instance()
-            .get(&CqrsStorageKey::EventSequence)
-            .unwrap_or(0);
-        let next_seq = current_seq.saturating_add(1);
+        let next_seq = Self::current_sequence(env).saturating_add(1);
 
         let stored = CqrsStoredEvent {
             sequence: next_seq,
-            event_id: BytesN::from_array(env, &[0u8; 32]),
+            event_id: None,
             timestamp,
             event_type: action.clone(),
             submitter: caller,
             metadata: Bytes::new(env),
-            category: Some(Symbol::new(env, "governance")),
+            category: None,
             sub_event_type: None,
             version: 1,
-            command_type: Symbol::new(env, "governance"),
+            kind: CqrsCommandKind::Governance,
+            index_pos: CqrsIndexPos::Unindexed,
         };
 
-        env.storage()
-            .instance()
-            .set(&CqrsStorageKey::EventStore(next_seq), &stored);
-        env.storage()
-            .instance()
-            .set(&CqrsStorageKey::EventSequence, &next_seq);
+        Self::store(env, &CqrsStorageKey::Event(next_seq), &stored.pack());
+        Self::store(env, &CqrsStorageKey::Seq, &next_seq);
 
         let mut proj = Self::get_projection(env);
         proj.total_commands = proj.total_commands.saturating_add(1);
         proj.last_sequence = next_seq;
         proj.last_updated = timestamp;
-        env.storage()
-            .instance()
-            .set(&CqrsStorageKey::Projection, &proj);
+        Self::store(env, &CqrsStorageKey::Proj, &proj.pack());
+        Self::bump_instance(env);
 
         let result = CommandResult {
             success: true,
@@ -405,38 +684,38 @@ impl CqrsEngine {
 
     /// Get read-optimized `EventView` by content-addressed event ID.
     pub fn get_event_view(env: &Env, event_id: BytesN<32>) -> Option<EventView> {
-        let seq = env
-            .storage()
-            .instance()
-            .get::<_, u32>(&CqrsStorageKey::EventIdToSequence(event_id))?;
+        let seq: u32 = Self::load(env, &CqrsStorageKey::IdSeq(event_id))?;
         Self::get_event_by_sequence(env, seq)
     }
 
     /// Get read-optimized `EventView` by monotonic sequence number.
     pub fn get_event_by_sequence(env: &Env, sequence: u32) -> Option<EventView> {
-        let stored = env
-            .storage()
-            .instance()
-            .get::<_, CqrsStoredEvent>(&CqrsStorageKey::EventStore(sequence))?;
-        Some(EventView {
-            event_id: stored.event_id,
+        let stored = Self::get_stored_event(env, sequence)?;
+        Some(Self::to_view(env, stored))
+    }
+
+    fn to_view(env: &Env, stored: CqrsStoredEvent) -> EventView {
+        let category = match stored.kind {
+            CqrsCommandKind::Log => stored.category,
+            other => Some(other.as_symbol(env)),
+        };
+        EventView {
+            event_id: stored
+                .event_id
+                .unwrap_or_else(|| BytesN::from_array(env, &[0u8; 32])),
             sequence: stored.sequence,
             timestamp: stored.timestamp,
             event_type: stored.event_type,
-            category: stored.category,
+            category,
             submitter: stored.submitter,
             metadata: stored.metadata,
             version: stored.version,
-        })
+        }
     }
 
     /// Query the read model with filtering on type, submitter, and sequence range.
     pub fn query_events(env: &Env, query: EventQuery) -> Vec<EventView> {
-        let total_seq: u32 = env
-            .storage()
-            .instance()
-            .get(&CqrsStorageKey::EventSequence)
-            .unwrap_or(0);
+        let total_seq = Self::current_sequence(env);
         let mut results = Vec::new(env);
         if total_seq == 0 {
             return results;
@@ -466,57 +745,49 @@ impl CqrsEngine {
         }
 
         // Fast path 1: Materialized type index lookup
-        if let Some(ref q_type) = query.event_type {
-            if query.submitter.is_none() {
-                if let Some(type_event_ids) = env
-                    .storage()
-                    .instance()
-                    .get::<_, Vec<BytesN<32>>>(&CqrsStorageKey::MaterializedTypeIndex(q_type.clone()))
-                {
-                    for i in 0..type_event_ids.len() {
-                        let id = type_event_ids.get(i).unwrap();
-                        if let Some(seq) = env
-                            .storage()
-                            .instance()
-                            .get::<_, u32>(&CqrsStorageKey::EventIdToSequence(id))
-                        {
-                            if seq >= start_seq && seq <= end_seq {
-                                if let Some(view) = Self::get_event_by_sequence(env, seq) {
-                                    results.push_back(view);
-                                    if results.len() >= eff_limit {
-                                        return results;
-                                    }
-                                }
+        if let (Some(q_type), None) = (&query.event_type, &query.submitter) {
+            let count = Self::get_materialized_type_count(env, q_type.clone());
+            for pos in 0..count {
+                let seq: Option<u32> =
+                    Self::load(env, &CqrsStorageKey::TypeIdx(q_type.clone(), pos));
+                if let Some(seq) = seq {
+                    if seq > end_seq {
+                        break;
+                    }
+                    if seq >= start_seq {
+                        if let Some(view) = Self::get_event_by_sequence(env, seq) {
+                            results.push_back(view);
+                            if results.len() >= eff_limit {
+                                break;
                             }
                         }
                     }
-                    return results;
                 }
             }
+            return results;
         }
 
         // Fast path 2: Materialized submitter index lookup
-        if let Some(ref q_sub) = query.submitter {
-            if query.event_type.is_none() {
-                if let Some(sub_seqs) = env
-                    .storage()
-                    .instance()
-                    .get::<_, Vec<u32>>(&CqrsStorageKey::MaterializedSubmitterIndex(q_sub.clone()))
-                {
-                    for i in 0..sub_seqs.len() {
-                        let seq = sub_seqs.get(i).unwrap();
-                        if seq >= start_seq && seq <= end_seq {
-                            if let Some(view) = Self::get_event_by_sequence(env, seq) {
-                                results.push_back(view);
-                                if results.len() >= eff_limit {
-                                    return results;
-                                }
+        if let (None, Some(q_sub)) = (&query.event_type, &query.submitter) {
+            let count = Self::get_materialized_submitter_count(env, q_sub.clone());
+            for pos in 0..count {
+                let seq: Option<u32> =
+                    Self::load(env, &CqrsStorageKey::SubIdx(q_sub.clone(), pos));
+                if let Some(seq) = seq {
+                    if seq > end_seq {
+                        break;
+                    }
+                    if seq >= start_seq {
+                        if let Some(view) = Self::get_event_by_sequence(env, seq) {
+                            results.push_back(view);
+                            if results.len() >= eff_limit {
+                                break;
                             }
                         }
                     }
-                    return results;
                 }
             }
+            return results;
         }
 
         // Sequential range scan fallback
@@ -544,53 +815,36 @@ impl CqrsEngine {
 
     /// Get current aggregated projection.
     pub fn get_projection(env: &Env) -> EventProjection {
-        env.storage()
-            .instance()
-            .get(&CqrsStorageKey::Projection)
+        Self::load::<PackedProjection>(env, &CqrsStorageKey::Proj)
+            .map(EventProjection::unpack)
             .unwrap_or_else(|| Self::empty_projection(env))
     }
 
     // ── Projection Rebuilding & Snapshotting ────────────────────────────────
 
     /// Rebuild projection state by replaying events from genesis (or from the latest snapshot).
+    ///
+    /// Materialized indexes are maintained at write time (and their positions
+    /// are recorded on each event), so replay only recomputes the projection and
+    /// never re-appends index entries.
     pub fn rebuild_projection(env: &Env, from_snapshot: bool) -> EventProjection {
-        let total_seq: u32 = env
-            .storage()
-            .instance()
-            .get(&CqrsStorageKey::EventSequence)
-            .unwrap_or(0);
+        let total_seq = Self::current_sequence(env);
 
-        let (mut proj, start_seq) = if from_snapshot {
-            if let Some(latest_id) = env
-                .storage()
-                .instance()
-                .get::<_, u32>(&CqrsStorageKey::LatestSnapshotId)
-            {
-                if let Some(snap) = env
-                    .storage()
-                    .instance()
-                    .get::<_, ProjectionSnapshot>(&CqrsStorageKey::Snapshot(latest_id))
-                {
-                    (snap.projection, snap.sequence.saturating_add(1))
-                } else {
-                    (Self::empty_projection(env), 1)
-                }
-            } else {
-                (Self::empty_projection(env), 1)
-            }
+        let latest_snapshot = if from_snapshot {
+            Self::latest_snapshot_id(env).and_then(|id| Self::get_snapshot(env, id))
         } else {
-            (Self::empty_projection(env), 1)
+            None
+        };
+        let (mut proj, start_seq) = match latest_snapshot {
+            Some(snap) => (snap.projection, snap.sequence.saturating_add(1)),
+            None => (Self::empty_projection(env), 1),
         };
 
         if start_seq <= total_seq {
             for seq in start_seq..=total_seq {
-                if let Some(stored) = env
-                    .storage()
-                    .instance()
-                    .get::<_, CqrsStoredEvent>(&CqrsStorageKey::EventStore(seq))
-                {
+                if let Some(stored) = Self::get_stored_event(env, seq) {
                     proj.total_commands = proj.total_commands.saturating_add(1);
-                    if stored.command_type == Symbol::new(env, "log") {
+                    if stored.kind == CqrsCommandKind::Log {
                         proj.total_events = proj.total_events.saturating_add(1);
                         Self::increment_type_count(
                             env,
@@ -602,9 +856,6 @@ impl CqrsEngine {
                             &mut proj.submitter_counts,
                             stored.submitter.clone(),
                         );
-                        if !from_snapshot {
-                            Self::add_to_materialized_index(env, &stored, seq);
-                        }
                     }
                     proj.last_sequence = seq;
                     proj.last_updated = stored.timestamp;
@@ -612,9 +863,8 @@ impl CqrsEngine {
             }
         }
 
-        env.storage()
-            .instance()
-            .set(&CqrsStorageKey::Projection, &proj);
+        Self::store(env, &CqrsStorageKey::Proj, &proj.pack());
+        Self::bump_instance(env);
 
         env.events().publish(
             (Symbol::new(env, "cqrs"), Symbol::new(env, "rebuilt")),
@@ -626,54 +876,57 @@ impl CqrsEngine {
 
     /// Capture a snapshot of the current projection state.
     pub fn create_snapshot(env: &Env) -> u32 {
-        let count: u32 = env
-            .storage()
-            .instance()
-            .get(&CqrsStorageKey::SnapshotCount)
-            .unwrap_or(0);
+        let count: u32 = Self::load(env, &CqrsStorageKey::SnapCnt).unwrap_or(0);
         let next_id = count.saturating_add(1);
         let proj = Self::get_projection(env);
+        let sequence = proj.last_sequence;
 
-        let snapshot = ProjectionSnapshot {
-            snapshot_id: next_id,
-            sequence: proj.last_sequence,
-            projection: proj,
-            timestamp: env.ledger().timestamp(),
-        };
-
-        env.storage()
-            .instance()
-            .set(&CqrsStorageKey::Snapshot(next_id), &snapshot);
-        env.storage()
-            .instance()
-            .set(&CqrsStorageKey::SnapshotCount, &next_id);
-        env.storage()
-            .instance()
-            .set(&CqrsStorageKey::LatestSnapshotId, &next_id);
+        Self::store(
+            env,
+            &CqrsStorageKey::Snap(next_id),
+            &PackedSnapshot(proj.pack(), env.ledger().timestamp()),
+        );
+        Self::store(env, &CqrsStorageKey::SnapCnt, &next_id);
+        Self::bump_instance(env);
 
         env.events().publish(
             (Symbol::new(env, "cqrs"), Symbol::new(env, "snapshot")),
-            (next_id, snapshot.sequence),
+            (next_id, sequence),
         );
 
         next_id
     }
 
+    /// ID of the most recently created snapshot, if any.
+    pub fn latest_snapshot_id(env: &Env) -> Option<u32> {
+        match Self::load::<u32>(env, &CqrsStorageKey::SnapCnt) {
+            Some(0) | None => None,
+            Some(id) => Some(id),
+        }
+    }
+
     /// Retrieve a saved snapshot by ID.
     pub fn get_snapshot(env: &Env, snapshot_id: u32) -> Option<ProjectionSnapshot> {
-        env.storage()
-            .instance()
-            .get(&CqrsStorageKey::Snapshot(snapshot_id))
+        let packed: PackedSnapshot = Self::load(env, &CqrsStorageKey::Snap(snapshot_id))?;
+        let projection = EventProjection::unpack(packed.0);
+        Some(ProjectionSnapshot {
+            snapshot_id,
+            sequence: projection.last_sequence,
+            projection,
+            timestamp: packed.1,
+        })
     }
 
     // ── Materialized Views ──────────────────────────────────────────────────
 
     /// Get total count of events for an event type from the materialized view.
     pub fn get_materialized_type_count(env: &Env, event_type: Symbol) -> u32 {
-        env.storage()
-            .instance()
-            .get(&CqrsStorageKey::MaterializedTypeCount(event_type))
-            .unwrap_or(0)
+        Self::load(env, &CqrsStorageKey::TypeCnt(event_type)).unwrap_or(0)
+    }
+
+    /// Get total count of events for a submitter from the materialized view.
+    pub fn get_materialized_submitter_count(env: &Env, submitter: Address) -> u32 {
+        Self::load(env, &CqrsStorageKey::SubCnt(submitter)).unwrap_or(0)
     }
 
     /// Get paginated event IDs from the materialized type index.
@@ -683,19 +936,21 @@ impl CqrsEngine {
         start: u32,
         limit: u32,
     ) -> Vec<BytesN<32>> {
-        let all: Vec<BytesN<32>> = env
-            .storage()
-            .instance()
-            .get(&CqrsStorageKey::MaterializedTypeIndex(event_type))
-            .unwrap_or_else(|| Vec::new(env));
-        let total = all.len();
+        let total = Self::get_materialized_type_count(env, event_type.clone());
         let mut out = Vec::new(env);
         if start >= total || limit == 0 {
             return out;
         }
         let end = core::cmp::min(start.saturating_add(limit), total);
-        for i in start..end {
-            out.push_back(all.get(i).unwrap());
+        for pos in start..end {
+            let seq: Option<u32> =
+                Self::load(env, &CqrsStorageKey::TypeIdx(event_type.clone(), pos));
+            if let Some(id) = seq
+                .and_then(|s| Self::get_stored_event(env, s))
+                .and_then(|e| e.event_id)
+            {
+                out.push_back(id);
+            }
         }
         out
     }
@@ -707,19 +962,18 @@ impl CqrsEngine {
         start: u32,
         limit: u32,
     ) -> Vec<u32> {
-        let all: Vec<u32> = env
-            .storage()
-            .instance()
-            .get(&CqrsStorageKey::MaterializedSubmitterIndex(submitter))
-            .unwrap_or_else(|| Vec::new(env));
-        let total = all.len();
+        let total = Self::get_materialized_submitter_count(env, submitter.clone());
         let mut out = Vec::new(env);
         if start >= total || limit == 0 {
             return out;
         }
         let end = core::cmp::min(start.saturating_add(limit), total);
-        for i in start..end {
-            out.push_back(all.get(i).unwrap());
+        for pos in start..end {
+            if let Some(seq) =
+                Self::load::<u32>(env, &CqrsStorageKey::SubIdx(submitter.clone(), pos))
+            {
+                out.push_back(seq);
+            }
         }
         out
     }
@@ -737,59 +991,45 @@ impl CqrsEngine {
         }
     }
 
-    fn add_to_materialized_index(env: &Env, event: &CqrsStoredEvent, sequence: u32) {
-        // Materialized type index
-        let mut type_indices: Vec<BytesN<32>> = env
-            .storage()
-            .instance()
-            .get(&CqrsStorageKey::MaterializedTypeIndex(event.event_type.clone()))
-            .unwrap_or_else(|| Vec::new(env));
-        type_indices.push_back(event.event_id.clone());
-        env.storage().instance().set(
-            &CqrsStorageKey::MaterializedTypeIndex(event.event_type.clone()),
-            &type_indices,
+    /// Append `sequence` to the per-type and per-submitter indexes. Each index
+    /// entry is its own fixed-size persistent ledger entry, so no growing
+    /// vector is ever re-written. Returns `(type_pos, submitter_pos)`.
+    fn add_to_materialized_index(
+        env: &Env,
+        event: &CqrsStoredEvent,
+        sequence: u32,
+    ) -> (u32, u32) {
+        let type_pos = Self::get_materialized_type_count(env, event.event_type.clone());
+        Self::store(
+            env,
+            &CqrsStorageKey::TypeIdx(event.event_type.clone(), type_pos),
+            &sequence,
+        );
+        Self::store(
+            env,
+            &CqrsStorageKey::TypeCnt(event.event_type.clone()),
+            &type_pos.saturating_add(1),
         );
 
-        // Materialized type count
-        let count: u32 = env
-            .storage()
-            .instance()
-            .get(&CqrsStorageKey::MaterializedTypeCount(event.event_type.clone()))
-            .unwrap_or(0);
-        env.storage().instance().set(
-            &CqrsStorageKey::MaterializedTypeCount(event.event_type.clone()),
-            &count.saturating_add(1),
+        let sub_pos = Self::get_materialized_submitter_count(env, event.submitter.clone());
+        Self::store(
+            env,
+            &CqrsStorageKey::SubIdx(event.submitter.clone(), sub_pos),
+            &sequence,
+        );
+        Self::store(
+            env,
+            &CqrsStorageKey::SubCnt(event.submitter.clone()),
+            &sub_pos.saturating_add(1),
         );
 
-        // Materialized submitter index
-        let mut sub_indices: Vec<u32> = env
-            .storage()
-            .instance()
-            .get(&CqrsStorageKey::MaterializedSubmitterIndex(event.submitter.clone()))
-            .unwrap_or_else(|| Vec::new(env));
-        sub_indices.push_back(sequence);
-        env.storage().instance().set(
-            &CqrsStorageKey::MaterializedSubmitterIndex(event.submitter.clone()),
-            &sub_indices,
-        );
-
-        // Materialized submitter count
-        let sub_count: u32 = env
-            .storage()
-            .instance()
-            .get(&CqrsStorageKey::MaterializedSubmitterCount(event.submitter.clone()))
-            .unwrap_or(0);
-        env.storage().instance().set(
-            &CqrsStorageKey::MaterializedSubmitterCount(event.submitter.clone()),
-            &sub_count.saturating_add(1),
-        );
+        (type_pos, sub_pos)
     }
 
     fn increment_type_count(env: &Env, list: &mut Vec<(Symbol, u32)>, key: Symbol) {
         let mut found = false;
         let mut new_list = Vec::new(env);
-        for i in 0..list.len() {
-            let (k, count) = list.get(i).unwrap();
+        for (k, count) in list.iter() {
             if k == key {
                 new_list.push_back((k, count.saturating_add(1)));
                 found = true;
@@ -806,8 +1046,7 @@ impl CqrsEngine {
     fn increment_submitter_count(env: &Env, list: &mut Vec<(Address, u32)>, key: Address) {
         let mut found = false;
         let mut new_list = Vec::new(env);
-        for i in 0..list.len() {
-            let (k, count) = list.get(i).unwrap();
+        for (k, count) in list.iter() {
             if k == key {
                 new_list.push_back((k, count.saturating_add(1)));
                 found = true;

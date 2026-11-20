@@ -124,6 +124,9 @@ pub mod cqrs;
 mod cqrs_tests;
 
 #[cfg(test)]
+mod cqrs_storage_tests;
+
+#[cfg(test)]
 mod pause_granular_tests;
 
 // Confidential event metadata and access control policies (issue #401)
@@ -7073,11 +7076,7 @@ impl AuditLedger {
 
         // Check command-level idempotency
         if let Some(ref idemp) = cmd.idempotency_key {
-            if let Some(existing) = env
-                .storage()
-                .instance()
-                .get::<_, CommandResult>(&CqrsStorageKey::Idempotency(idemp.clone()))
-            {
+            if let Some(existing) = CqrsEngine::get_idempotent_result(&env, idemp.clone()) {
                 return existing;
             }
         }
@@ -7190,11 +7189,7 @@ impl AuditLedger {
         caller.require_auth();
         Self::require_owner_or_multisig(&env, &caller);
 
-        let current_cqrs_seq: u32 = env
-            .storage()
-            .instance()
-            .get(&CqrsStorageKey::EventSequence)
-            .unwrap_or(0);
+        let current_cqrs_seq = CqrsEngine::current_sequence(&env);
         if current_cqrs_seq == 0 {
             let total = Self::total_events_internal(&env);
             for i in 0..total {
@@ -7284,6 +7279,20 @@ impl AuditLedger {
         Self::require_initialized(&env);
         Self::require_queries_not_paused(&env);
         CqrsEngine::get_materialized_submitter_events(&env, submitter, start, limit)
+    }
+
+    /// Permissionless: extend the TTL of an archival-critical CQRS event record
+    /// (event body, ID lookup and materialized index entries) so active audit
+    /// history is not archived. Anyone may pay the rent; no auth required.
+    pub fn cqrs_extend_event_ttl(env: Env, sequence: u32) -> Result<(), CqrsError> {
+        Self::require_initialized(&env);
+        CqrsEngine::extend_event_ttl(&env, sequence)
+    }
+
+    /// Permissionless: extend the TTL of a CQRS projection snapshot.
+    pub fn cqrs_extend_snapshot_ttl(env: Env, snapshot_id: u32) -> Result<(), CqrsError> {
+        Self::require_initialized(&env);
+        CqrsEngine::extend_snapshot_ttl(&env, snapshot_id)
     }
 
     /// Compute the `Vec<FieldChange>` between two event snapshots.
