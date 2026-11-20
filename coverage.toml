@@ -357,7 +357,7 @@ name = "cbdc_interop"
 path_prefix = "src/cbdc_interop.rs"
 line = 65.0
 branch = 45.0
-description = "CBDC interoperability layer (overflow-safe, TTL-managed)"
+description = "CBDC interoperability layer (overflow-safe, TTL-managed, race-free validator attestation quorum)"
 
 [[module]]
 name = "cbdc_logging"

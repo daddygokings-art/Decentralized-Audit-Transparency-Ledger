@@ -22,6 +22,9 @@ pub mod tax;
 pub mod vat_engine;
 pub mod rwa_custody;
 pub mod rwa_oracle;
+// Domain-separated Merkle tree helpers shared by hash-chained logs
+// (RWA oracle price history, CQRS event store).
+pub mod merkle;
 pub mod tax_engines;
 pub mod tax_audit_trail;
 pub mod dao_dispute_resolution;

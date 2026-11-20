@@ -1451,3 +1451,482 @@ proptest! {
         assert_eq!(agg.zk_aggregation_proof, agg_proof_bytes);
     }
 }
+
+// ── RWA oracle state-machine invariants (src/rwa_oracle.rs) ─────────────────
+//
+// Reference-model property suite for the RWA valuation oracle feed verifier.
+// Formal statement of the invariants: formal-verification/rwa_oracle_invariants.md.
+//
+// Every generated sequence mixes fresh submissions, exact replays (duplicate
+// submissions), reordered/out-of-order observations, future-dated feeds,
+// atomic batches with injected mid-batch failures (rollback), oracle
+// suspension/reactivation, clock advances (staleness) and consensus rounds.
+// After every step the contract state is compared with an independent model;
+// at the end of each sequence the hash chain and Merkle commitments are
+// verified, a tampered entry is detected, and verification succeeds again
+// after recovery.
+//
+// Runs 1,024 + 256 + 256 = 1,536 generated sequences with a fixed RNG seed
+// (override with RWA_ORACLE_PROPTEST_SEED) so CI is deterministic.
+mod rwa_oracle_invariants {
+    extern crate std;
+
+    use crate::rwa_oracle::*;
+    use ::proptest::prelude::*;
+    use ::proptest::test_runner::{Config, RngSeed};
+    use alloc::collections::BTreeMap;
+    use alloc::vec::Vec;
+    use soroban_sdk::testutils::{Address as _, Ledger as _};
+    use soroban_sdk::{contract, contractimpl, Address, Bytes, BytesN, Env, Symbol};
+
+    const ORACLES: usize = 4;
+    const ASSETS: usize = 2;
+    const QUORUM: u32 = 2;
+    const BASE_PRICE: u128 = 5_000_000_000_000;
+    const CONF: u128 = 1_000_000;
+    const START: u64 = 1_000_000;
+    const DEFAULT_SEED: u64 = 0x5EED_0AC1;
+
+    fn config(cases: u32) -> Config {
+        let seed = std::env::var("RWA_ORACLE_PROPTEST_SEED")
+            .ok()
+            .and_then(|v| {
+                let v = v.trim();
+                match v.strip_prefix("0x") {
+                    Some(hex) => u64::from_str_radix(hex, 16).ok(),
+                    None => v.parse().ok(),
+                }
+            })
+            .unwrap_or(DEFAULT_SEED);
+        Config {
+            cases,
+            rng_seed: RngSeed::Fixed(seed),
+            failure_persistence: None,
+            ..Config::default()
+        }
+    }
+
+    #[contract]
+    struct OracleInvariantHost;
+
+    #[contractimpl]
+    impl OracleInvariantHost {}
+
+    struct World {
+        env: Env,
+        contract: Address,
+        oracles: Vec<Address>,
+        assets: Vec<Symbol>,
+    }
+
+    impl World {
+        fn new() -> Self {
+            let env = Env::default();
+            env.cost_estimate().budget().reset_unlimited();
+            env.ledger().with_mut(|l| l.timestamp = START);
+            let contract = env.register(OracleInvariantHost, ());
+            let oracles: Vec<Address> = (0..ORACLES).map(|_| Address::generate(&env)).collect();
+            let assets: Vec<Symbol> = (0..ASSETS)
+                .map(|i| Symbol::new(&env, ["RWA_A", "RWA_B"][i]))
+                .collect();
+            let w = World { env, contract, oracles, assets };
+            w.run(|env| {
+                for o in &w.oracles {
+                    register_oracle(env, o.clone(), Bytes::from_slice(env, b"oracle"), soroban_sdk::Vec::new(env), 80)
+                        .unwrap();
+                }
+                for a in &w.assets {
+                    register_asset(
+                        env,
+                        a.clone(),
+                        AssetClass::RealEstate,
+                        Bytes::from_slice(env, b"asset"),
+                        w.oracles[0].clone(),
+                        Some(QUORUM),
+                        None,
+                    )
+                    .unwrap();
+                }
+            });
+            w
+        }
+
+        fn run<T>(&self, f: impl FnOnce(&Env) -> T) -> T {
+            self.env.as_contract(&self.contract, || f(&self.env))
+        }
+
+        fn now(&self) -> u64 {
+            self.env.ledger().timestamp()
+        }
+    }
+
+    /// One generated step. Prices are `BASE_PRICE ± dev` basis points and
+    /// observations are `now - back` seconds (negative `back` = future-dated).
+    #[derive(Debug, Clone)]
+    enum Op {
+        Submit { o: usize, a: usize, dev: i16, back: i16 },
+        Replay { o: usize, a: usize },
+        Reorder { o: usize, a: usize },
+        Batch { o: usize, entries: Vec<(usize, i16, i16)>, poison: bool },
+        Consensus { a: usize },
+        Tick { dt: u16 },
+        Suspend { o: usize },
+        Reactivate { o: usize },
+    }
+
+    fn op_strategy() -> impl Strategy<Value = Op> {
+        prop_oneof![
+            6 => (0..ORACLES, 0..ASSETS, -700i16..700, -90i16..120)
+                .prop_map(|(o, a, dev, back)| Op::Submit { o, a, dev, back }),
+            2 => (0..ORACLES, 0..ASSETS).prop_map(|(o, a)| Op::Replay { o, a }),
+            2 => (0..ORACLES, 0..ASSETS).prop_map(|(o, a)| Op::Reorder { o, a }),
+            2 => (
+                0..ORACLES,
+                prop::collection::vec((0..ASSETS, -300i16..300, 0i16..120), 1..5),
+                any::<bool>(),
+            )
+                .prop_map(|(o, entries, poison)| Op::Batch { o, entries, poison }),
+            3 => (0..ASSETS).prop_map(|a| Op::Consensus { a }),
+            2 => (1u16..900).prop_map(|dt| Op::Tick { dt }),
+            1 => (0..ORACLES).prop_map(|o| Op::Suspend { o }),
+            1 => (0..ORACLES).prop_map(|o| Op::Reactivate { o }),
+        ]
+    }
+
+    fn sequence_strategy() -> impl Strategy<Value = Vec<Op>> {
+        prop::collection::vec(op_strategy(), 1..40)
+    }
+
+    fn price_for(dev: i16) -> u128 {
+        let delta = BASE_PRICE * u128::from(dev.unsigned_abs()) / 10_000;
+        if dev >= 0 {
+            BASE_PRICE + delta
+        } else {
+            BASE_PRICE - delta
+        }
+    }
+
+    fn observed(now: u64, back: i16) -> u64 {
+        if back >= 0 {
+            now - back as u64
+        } else {
+            now + u64::from(back.unsigned_abs())
+        }
+    }
+
+    /// Independent reference model of the oracle state machine.
+    #[derive(Debug, Clone, Default)]
+    struct Model {
+        active: [bool; ORACLES],
+        /// (oracle, asset) -> (observed_at, price) of the last accepted feed.
+        last_obs: BTreeMap<(usize, usize), (u64, u128)>,
+        /// asset -> oracle -> (observed_at, price) pending this round.
+        pending: [BTreeMap<usize, (u64, u128)>; ASSETS],
+        submissions: [u32; ORACLES],
+        history: [u32; ASSETS],
+        rounds: u32,
+    }
+
+    impl Model {
+        fn new() -> Self {
+            Model { active: [true; ORACLES], ..Model::default() }
+        }
+
+        /// Predicts `submit_price_feed`, applying the transition on success.
+        fn submit(&mut self, now: u64, o: usize, a: usize, price: u128, obs: u64) -> Result<(), OracleError> {
+            if !self.active[o] {
+                return Err(OracleError::OracleNotActive);
+            }
+            if obs > now + 60 {
+                return Err(OracleError::FutureTimestamp);
+            }
+            if now.saturating_sub(obs) > DEFAULT_STALENESS_WINDOW_SECS {
+                return Err(OracleError::StaleTimestamp);
+            }
+            if let Some(&(last, last_price)) = self.last_obs.get(&(o, a)) {
+                if last == obs && last_price == price {
+                    return Err(OracleError::DuplicateFeed);
+                }
+                if obs <= last {
+                    return Err(OracleError::OutOfOrderTimestamp);
+                }
+            }
+            if !self.pending[a].contains_key(&o) && self.pending[a].len() as u32 >= MAX_PENDING_FEEDS {
+                return Err(OracleError::PendingBufferFull);
+            }
+            self.last_obs.insert((o, a), (obs, price));
+            self.pending[a].insert(o, (obs, price));
+            self.submissions[o] += 1;
+            Ok(())
+        }
+    }
+
+    /// Asserts that contract state matches the model after every step.
+    fn assert_matches_model(w: &World, m: &Model) -> Result<(), TestCaseError> {
+        w.run(|env| {
+            for (i, o) in w.oracles.iter().enumerate() {
+                let rec = get_oracle(env, o).unwrap();
+                prop_assert_eq!(rec.total_submissions, m.submissions[i]);
+                prop_assert_eq!(rec.is_active(), m.active[i]);
+            }
+            let rounds: u32 = env.storage().instance().get(&OracleDataKey::TotalRounds).unwrap_or(0);
+            prop_assert_eq!(rounds, m.rounds);
+            for (i, a) in w.assets.iter().enumerate() {
+                // INV-ORACLE-ONE-VOTE / INV-ORACLE-BOUNDED.
+                let pending: soroban_sdk::Vec<PriceFeed> = env
+                    .storage()
+                    .persistent()
+                    .get(&OracleDataKey::PendingFeeds(a.clone()))
+                    .unwrap_or_else(|| soroban_sdk::Vec::new(env));
+                prop_assert_eq!(pending.len() as usize, m.pending[i].len());
+                prop_assert!(pending.len() <= MAX_PENDING_FEEDS);
+                for feed in pending.iter() {
+                    let o = w.oracles.iter().position(|x| *x == feed.oracle).unwrap();
+                    prop_assert_eq!(m.pending[i].get(&o), Some(&(feed.observed_at, feed.price)));
+                    prop_assert!(feed.verify_integrity(env));
+                }
+                // INV-ORACLE-CHAIN and counter consistency.
+                let asset = get_asset(env, a).unwrap();
+                prop_assert_eq!(asset.total_updates, m.history[i]);
+                prop_assert_eq!(verify_recent_price_history(env, a), Ok(m.history[i].min(MAX_VERIFY_SPAN)));
+            }
+            Ok(())
+        })
+    }
+
+    /// Applies one op to both the contract and the model, asserting that the
+    /// contract's result matches the model's prediction. Returns a compact
+    /// outcome code used by the determinism property.
+    fn step(w: &World, m: &mut Model, op: &Op) -> Result<u32, TestCaseError> {
+        let now = w.now();
+        let code = match op {
+            Op::Submit { o, a, dev, back } => {
+                let (price, obs) = (price_for(*dev), observed(now, *back));
+                let expected = m.submit(now, *o, *a, price, obs);
+                let got = w.run(|env| {
+                    submit_price_feed(env, &w.oracles[*o], w.assets[*a].clone(), price, CONF, obs, Bytes::new(env))
+                        .map(|_| ())
+                });
+                prop_assert_eq!(got, expected);
+                got.err().map_or(0, |e| e as u32)
+            }
+            Op::Replay { o, a } | Op::Reorder { o, a } => {
+                let Some(&(obs, price)) = m.last_obs.get(&(*o, *a)) else { return Ok(1) };
+                // Replay resubmits the identical feed; Reorder submits an
+                // older observation with a different price.
+                let (obs, price) = match op {
+                    Op::Replay { .. } => (obs, price),
+                    _ => (obs.saturating_sub(1), price + 7),
+                };
+                let expected = m.submit(now, *o, *a, price, obs);
+                prop_assert!(expected.is_err(), "replays and reorders must never be accepted");
+                let got = w.run(|env| {
+                    submit_price_feed(env, &w.oracles[*o], w.assets[*a].clone(), price, CONF, obs, Bytes::new(env))
+                        .map(|_| ())
+                });
+                prop_assert_eq!(got, expected);
+                got.err().map_or(0, |e| e as u32)
+            }
+            Op::Batch { o, entries, poison } => {
+                let mut inputs: Vec<(usize, u128, u64)> =
+                    entries.iter().map(|(a, dev, back)| (*a, price_for(*dev), observed(now, *back))).collect();
+                if *poison {
+                    // Mid-batch failure: an out-of-order entry for the first
+                    // entry's asset, appended after it.
+                    let (a, p, obs) = inputs[0];
+                    inputs.push((a, p + 3, obs.saturating_sub(1)));
+                }
+                let mut trial = m.clone();
+                let mut expected = Ok(inputs.len() as u32);
+                for &(a, p, obs) in &inputs {
+                    if let Err(e) = trial.submit(now, *o, a, p, obs) {
+                        expected = Err(e);
+                        break;
+                    }
+                }
+                let got = w.run(|env| {
+                    let mut v = soroban_sdk::Vec::new(env);
+                    for &(a, p, obs) in &inputs {
+                        v.push_back(PriceFeedInput {
+                            asset_id: w.assets[a].clone(),
+                            price: p,
+                            confidence: CONF,
+                            observed_at: obs,
+                            metadata: Bytes::new(env),
+                        });
+                    }
+                    submit_price_feed_batch(env, &w.oracles[*o], &v)
+                });
+                prop_assert_eq!(got, expected);
+                if *poison {
+                    prop_assert!(got.is_err(), "poisoned batch must roll back");
+                }
+                // INV-ORACLE-BATCH-ATOMIC: all-or-nothing.
+                if got.is_ok() {
+                    *m = trial;
+                }
+                got.map_or_else(|e| e as u32, |_| 0)
+            }
+            Op::Consensus { a } => {
+                let pending: Vec<(u64, u128)> = m.pending[*a].values().copied().collect();
+                let live = m.pending[*a].keys().filter(|o| m.active[**o]).count() as u32;
+                let before = m.history[*a];
+                let got = w.run(|env| process_consensus(env, &w.assets[*a]));
+                if pending.is_empty() {
+                    prop_assert_eq!(got.clone(), Err(OracleError::NoFeedsAvailable));
+                    return Ok(OracleError::NoFeedsAvailable as u32);
+                }
+                m.pending[*a].clear();
+                match got {
+                    Ok(cp) => {
+                        // Quorum of *live* oracles is required (INV-ORACLE-LIVE).
+                        prop_assert!(live >= QUORUM);
+                        prop_assert!(cp.oracle_count >= 1 && cp.oracle_count <= live);
+                        prop_assert_eq!(cp.history_index, before);
+                        prop_assert_eq!(cp.consensus_at, now);
+                        let lo = pending.iter().map(|p| p.1).min().unwrap();
+                        let hi = pending.iter().map(|p| p.1).max().unwrap();
+                        prop_assert!(cp.price >= lo && cp.price <= hi);
+                        m.history[*a] += 1;
+                        m.rounds += 1;
+                        0
+                    }
+                    Err(e) => {
+                        prop_assert!(matches!(e, OracleError::InvalidPrice | OracleError::StaleTimestamp));
+                        e as u32
+                    }
+                }
+            }
+            Op::Tick { dt } => {
+                let t = now + u64::from(*dt);
+                w.env.ledger().with_mut(|l| l.timestamp = t);
+                0
+            }
+            Op::Suspend { o } | Op::Reactivate { o } => {
+                let (status, active) = match op {
+                    Op::Suspend { .. } => (OracleStatus::Suspended, false),
+                    _ => (OracleStatus::Active, true),
+                };
+                w.run(|env| set_oracle_status(env, &w.oracles[*o], status)).unwrap();
+                m.active[*o] = active;
+                0
+            }
+        };
+        assert_matches_model(w, m)?;
+        Ok(code)
+    }
+
+    /// Hash-chain + Merkle verification, tamper detection and recovery.
+    fn assert_crypto_integrity_after_recovery(w: &World, m: &Model) -> Result<(), TestCaseError> {
+        w.run(|env| {
+            for (i, a) in w.assets.iter().enumerate() {
+                let len = m.history[i].min(MAX_VERIFY_SPAN);
+                let start = m.history[i] - len;
+                prop_assert_eq!(verify_price_history_chain(env, a, start, len), Ok(len));
+                let root = price_history_merkle_root(env, a, start, len).unwrap();
+                for idx in start..start + len {
+                    let entry = get_canonical_price(env, a, idx as u64).unwrap();
+                    let proof = price_history_merkle_proof(env, a, start, len, idx).unwrap();
+                    prop_assert!(verify_price_history_proof(env, &entry, &proof, &root));
+                }
+                if len == 0 {
+                    continue;
+                }
+                // Simulated corruption of the oldest entry is detected ...
+                let key = OracleDataKey::PriceHistoryEntry(a.clone(), start as u64);
+                let original: CanonicalPrice = env.storage().persistent().get(&key).unwrap();
+                let mut corrupted = original.clone();
+                corrupted.price ^= 1;
+                env.storage().persistent().set(&key, &corrupted);
+                prop_assert_eq!(
+                    verify_price_history_chain(env, a, start, len),
+                    Err(OracleError::ChainIntegrityViolation)
+                );
+                let proof = price_history_merkle_proof(env, a, start, len, start).unwrap();
+                prop_assert!(!verify_price_history_proof(env, &corrupted, &proof, &root));
+                // ... and recovery from the original record restores integrity
+                // and the identical Merkle root.
+                env.storage().persistent().set(&key, &original);
+                prop_assert_eq!(verify_price_history_chain(env, a, start, len), Ok(len));
+                prop_assert_eq!(price_history_merkle_root(env, a, start, len).unwrap(), root);
+            }
+            Ok(())
+        })
+    }
+
+    fn run_sequence(ops: &[Op]) -> Result<(World, Model, Vec<u32>), TestCaseError> {
+        let w = World::new();
+        let mut m = Model::new();
+        let mut codes = Vec::with_capacity(ops.len());
+        for op in ops {
+            codes.push(step(&w, &mut m, op)?);
+        }
+        Ok((w, m, codes))
+    }
+
+    fn chain_hashes(w: &World, m: &Model) -> Vec<BytesN<32>> {
+        w.run(|env| {
+            let mut out = Vec::new();
+            for (i, a) in w.assets.iter().enumerate() {
+                for idx in 0..m.history[i] {
+                    out.push(get_canonical_price(env, a, idx as u64).unwrap().chain_hash);
+                }
+            }
+            out
+        })
+    }
+
+    proptest! {
+        #![proptest_config(config(1024))]
+
+        /// 1,024 generated sequences: the contract never diverges from the
+        /// reference model and every invariant holds after every step.
+        #[test]
+        fn prop_rwa_oracle_state_machine_invariants(ops in sequence_strategy()) {
+            let (w, m, _) = run_sequence(&ops)?;
+            assert_crypto_integrity_after_recovery(&w, &m)?;
+        }
+    }
+
+    proptest! {
+        #![proptest_config(config(256))]
+
+        /// Deterministic execution: replaying the same sequence on a fresh
+        /// ledger yields identical outcomes and byte-identical hash chains.
+        #[test]
+        fn prop_rwa_oracle_replay_is_deterministic(ops in sequence_strategy()) {
+            let (w1, m1, codes1) = run_sequence(&ops)?;
+            let (w2, m2, codes2) = run_sequence(&ops)?;
+            prop_assert_eq!(codes1, codes2);
+            prop_assert_eq!(m1.history, m2.history);
+            prop_assert_eq!(chain_hashes(&w1, &m1), chain_hashes(&w2, &m2));
+        }
+
+        /// Reordered events: the arrival order of one round's feeds does not
+        /// change the canonical price or its chain hash.
+        #[test]
+        fn prop_rwa_oracle_round_is_order_independent(
+            devs in prop::collection::vec(-400i16..400, 2..=ORACLES),
+            order in Just((0..ORACLES).collect::<Vec<usize>>()).prop_shuffle(),
+        ) {
+            let run = |permute: bool| {
+                let w = World::new();
+                let now = w.now();
+                w.run(|env| {
+                    let idx: Vec<usize> = if permute {
+                        order.iter().copied().filter(|i| *i < devs.len()).collect()
+                    } else {
+                        (0..devs.len()).collect()
+                    };
+                    for i in idx {
+                        submit_price_feed(env, &w.oracles[i], w.assets[0].clone(), price_for(devs[i]), CONF, now, Bytes::new(env))
+                            .unwrap();
+                    }
+                    process_consensus(env, &w.assets[0])
+                })
+            };
+            prop_assert_eq!(run(false), run(true));
+        }
+    }
+}
+// ── end RWA oracle state-machine invariants ─────────────────────────────────
