@@ -30,6 +30,39 @@
 //! per-event records to dedicated persistent entries keeps the per-command
 //! write footprint constant.
 //!
+//! ## Bounds & failure model
+//!
+//! All arithmetic is checked; boundary violations return a typed
+//! [`CqrsError`] (rolling the whole invocation back) instead of panicking or
+//! silently saturating:
+//!
+//! | Bound | Constant | Error |
+//! |-------|----------|-------|
+//! | Event sequence | `u32::MAX` | [`CqrsError::SequenceOverflow`] |
+//! | Counters (projection totals, index lengths, snapshot ids, versions) | `u32::MAX` | [`CqrsError::CounterOverflow`] |
+//! | Metadata payload | [`CQRS_MAX_METADATA_BYTES`] | [`CqrsError::MetadataTooLarge`] |
+//! | Events replayed by one rebuild | [`CQRS_MAX_REPLAY_EVENTS`] | [`CqrsError::ReplayWindowTooLarge`] |
+//!
+//! Collections are capped before they are written:
+//! `EventProjection::type_counts` holds at most [`CQRS_MAX_PROJECTION_TYPES`]
+//! entries and `submitter_counts` at most [`CQRS_MAX_PROJECTION_SUBMITTERS`];
+//! further distinct keys are still counted exactly by the per-key `TypeCnt` /
+//! `SubCnt` materialized counters but are not added to the summary vectors.
+//! Read paths visit at most [`CQRS_MAX_QUERY_SCAN`] stored events and return
+//! at most [`CQRS_MAX_QUERY_LIMIT`] items per call.
+//!
+//! ### Worst-case footprint per invocation
+//!
+//! | Entry point | Ledger entries read / written | Notes |
+//! |-------------|-------------------------------|-------|
+//! | `record_log_event` | ~7 reads / 8 writes | each written record ≤ `CQRS_MAX_METADATA_BYTES` + ~210 B; projection ≤ 64 types × ~24 B + 128 submitters × ~52 B ≈ 8.2 KB |
+//! | `record_update_event` / `record_governance_command` | 2 reads / 3-4 writes | |
+//! | `query_events` / materialized reads | ≤ `CQRS_MAX_QUERY_SCAN` + `CQRS_MAX_QUERY_LIMIT` reads | read-only |
+//! | `rebuild_projection` | ≤ `CQRS_MAX_REPLAY_EVENTS` reads / 1 write | O(events × (types + submitters)) CPU, bounded by the caps above |
+//!
+//! There are no `i128` amounts in this module; `u64` timestamps are stored
+//! verbatim and accepted up to `u64::MAX`.
+//!
 //! ## Serialized layout packing
 //!
 //! Stored records use positional tuple structs ([`PackedCqrsEvent`],
@@ -59,7 +92,32 @@ pub enum CqrsError {
     SubmitterBlocked = 606,
     InvalidCommand = 607,
     DuplicateEvent = 608,
+    /// The event sequence counter would exceed `u32::MAX`.
+    SequenceOverflow = 609,
+    /// A projection / index / snapshot / version counter would overflow.
+    CounterOverflow = 610,
+    /// A rebuild would replay more than `CQRS_MAX_REPLAY_EVENTS` events.
+    ReplayWindowTooLarge = 611,
 }
+
+// ── Bounds ──────────────────────────────────────────────────────────────────
+
+/// Hard ceiling on event metadata accepted by the CQRS store, independent of
+/// the (owner-configurable) ledger-wide metadata limit.
+pub const CQRS_MAX_METADATA_BYTES: u32 = 8_192;
+/// Maximum distinct event types tracked in `EventProjection::type_counts`.
+pub const CQRS_MAX_PROJECTION_TYPES: u32 = 64;
+/// Maximum distinct submitters tracked in `EventProjection::submitter_counts`.
+pub const CQRS_MAX_PROJECTION_SUBMITTERS: u32 = 128;
+/// Maximum stored events a single read call may visit.
+pub const CQRS_MAX_QUERY_SCAN: u32 = 500;
+/// Maximum items returned by a single read call.
+pub const CQRS_MAX_QUERY_LIMIT: u32 = 50;
+/// Default page size when a caller passes `limit == 0`.
+pub const CQRS_DEFAULT_QUERY_LIMIT: u32 = 20;
+/// Maximum events replayed by one `rebuild_projection` call. Take snapshots
+/// at least this often to keep rebuilds possible.
+pub const CQRS_MAX_REPLAY_EVENTS: u32 = 1_000;
 
 // ── Storage tier & TTL policy ───────────────────────────────────────────────
 
@@ -450,6 +508,37 @@ impl CqrsEngine {
             .extend_ttl(CQRS_INSTANCE_TTL_THRESHOLD, CQRS_INSTANCE_TTL_EXTEND_TO);
     }
 
+    fn checked_inc(v: u32) -> Result<u32, CqrsError> {
+        v.checked_add(1).ok_or(CqrsError::CounterOverflow)
+    }
+
+    /// Allocate the next event sequence number.
+    fn next_sequence(env: &Env) -> Result<u32, CqrsError> {
+        Self::current_sequence(env)
+            .checked_add(1)
+            .ok_or(CqrsError::SequenceOverflow)
+    }
+
+    /// Validate a log command against the engine's hard bounds. Called by the
+    /// contract entry point *before* any state is written.
+    pub fn validate_log_command(env: &Env, cmd: &LogEventCommand) -> Result<(), CqrsError> {
+        if cmd.metadata.len() > CQRS_MAX_METADATA_BYTES {
+            return Err(CqrsError::MetadataTooLarge);
+        }
+        // Fail fast on sequence exhaustion before the primary ledger is touched.
+        Self::next_sequence(env)?;
+        Ok(())
+    }
+
+    /// Clamp a caller-supplied limit into `[1, CQRS_MAX_QUERY_LIMIT]`.
+    pub fn effective_limit(limit: u32) -> u32 {
+        if limit == 0 {
+            CQRS_DEFAULT_QUERY_LIMIT
+        } else {
+            core::cmp::min(limit, CQRS_MAX_QUERY_LIMIT)
+        }
+    }
+
     /// Current highest sequence number in the event store (0 when empty).
     pub fn current_sequence(env: &Env) -> u32 {
         Self::load(env, &CqrsStorageKey::Seq).unwrap_or(0)
@@ -511,8 +600,9 @@ impl CqrsEngine {
         event_id: BytesN<32>,
         cmd: &LogEventCommand,
         timestamp: u64,
-    ) -> CommandResult {
-        let next_seq = Self::current_sequence(env).saturating_add(1);
+    ) -> Result<CommandResult, CqrsError> {
+        Self::validate_log_command(env, cmd)?;
+        let next_seq = Self::next_sequence(env)?;
 
         let mut stored = CqrsStoredEvent {
             sequence: next_seq,
@@ -529,7 +619,7 @@ impl CqrsEngine {
         };
 
         // Update materialized index views (records positions on the event)
-        let (type_pos, sub_pos) = Self::add_to_materialized_index(env, &stored, next_seq);
+        let (type_pos, sub_pos) = Self::add_to_materialized_index(env, &stored, next_seq)?;
         stored.index_pos = CqrsIndexPos::At(type_pos, sub_pos);
 
         // Append to immutable log
@@ -539,16 +629,12 @@ impl CqrsEngine {
 
         // Update live projection
         let mut proj = Self::get_projection(env);
-        proj.total_events = proj.total_events.saturating_add(1);
-        proj.total_commands = proj.total_commands.saturating_add(1);
+        proj.total_events = Self::checked_inc(proj.total_events)?;
+        proj.total_commands = Self::checked_inc(proj.total_commands)?;
         proj.last_sequence = next_seq;
         proj.last_updated = timestamp;
-        Self::increment_type_count(env, &mut proj.type_counts, cmd.event_type.clone());
-        Self::increment_submitter_count(
-            env,
-            &mut proj.submitter_counts,
-            cmd.submitter.clone(),
-        );
+        Self::increment_type_count(&mut proj.type_counts, cmd.event_type.clone())?;
+        Self::increment_submitter_count(&mut proj.submitter_counts, cmd.submitter.clone())?;
         Self::store(env, &CqrsStorageKey::Proj, &proj.pack());
 
         let result = CommandResult {
@@ -571,7 +657,7 @@ impl CqrsEngine {
             (event_id, next_seq),
         );
 
-        result
+        Ok(result)
     }
 
     /// Record an event update in the append-only log and advance projection.
@@ -584,8 +670,11 @@ impl CqrsEngine {
         new_metadata: Bytes,
         new_version: u32,
         timestamp: u64,
-    ) -> CommandResult {
-        let next_seq = Self::current_sequence(env).saturating_add(1);
+    ) -> Result<CommandResult, CqrsError> {
+        if new_metadata.len() > CQRS_MAX_METADATA_BYTES {
+            return Err(CqrsError::MetadataTooLarge);
+        }
+        let next_seq = Self::next_sequence(env)?;
 
         let stored = CqrsStoredEvent {
             sequence: next_seq,
@@ -609,7 +698,7 @@ impl CqrsEngine {
 
         // Update live projection
         let mut proj = Self::get_projection(env);
-        proj.total_commands = proj.total_commands.saturating_add(1);
+        proj.total_commands = Self::checked_inc(proj.total_commands)?;
         proj.last_sequence = next_seq;
         proj.last_updated = timestamp;
         Self::store(env, &CqrsStorageKey::Proj, &proj.pack());
@@ -628,7 +717,7 @@ impl CqrsEngine {
             (new_event_id, next_seq),
         );
 
-        result
+        Ok(result)
     }
 
     /// Record a governance command execution in the event store.
@@ -637,8 +726,8 @@ impl CqrsEngine {
         caller: Address,
         action: Symbol,
         timestamp: u64,
-    ) -> CommandResult {
-        let next_seq = Self::current_sequence(env).saturating_add(1);
+    ) -> Result<CommandResult, CqrsError> {
+        let next_seq = Self::next_sequence(env)?;
 
         let stored = CqrsStoredEvent {
             sequence: next_seq,
@@ -658,7 +747,7 @@ impl CqrsEngine {
         Self::store(env, &CqrsStorageKey::Seq, &next_seq);
 
         let mut proj = Self::get_projection(env);
-        proj.total_commands = proj.total_commands.saturating_add(1);
+        proj.total_commands = Self::checked_inc(proj.total_commands)?;
         proj.last_sequence = next_seq;
         proj.last_updated = timestamp;
         Self::store(env, &CqrsStorageKey::Proj, &proj.pack());
@@ -677,7 +766,7 @@ impl CqrsEngine {
             (action, next_seq),
         );
 
-        result
+        Ok(result)
     }
 
     // ── Query Side (Read Path) ──────────────────────────────────────────────
@@ -721,13 +810,8 @@ impl CqrsEngine {
             return results;
         }
 
-        let eff_limit = if query.limit == 0 {
-            20
-        } else if query.limit > 50 {
-            50
-        } else {
-            query.limit
-        };
+        let eff_limit = Self::effective_limit(query.limit);
+        let mut scanned: u32 = 0;
 
         let start_seq = if query.from_sequence == 0 {
             1
@@ -748,6 +832,10 @@ impl CqrsEngine {
         if let (Some(q_type), None) = (&query.event_type, &query.submitter) {
             let count = Self::get_materialized_type_count(env, q_type.clone());
             for pos in 0..count {
+                if scanned >= CQRS_MAX_QUERY_SCAN {
+                    break;
+                }
+                scanned += 1;
                 let seq: Option<u32> =
                     Self::load(env, &CqrsStorageKey::TypeIdx(q_type.clone(), pos));
                 if let Some(seq) = seq {
@@ -771,6 +859,10 @@ impl CqrsEngine {
         if let (None, Some(q_sub)) = (&query.event_type, &query.submitter) {
             let count = Self::get_materialized_submitter_count(env, q_sub.clone());
             for pos in 0..count {
+                if scanned >= CQRS_MAX_QUERY_SCAN {
+                    break;
+                }
+                scanned += 1;
                 let seq: Option<u32> =
                     Self::load(env, &CqrsStorageKey::SubIdx(q_sub.clone(), pos));
                 if let Some(seq) = seq {
@@ -790,8 +882,12 @@ impl CqrsEngine {
             return results;
         }
 
-        // Sequential range scan fallback
-        for seq in start_seq..=end_seq {
+        // Sequential range scan fallback (bounded by CQRS_MAX_QUERY_SCAN)
+        let scan_end = core::cmp::min(
+            end_seq,
+            start_seq.saturating_add(CQRS_MAX_QUERY_SCAN - 1),
+        );
+        for seq in start_seq..=scan_end {
             if let Some(view) = Self::get_event_by_sequence(env, seq) {
                 let matches_type = match &query.event_type {
                     Some(t) => &view.event_type == t,
@@ -827,7 +923,10 @@ impl CqrsEngine {
     /// Materialized indexes are maintained at write time (and their positions
     /// are recorded on each event), so replay only recomputes the projection and
     /// never re-appends index entries.
-    pub fn rebuild_projection(env: &Env, from_snapshot: bool) -> EventProjection {
+    ///
+    /// Returns [`CqrsError::ReplayWindowTooLarge`] if more than
+    /// [`CQRS_MAX_REPLAY_EVENTS`] events would have to be replayed.
+    pub fn rebuild_projection(env: &Env, from_snapshot: bool) -> Result<EventProjection, CqrsError> {
         let total_seq = Self::current_sequence(env);
 
         let latest_snapshot = if from_snapshot {
@@ -841,21 +940,22 @@ impl CqrsEngine {
         };
 
         if start_seq <= total_seq {
+            if total_seq - start_seq >= CQRS_MAX_REPLAY_EVENTS {
+                return Err(CqrsError::ReplayWindowTooLarge);
+            }
             for seq in start_seq..=total_seq {
                 if let Some(stored) = Self::get_stored_event(env, seq) {
-                    proj.total_commands = proj.total_commands.saturating_add(1);
+                    proj.total_commands = Self::checked_inc(proj.total_commands)?;
                     if stored.kind == CqrsCommandKind::Log {
-                        proj.total_events = proj.total_events.saturating_add(1);
+                        proj.total_events = Self::checked_inc(proj.total_events)?;
                         Self::increment_type_count(
-                            env,
                             &mut proj.type_counts,
                             stored.event_type.clone(),
-                        );
+                        )?;
                         Self::increment_submitter_count(
-                            env,
                             &mut proj.submitter_counts,
                             stored.submitter.clone(),
-                        );
+                        )?;
                     }
                     proj.last_sequence = seq;
                     proj.last_updated = stored.timestamp;
@@ -871,13 +971,13 @@ impl CqrsEngine {
             (proj.last_sequence, proj.total_events),
         );
 
-        proj
+        Ok(proj)
     }
 
     /// Capture a snapshot of the current projection state.
-    pub fn create_snapshot(env: &Env) -> u32 {
+    pub fn create_snapshot(env: &Env) -> Result<u32, CqrsError> {
         let count: u32 = Self::load(env, &CqrsStorageKey::SnapCnt).unwrap_or(0);
-        let next_id = count.saturating_add(1);
+        let next_id = Self::checked_inc(count)?;
         let proj = Self::get_projection(env);
         let sequence = proj.last_sequence;
 
@@ -894,7 +994,7 @@ impl CqrsEngine {
             (next_id, sequence),
         );
 
-        next_id
+        Ok(next_id)
     }
 
     /// ID of the most recently created snapshot, if any.
@@ -941,6 +1041,7 @@ impl CqrsEngine {
         if start >= total || limit == 0 {
             return out;
         }
+        let limit = core::cmp::min(limit, CQRS_MAX_QUERY_LIMIT);
         let end = core::cmp::min(start.saturating_add(limit), total);
         for pos in start..end {
             let seq: Option<u32> =
@@ -967,6 +1068,7 @@ impl CqrsEngine {
         if start >= total || limit == 0 {
             return out;
         }
+        let limit = core::cmp::min(limit, CQRS_MAX_QUERY_LIMIT);
         let end = core::cmp::min(start.saturating_add(limit), total);
         for pos in start..end {
             if let Some(seq) =
@@ -998,7 +1100,7 @@ impl CqrsEngine {
         env: &Env,
         event: &CqrsStoredEvent,
         sequence: u32,
-    ) -> (u32, u32) {
+    ) -> Result<(u32, u32), CqrsError> {
         let type_pos = Self::get_materialized_type_count(env, event.event_type.clone());
         Self::store(
             env,
@@ -1008,7 +1110,7 @@ impl CqrsEngine {
         Self::store(
             env,
             &CqrsStorageKey::TypeCnt(event.event_type.clone()),
-            &type_pos.saturating_add(1),
+            &Self::checked_inc(type_pos)?,
         );
 
         let sub_pos = Self::get_materialized_submitter_count(env, event.submitter.clone());
@@ -1020,43 +1122,43 @@ impl CqrsEngine {
         Self::store(
             env,
             &CqrsStorageKey::SubCnt(event.submitter.clone()),
-            &sub_pos.saturating_add(1),
+            &Self::checked_inc(sub_pos)?,
         );
 
-        (type_pos, sub_pos)
+        Ok((type_pos, sub_pos))
     }
 
-    fn increment_type_count(env: &Env, list: &mut Vec<(Symbol, u32)>, key: Symbol) {
-        let mut found = false;
-        let mut new_list = Vec::new(env);
-        for (k, count) in list.iter() {
-            if k == key {
-                new_list.push_back((k, count.saturating_add(1)));
-                found = true;
-            } else {
-                new_list.push_back((k, count));
+    /// Increment `key` in a bounded summary vector. New keys are only added
+    /// while the vector holds fewer than `cap` entries.
+    fn increment_bounded<K>(list: &mut Vec<(K, u32)>, key: K, cap: u32) -> Result<(), CqrsError>
+    where
+        K: Clone
+            + PartialEq
+            + soroban_sdk::IntoVal<Env, soroban_sdk::Val>
+            + soroban_sdk::TryFromVal<Env, soroban_sdk::Val>,
+    {
+        for i in 0..list.len() {
+            if let Some((k, count)) = list.get(i) {
+                if k == key {
+                    list.set(i, (k, Self::checked_inc(count)?));
+                    return Ok(());
+                }
             }
         }
-        if !found {
-            new_list.push_back((key, 1));
+        if list.len() < cap {
+            list.push_back((key, 1));
         }
-        *list = new_list;
+        Ok(())
     }
 
-    fn increment_submitter_count(env: &Env, list: &mut Vec<(Address, u32)>, key: Address) {
-        let mut found = false;
-        let mut new_list = Vec::new(env);
-        for (k, count) in list.iter() {
-            if k == key {
-                new_list.push_back((k, count.saturating_add(1)));
-                found = true;
-            } else {
-                new_list.push_back((k, count));
-            }
-        }
-        if !found {
-            new_list.push_back((key, 1));
-        }
-        *list = new_list;
+    fn increment_type_count(list: &mut Vec<(Symbol, u32)>, key: Symbol) -> Result<(), CqrsError> {
+        Self::increment_bounded(list, key, CQRS_MAX_PROJECTION_TYPES)
+    }
+
+    fn increment_submitter_count(
+        list: &mut Vec<(Address, u32)>,
+        key: Address,
+    ) -> Result<(), CqrsError> {
+        Self::increment_bounded(list, key, CQRS_MAX_PROJECTION_SUBMITTERS)
     }
 }

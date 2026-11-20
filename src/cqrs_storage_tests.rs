@@ -31,7 +31,7 @@ impl CqrsStorageHarness {
         event_type: Symbol,
         metadata: Bytes,
         idempotency_key: Option<BytesN<32>>,
-    ) -> CommandResult {
+    ) -> Result<CommandResult, CqrsError> {
         let cmd = LogEventCommand {
             submitter,
             event_type,
@@ -45,11 +45,11 @@ impl CqrsStorageHarness {
         CqrsEngine::record_log_event(&env, id, &cmd, ts)
     }
 
-    pub fn snapshot(env: Env) -> u32 {
+    pub fn snapshot(env: Env) -> Result<u32, CqrsError> {
         CqrsEngine::create_snapshot(&env)
     }
 
-    pub fn rebuild(env: Env, from_snapshot: bool) -> EventProjection {
+    pub fn rebuild(env: Env, from_snapshot: bool) -> Result<EventProjection, CqrsError> {
         CqrsEngine::rebuild_projection(&env, from_snapshot)
     }
 
