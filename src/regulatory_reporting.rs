@@ -486,6 +486,13 @@ pub enum ReportingError {
     StaleReportVersion = 218,
     /// A submission with the same id but different contents already exists.
     DuplicateSubmission = 219,
+    /// Recovery was requested for a submission that is not stalled (it was
+    /// acknowledged, superseded, or its acknowledgment timeout has not elapsed).
+    SubmissionNotStalled = 220,
+    /// Two audit trails for the same report diverge (partition fork).
+    TrailForkDetected = 221,
+    /// An audit trail failed hash-chain verification.
+    TrailCorrupted = 222,
 }
 
 // ─────────────────────────────────────────────────────────────────────────────

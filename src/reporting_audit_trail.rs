@@ -18,7 +18,7 @@
 use soroban_sdk::{Address, Bytes, BytesN, Env, Vec};
 
 use crate::regulatory_reporting::{
-    ReportAction, ReportingAuditEntry, ReportStatus,
+    ReportAction, ReportingAuditEntry, ReportStatus, ReportingError,
 };
 
 // ─────────────────────────────────────────────────────────────────────────────
@@ -145,6 +145,41 @@ pub fn verify_trail(env: &Env, trail: &Vec<ReportingAuditEntry>) -> Result<(), u
         }
     }
     Ok(())
+}
+
+// ─────────────────────────────────────────────────────────────────────────────
+// Partition recovery: trail reconciliation
+// ─────────────────────────────────────────────────────────────────────────────
+
+/// Reconcile two copies of a report's audit trail after a network partition.
+///
+/// Both trails are verified first (`TrailCorrupted` with the offending
+/// sequence otherwise).  If one is a prefix of the other, the longer trail is
+/// returned (fast-forward); this is deterministic and independent of argument
+/// order.  If they diverge, `TrailForkDetected` is returned with the first
+/// diverging sequence number — forks are never merged automatically because
+/// that would rewrite tamper-evident history.
+pub fn reconcile_trails(
+    env: &Env,
+    local: &Vec<ReportingAuditEntry>,
+    remote: &Vec<ReportingAuditEntry>,
+) -> Result<Vec<ReportingAuditEntry>, (ReportingError, u32)> {
+    verify_trail(env, local).map_err(|i| (ReportingError::TrailCorrupted, i))?;
+    verify_trail(env, remote).map_err(|i| (ReportingError::TrailCorrupted, i))?;
+
+    let common = local.len().min(remote.len());
+    for i in 0..common {
+        let a = local.get_unchecked(i);
+        let b = remote.get_unchecked(i);
+        if a.entry_hash != b.entry_hash || a.report_id != b.report_id {
+            return Err((ReportingError::TrailForkDetected, i));
+        }
+    }
+    Ok(if remote.len() > local.len() {
+        remote.clone()
+    } else {
+        local.clone()
+    })
 }
 
 // ─────────────────────────────────────────────────────────────────────────────
@@ -646,5 +681,50 @@ mod tests {
 
         assert_eq!(trail.len(), 8);
         assert!(verify_trail(&env, &trail).is_ok());
+    }
+
+    // ── Partition reconciliation ──────────────────────────────────────────
+
+    fn base_trail(env: &Env, actor: &Address) -> Vec<ReportingAuditEntry> {
+        let mut trail = Vec::new(env);
+        let rid = report_id(env);
+        record_generated(env, &mut trail, &rid, actor.clone(), Bytes::from_slice(env, b"FinraOATS"), 1_000);
+        record_validated(env, &mut trail, &rid, actor.clone(), true, 0, 2_000);
+        trail
+    }
+
+    #[test]
+    fn test_reconcile_fast_forwards_either_order() {
+        let env = Env::default();
+        let actor = Address::generate(&env);
+        let short = base_trail(&env, &actor);
+        let mut long = short.clone();
+        record_submitted(&env, &mut long, &report_id(&env), actor, &BytesN::from_array(&env, &[9u8; 32]), 1, 3_000);
+        assert_eq!(reconcile_trails(&env, &short, &long).unwrap(), long);
+        assert_eq!(reconcile_trails(&env, &long, &short).unwrap(), long);
+        assert_eq!(reconcile_trails(&env, &long, &long).unwrap(), long);
+    }
+
+    #[test]
+    fn test_reconcile_detects_fork() {
+        let env = Env::default();
+        let actor = Address::generate(&env);
+        let mut a = base_trail(&env, &actor);
+        let mut b = a.clone();
+        record_accepted(&env, &mut a, &report_id(&env), actor.clone(), Bytes::from_slice(&env, b"REF-A"), 3_000);
+        record_cancelled(&env, &mut b, &report_id(&env), actor, Bytes::from_slice(&env, b"partition"), 3_000);
+        assert_eq!(reconcile_trails(&env, &a, &b), Err((ReportingError::TrailForkDetected, 2)));
+    }
+
+    #[test]
+    fn test_reconcile_rejects_corrupted_trail() {
+        let env = Env::default();
+        let actor = Address::generate(&env);
+        let good = base_trail(&env, &actor);
+        let mut bad = good.clone();
+        let mut e = bad.get(1).unwrap();
+        e.timestamp += 1;
+        bad.set(1, e);
+        assert_eq!(reconcile_trails(&env, &good, &bad), Err((ReportingError::TrailCorrupted, 1)));
     }
 }

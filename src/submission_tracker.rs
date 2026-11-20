@@ -116,7 +116,19 @@ pub fn create_submission(
 ) -> Result<RegulatorySubmission, ReportingError> {
     // RBAC: only an authenticated, non-suspended submitter (or higher) may create submissions.
     require_active_submitter(env, caller)?;
+    create_submission_unchecked(env, caller, report, attempt, config, now)
+}
 
+/// `create_submission` without the RBAC/auth check (see
+/// `ingest_acknowledgment_unchecked`).
+fn create_submission_unchecked(
+    env: &Env,
+    caller: &Address,
+    report: &RegulatoryReport,
+    attempt: u32,
+    config: &AuthorityConfig,
+    now: u64,
+) -> Result<RegulatorySubmission, ReportingError> {
     // Validate state
     if report.status == ReportStatus::Draft {
         return Err(ReportingError::InvalidStatusTransition);
@@ -522,6 +534,8 @@ pub enum SubmissionTrackerKey {
     Report(BytesN<32>),
     /// Monotonic version counter for a stored report (optimistic concurrency).
     ReportVersion(BytesN<32>),
+    /// Highest submission attempt number stored for a report id.
+    LatestAttempt(BytesN<32>),
 }
 
 /// Multi-predicate filter for read queries over submissions.
@@ -587,7 +601,21 @@ pub fn store_submission(
     env.storage()
         .persistent()
         .set(&SubmissionTrackerKey::SubmissionCount, &(count + 1));
+
+    let latest_key = SubmissionTrackerKey::LatestAttempt(submission.report_id.clone());
+    let latest: u32 = env.storage().persistent().get(&latest_key).unwrap_or(0);
+    if submission.attempt > latest {
+        env.storage().persistent().set(&latest_key, &submission.attempt);
+    }
     Ok(())
+}
+
+/// Highest attempt number stored for `report_id` (0 if none).
+pub fn latest_attempt(env: &Env, report_id: &BytesN<32>) -> u32 {
+    env.storage()
+        .persistent()
+        .get(&SubmissionTrackerKey::LatestAttempt(report_id.clone()))
+        .unwrap_or(0)
 }
 
 /// Retrieve a submission by id.
@@ -762,6 +790,9 @@ pub struct AttestationOutcome {
     pub version: u32,
     /// `true` when this call was an idempotent replay and changed nothing.
     pub replayed: bool,
+    /// `true` when the ack was a late rejection of a superseded attempt: it
+    /// was recorded for audit but did not change the report.
+    pub superseded: bool,
 }
 
 /// Load a stored report together with its current version.
@@ -853,10 +884,37 @@ pub fn attest_acknowledgment(
                 ack: existing,
                 version,
                 replayed: true,
+                superseded: false,
             })
         } else {
             Err(ReportingError::ConflictingAcknowledgment)
         };
+    }
+
+    // Partition healing: a late rejection of an attempt that has since been
+    // superseded by a resubmission must not knock the report out of the
+    // newer attempt's lifecycle.  Record it for audit only.  Late
+    // *acceptances* of older attempts still resolve the report.
+    if !accepted && submission.attempt < latest_attempt(env, report_id) {
+        let ack = ingest_acknowledgment_unchecked(
+            env,
+            caller,
+            &submission,
+            payload,
+            reference_number,
+            accepted,
+            rejection_reason,
+            error_codes,
+            received_at,
+        )?;
+        record_ack(env, &mut submission, &ack, ReportStatus::Rejected);
+        return Ok(AttestationOutcome {
+            ack,
+            action: ReportAction::Rejected,
+            version,
+            replayed: false,
+            superseded: true,
+        });
     }
 
     if version != expected_version {
@@ -878,16 +936,7 @@ pub fn attest_acknowledgment(
     let action = apply_acknowledgment_unchecked(env, caller, &mut report, &ack, received_at)?;
 
     // Commit.
-    submission.status = report.status;
-    submission.reference_number = Some(ack.reference_number.clone());
-    submission.retry_eligible = !ack.accepted && submission.retry_eligible;
-    env.storage()
-        .persistent()
-        .set(&SubmissionTrackerKey::Submission(submission.id.clone()), &submission);
-    store_receipt(env, &ack);
-    env.storage()
-        .persistent()
-        .set(&SubmissionTrackerKey::SubmissionAck(submission_id.clone()), &ack.id);
+    record_ack(env, &mut submission, &ack, report.status);
     let version = save_report(env, &report, version)?;
 
     Ok(AttestationOutcome {
@@ -895,7 +944,185 @@ pub fn attest_acknowledgment(
         action,
         version,
         replayed: false,
+        superseded: false,
     })
+}
+
+/// Persist `ack` as the canonical acknowledgment for `submission`.
+fn record_ack(
+    env: &Env,
+    submission: &mut RegulatorySubmission,
+    ack: &SubmissionAcknowledgment,
+    status: ReportStatus,
+) {
+    submission.status = status;
+    submission.reference_number = Some(ack.reference_number.clone());
+    submission.retry_eligible = !ack.accepted && submission.retry_eligible;
+    env.storage()
+        .persistent()
+        .set(&SubmissionTrackerKey::Submission(submission.id.clone()), submission);
+    store_receipt(env, ack);
+    env.storage()
+        .persistent()
+        .set(&SubmissionTrackerKey::SubmissionAck(submission.id.clone()), &ack.id);
+}
+
+// ─────────────────────────────────────────────────────────────────────────────
+// Network-partition fault tolerance and recovery
+// ─────────────────────────────────────────────────────────────────────────────
+//
+// If the path to the regulator (or between validators) partitions after a
+// submission is dispatched, its acknowledgment may never arrive and the
+// report stays in `Submitted`.  Recovery is deterministic and CAS-guarded:
+//
+// * `find_stalled_submissions` scans the index with a bounded budget for
+//   latest-attempt submissions that are still unacknowledged after
+//   `ack_timeout` seconds;
+// * `recover_stalled_submission` resubmits with the next attempt number
+//   (respecting `max_retries` and back-off), or marks the report `Overdue`
+//   once its deadline has passed.  The superseded submission stays open, so
+//   a late acceptance arriving after the partition heals is still honoured,
+//   while a late rejection is quarantined (see `attest_acknowledgment`).
+
+/// Page of stalled submission ids.
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct StalledPage {
+    /// Ids of stalled submissions found in this page.
+    pub ids: Vec<BytesN<32>>,
+    /// Index to resume scanning from, or `None` when exhausted.
+    pub next_cursor: Option<u32>,
+}
+
+/// What `recover_stalled_submission` did.
+// Short-lived return value; boxing would need `alloc`, which the contract
+// build deliberately does not link.
+#[allow(clippy::large_enum_variant)]
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub enum RecoveryOutcome {
+    /// A new attempt was created and stored.
+    Resubmitted(RegulatorySubmission),
+    /// The deadline had passed; the report was marked `Overdue`.
+    MarkedOverdue,
+}
+
+fn is_stalled(env: &Env, submission: &RegulatorySubmission, ack_timeout: u64, now: u64) -> bool {
+    submission.status == ReportStatus::Submitted
+        && now > submission.submitted_at.saturating_add(ack_timeout)
+        && submission.attempt >= latest_attempt(env, &submission.report_id)
+        && !env
+            .storage()
+            .persistent()
+            .has(&SubmissionTrackerKey::SubmissionAck(submission.id.clone()))
+}
+
+/// Scan up to `limit` index entries (capped) from `cursor` for stalled
+/// submissions.
+pub fn find_stalled_submissions(
+    env: &Env,
+    ack_timeout: u64,
+    now: u64,
+    cursor: u32,
+    limit: u32,
+) -> StalledPage {
+    let count: u32 = env
+        .storage()
+        .persistent()
+        .get(&SubmissionTrackerKey::SubmissionCount)
+        .unwrap_or(0);
+    let start = cursor.min(count);
+    let end = start
+        .saturating_add(limit.min(SUBMISSION_PAGE_SCAN_CAP))
+        .min(count);
+
+    let mut ids = Vec::new(env);
+    for i in start..end {
+        let Some(id) = env
+            .storage()
+            .persistent()
+            .get::<_, BytesN<32>>(&SubmissionTrackerKey::SubmissionIndex(i))
+        else {
+            continue;
+        };
+        if let Some(sub) = get_submission(env, &id) {
+            if is_stalled(env, &sub, ack_timeout, now) {
+                ids.push_back(id);
+            }
+        }
+    }
+    StalledPage {
+        ids,
+        next_cursor: if end < count { Some(end) } else { None },
+    }
+}
+
+/// Recover a submission whose acknowledgment was lost to a partition.
+#[allow(clippy::too_many_arguments)]
+pub fn recover_stalled_submission(
+    env: &Env,
+    caller: &Address,
+    report_id: &BytesN<32>,
+    submission_id: &BytesN<32>,
+    config: &AuthorityConfig,
+    ack_timeout: u64,
+    expected_version: u32,
+    now: u64,
+) -> Result<RecoveryOutcome, ReportingError> {
+    require_active_submitter(env, caller)?;
+
+    let (mut report, version) =
+        load_report(env, report_id).ok_or(ReportingError::ReportNotFound)?;
+    if version != expected_version {
+        return Err(ReportingError::StaleReportVersion);
+    }
+    let mut stalled =
+        get_submission(env, submission_id).ok_or(ReportingError::SubmissionNotFound)?;
+    if stalled.report_id != *report_id {
+        return Err(ReportingError::AcknowledgmentOrphan);
+    }
+    if !is_stalled(env, &stalled, ack_timeout, now) {
+        return Err(ReportingError::SubmissionNotStalled);
+    }
+
+    if now > report.deadline {
+        check_transition(report.status, ReportStatus::Overdue)?;
+        report.status = ReportStatus::Overdue;
+        report.updated_at = now;
+        save_report(env, &report, version)?;
+        emit_audit_event(
+            env,
+            caller,
+            "partition_overdue",
+            report_id,
+            &Bytes::from_slice(env, b"overdue=1"),
+            now,
+        );
+        return Ok(RecoveryOutcome::MarkedOverdue);
+    }
+
+    // The report must still be awaiting this submission's outcome.
+    if report.status != ReportStatus::Submitted {
+        return Err(ReportingError::InvalidStatusTransition);
+    }
+    let attempt = next_attempt(stalled.attempt, config)?;
+    let resubmission = create_submission_unchecked(env, caller, &report, attempt, config, now)?;
+
+    // Commit.
+    store_submission(env, &resubmission)?;
+    stalled.retry_eligible = false;
+    env.storage()
+        .persistent()
+        .set(&SubmissionTrackerKey::Submission(stalled.id.clone()), &stalled);
+    report.updated_at = now;
+    save_report(env, &report, version)?;
+    emit_audit_event(
+        env,
+        caller,
+        "partition_resubmit",
+        &resubmission.id,
+        &Bytes::from_slice(env, b"resubmitted=1"),
+        now,
+    );
+    Ok(RecoveryOutcome::Resubmitted(resubmission))
 }
 
 // ─────────────────────────────────────────────────────────────────────────────
@@ -1088,6 +1315,52 @@ pub(crate) mod test_support {
 
     pub fn get_submission(env: &Env, id: &BytesN<32>) -> Option<RegulatorySubmission> {
         in_ctx(env, || super::get_submission(env, id))
+    }
+
+    pub fn suspend(env: &Env, who: &Address) {
+        in_ctx(env, || {
+            env.storage()
+                .persistent()
+                .set(&RbacStorageKey::Suspended(who.clone()), &true)
+        });
+    }
+
+    #[allow(clippy::too_many_arguments)]
+    pub fn recover(
+        env: &Env,
+        caller: &Address,
+        report_id: &BytesN<32>,
+        submission_id: &BytesN<32>,
+        config: &AuthorityConfig,
+        ack_timeout: u64,
+        expected_version: u32,
+        now: u64,
+    ) -> Result<super::RecoveryOutcome, ReportingError> {
+        in_ctx(env, || {
+            super::recover_stalled_submission(
+                env,
+                caller,
+                report_id,
+                submission_id,
+                config,
+                ack_timeout,
+                expected_version,
+                now,
+            )
+        })
+    }
+
+    pub fn find_stalled(env: &Env, ack_timeout: u64, now: u64) -> std::vec::Vec<BytesN<32>> {
+        in_ctx(env, || {
+            let mut out = std::vec::Vec::new();
+            let mut cursor = Some(0);
+            while let Some(c) = cursor {
+                let page = super::find_stalled_submissions(env, ack_timeout, now, c, 4);
+                out.extend(page.ids.iter());
+                cursor = page.next_cursor;
+            }
+            out
+        })
     }
 
     pub fn submission_count(env: &Env) -> u32 {
@@ -2083,5 +2356,134 @@ mod tests {
         let r = attest(&env, &outsider, &rid, &sid, 1, b"REF-1", true, 1_700_001_000);
         assert_eq!(r, Err(ReportingError::UnauthorizedEntity));
         assert_eq!(load_report(&env, &rid).unwrap().1, 1);
+    }
+
+    // ════════════════════════════════════════════════════════════════════════════════
+    // Network-partition fault tolerance & recovery
+    // ════════════════════════════════════════════════════════════════════════════════
+
+    use super::test_support::{find_stalled, recover};
+
+    const ACK_TIMEOUT: u64 = 3_600;
+
+    #[test]
+    fn test_partition_stalled_submission_detected_after_timeout() {
+        let (env, v) = setup();
+        let (_, sid) = seeded(&env, &v); // submitted_at = 1_700_000_100
+        assert!(find_stalled(&env, ACK_TIMEOUT, 1_700_000_100 + ACK_TIMEOUT).is_empty());
+        assert_eq!(find_stalled(&env, ACK_TIMEOUT, 1_700_000_101 + ACK_TIMEOUT), [sid]);
+    }
+
+    #[test]
+    fn test_partition_acknowledged_submission_not_stalled() {
+        let (env, v) = setup();
+        let (rid, sid) = seeded(&env, &v);
+        attest(&env, &v, &rid, &sid, 1, b"REF-1", true, 1_700_000_200).unwrap();
+        assert!(find_stalled(&env, ACK_TIMEOUT, 1_700_100_000).is_empty());
+        let r = recover(&env, &v, &rid, &sid, &dummy_config(&env), ACK_TIMEOUT, 2, 1_700_100_000);
+        assert_eq!(r, Err(ReportingError::SubmissionNotStalled));
+    }
+
+    #[test]
+    fn test_partition_recovery_resubmits_next_attempt() {
+        let (env, v) = setup();
+        let (rid, sid) = seeded(&env, &v);
+        let now = 1_700_010_000;
+        let out = recover(&env, &v, &rid, &sid, &dummy_config(&env), ACK_TIMEOUT, 1, now).unwrap();
+        let RecoveryOutcome::Resubmitted(sub2) = out else { panic!("expected resubmission") };
+        assert_eq!(sub2.attempt, 2);
+        assert_eq!(sub2.id, compute_submission_id(&env, &rid, 2));
+        assert!(sub2.retry_after >= now);
+        assert!(!get_submission(&env, &sid).unwrap().retry_eligible);
+        let (report, version) = load_report(&env, &rid).unwrap();
+        assert_eq!((report.status, version), (ReportStatus::Submitted, 2));
+
+        // The superseded attempt is no longer "stalled"; only the new one can be.
+        assert_eq!(find_stalled(&env, ACK_TIMEOUT, now + ACK_TIMEOUT + 1), [sub2.id]);
+        // A second recoverer working from the old snapshot loses the CAS.
+        let r = recover(&env, &v, &rid, &sid, &dummy_config(&env), ACK_TIMEOUT, 1, now);
+        assert_eq!(r, Err(ReportingError::StaleReportVersion));
+    }
+
+    #[test]
+    fn test_partition_recovery_past_deadline_marks_overdue() {
+        let (env, v) = setup();
+        let (rid, sid) = seeded(&env, &v); // deadline = 1_700_172_800
+        let out = recover(&env, &v, &rid, &sid, &dummy_config(&env), ACK_TIMEOUT, 1, 1_700_172_801).unwrap();
+        assert_eq!(out, RecoveryOutcome::MarkedOverdue);
+        assert_eq!(load_report(&env, &rid).unwrap().0.status, ReportStatus::Overdue);
+    }
+
+    #[test]
+    fn test_partition_recovery_respects_max_retries() {
+        let (env, v) = setup();
+        let (rid, mut sid) = seeded(&env, &v);
+        let config = dummy_config(&env); // max_retries = 3
+        let mut version = 1;
+        let mut now = 1_700_010_000;
+        for _ in 0..2 {
+            let RecoveryOutcome::Resubmitted(s) =
+                recover(&env, &v, &rid, &sid, &config, ACK_TIMEOUT, version, now).unwrap()
+            else {
+                panic!("expected resubmission")
+            };
+            sid = s.id;
+            version += 1;
+            now += ACK_TIMEOUT * 2;
+        }
+        let before = load_report(&env, &rid).unwrap();
+        let r = recover(&env, &v, &rid, &sid, &config, ACK_TIMEOUT, version, now);
+        assert_eq!(r, Err(ReportingError::MaxRetriesExceeded));
+        assert_eq!(load_report(&env, &rid).unwrap(), before);
+    }
+
+    #[test]
+    fn test_partition_heal_late_rejection_of_superseded_attempt_quarantined() {
+        let (env, v) = setup();
+        let (rid, sid1) = seeded(&env, &v);
+        let RecoveryOutcome::Resubmitted(sub2) =
+            recover(&env, &v, &rid, &sid1, &dummy_config(&env), ACK_TIMEOUT, 1, 1_700_010_000).unwrap()
+        else {
+            panic!("expected resubmission")
+        };
+
+        // Partition heals: the stale attempt-1 rejection finally arrives.
+        let late = attest(&env, &v, &rid, &sid1, 2, b"REF-OLD", false, 1_700_011_000).unwrap();
+        assert!(late.superseded);
+        let (report, version) = load_report(&env, &rid).unwrap();
+        assert_eq!((report.status, version), (ReportStatus::Submitted, 2));
+        assert_eq!(get_submission(&env, &sid1).unwrap().status, ReportStatus::Rejected);
+
+        // The live attempt still resolves normally.
+        let ok = attest(&env, &v, &rid, &sub2.id, 2, b"REF-NEW", true, 1_700_012_000).unwrap();
+        assert_eq!(ok.action, ReportAction::Accepted);
+        assert_eq!(load_report(&env, &rid).unwrap().0.status, ReportStatus::Accepted);
+    }
+
+    #[test]
+    fn test_partition_heal_late_acceptance_of_superseded_attempt_honoured() {
+        let (env, v) = setup();
+        let (rid, sid1) = seeded(&env, &v);
+        let RecoveryOutcome::Resubmitted(sub2) =
+            recover(&env, &v, &rid, &sid1, &dummy_config(&env), ACK_TIMEOUT, 1, 1_700_010_000).unwrap()
+        else {
+            panic!("expected resubmission")
+        };
+        // The regulator had in fact accepted attempt 1.
+        let late = attest(&env, &v, &rid, &sid1, 2, b"REF-OLD", true, 1_700_011_000).unwrap();
+        assert!(!late.superseded);
+        assert_eq!(load_report(&env, &rid).unwrap().0.status, ReportStatus::Accepted);
+        // The duplicate acceptance of attempt 2 cannot re-transition a terminal report.
+        let r = attest(&env, &v, &rid, &sub2.id, 3, b"REF-NEW", true, 1_700_012_000);
+        assert_eq!(r, Err(ReportingError::InvalidStatusTransition));
+    }
+
+    #[test]
+    fn test_partition_recovery_requires_active_submitter() {
+        let (env, v) = setup();
+        let (rid, sid) = seeded(&env, &v);
+        super::test_support::suspend(&env, &v);
+        let r = recover(&env, &v, &rid, &sid, &dummy_config(&env), ACK_TIMEOUT, 1, 1_700_010_000);
+        assert_eq!(r, Err(ReportingError::UnauthorizedEntity));
     }
 }

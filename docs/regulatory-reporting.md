@@ -614,6 +614,31 @@ race-free, storage-backed entry point:
   `DuplicateSubmission`.
 - **Validate-then-commit.** All checks run before the first storage write.
 
+### Network partitions
+
+When the path to the regulator, or between validators, partitions after a
+submission is dispatched, the acknowledgment may never arrive:
+
+- **Detection.** `find_stalled_submissions(ack_timeout, now, cursor, limit)`
+  scans the submission index in bounded pages. It returns latest-attempt
+  submissions that are still `Submitted` and have no acknowledgment after
+  `ack_timeout` seconds.
+- **Recovery.** `recover_stalled_submission` is CAS-guarded by the report
+  version. Before the deadline, it creates and stores the next attempt using
+  the normal `max_retries` and back-off rules. Past the deadline, it marks the
+  report `Overdue`. Concurrent recoverers get `StaleReportVersion`. Calling it
+  on a healthy submission fails with `SubmissionNotStalled`.
+- **Healing.** The superseded submission stays open. If a late *acceptance*
+  arrives after the partition heals, it still resolves the report. A late
+  *rejection* of a superseded attempt is recorded for audit
+  (`superseded = true`) but does not change the report, so the live attempt's
+  lifecycle is not disturbed.
+- **Trail reconciliation.** `reconcile_trails(local, remote)` verifies both
+  hash chains (`TrailCorrupted`). If one trail is a prefix of the other, it
+  fast-forwards to the longer one in either argument order. If they diverge,
+  it reports `TrailForkDetected` with the first diverging sequence number.
+  Forks are never merged automatically.
+
 ---
 
 ## Error Codes
@@ -640,6 +665,9 @@ race-free, storage-backed entry point:
 | `ConflictingAcknowledgment` (217) | A different ack outcome is already recorded for the submission |
 | `StaleReportVersion` (218) | Expected report version is stale (another writer committed first) |
 | `DuplicateSubmission` (219) | A different submission already exists under this id |
+| `SubmissionNotStalled` (220) | Recovery requested for a submission that is acknowledged, superseded, or not timed out |
+| `TrailForkDetected` (221) | Two copies of a report's audit trail diverge |
+| `TrailCorrupted` (222) | An audit trail failed hash-chain verification |
 
 ---
 
