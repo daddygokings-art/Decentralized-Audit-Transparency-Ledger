@@ -458,9 +458,19 @@ fn verify_in_fresh_host(n: usize, tampers: &[Tamper]) -> (ChainVerification, Std
     let env = Env::default();
     let id = env.register(WitnessHarness, ());
     let (links, expected) = tampered_chain(&env, n, tampers);
-    let v = env
-        .as_contract(&id, || TamperEvidenceHelper::verify_chain_continuity(&env, &links))
-        .unwrap();
+    let (v, compact) = env.as_contract(&id, || {
+        let v = TamperEvidenceHelper::verify_chain_continuity(&env, &links).unwrap();
+        // The compact large-batch path must reach the same verdict.
+        let (mut hashes, mut prevs) = (Vec::new(&env), Vec::new(&env));
+        for l in links.iter() {
+            hashes.push_back(l.hash);
+            prevs.push_back(l.prev_hash);
+        }
+        let anchor = links.get(0).unwrap().expected_prev_hash;
+        let c = TamperEvidenceHelper::verify_hash_chain(&env, 0, &anchor, &hashes, &prevs).unwrap();
+        (v, c)
+    });
+    assert_eq!(v, compact, "compact path disagrees");
     (v, expected)
 }
 
