@@ -16,9 +16,10 @@ Complete pipeline for generating, validating, submitting, and tracking regulator
 8. [Audit Trail](#audit-trail)
 9. [REST API Reference](#rest-api-reference)
 10. [Configuration](#configuration)
-11. [Error Codes](#error-codes)
-12. [Testing](#testing)
-13. [Deployment Notes](#deployment-notes)
+11. [Robustness and Fault Tolerance](#robustness-and-fault-tolerance)
+12. [Error Codes](#error-codes)
+13. [Testing](#testing)
+14. [Deployment Notes](#deployment-notes)
 
 ---
 
@@ -590,6 +591,31 @@ AuthorityConfig {
 
 ---
 
+## Robustness and Fault Tolerance
+
+### Concurrent validator attestations
+
+The pure transition helpers (`apply_acknowledgment`, `mark_*`) mutate a
+caller-held copy of a report, so two validators working from the same snapshot
+could both apply a transition, and acknowledgments with different
+`received_at` clocks got different ack ids. `attest_acknowledgment` is the
+race-free, storage-backed entry point:
+
+- **Compare-and-swap versions.** Every report stored via `save_report` has a
+  monotonic version. Attestors pass the version they observed; a mismatch
+  fails with `StaleReportVersion` and writes nothing.
+- **First-writer-wins acknowledgments.** The first ack committed for a
+  submission is canonical. Replaying the same outcome and reference is an
+  idempotent no-op that returns the canonical ack (`replayed = true`) in any
+  arrival order. A different outcome or reference fails with
+  `ConflictingAcknowledgment`.
+- **Idempotent submission storage.** `store_submission` never re-indexes an
+  identical submission. A different submission under an existing id fails with
+  `DuplicateSubmission`.
+- **Validate-then-commit.** All checks run before the first storage write.
+
+---
+
 ## Error Codes
 
 | Code | Description |
@@ -609,6 +635,11 @@ AuthorityConfig {
 | `ConfigNotFound` (212) | Authority configuration not found |
 | `PipelinePaused` (213) | Reporting pipeline is paused |
 | `UnauthorizedEntity` (214) | Entity not authorized to manage this report |
+| `NonceTooLow` (215) | Supplied nonce does not match the stored nonce |
+| `NonceExhausted` (216) | Submitter nonce space exhausted |
+| `ConflictingAcknowledgment` (217) | A different ack outcome is already recorded for the submission |
+| `StaleReportVersion` (218) | Expected report version is stale (another writer committed first) |
+| `DuplicateSubmission` (219) | A different submission already exists under this id |
 
 ---
 

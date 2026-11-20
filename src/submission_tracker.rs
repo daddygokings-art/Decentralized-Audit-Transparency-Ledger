@@ -238,7 +238,34 @@ pub fn ingest_acknowledgment(
 ) -> Result<SubmissionAcknowledgment, ReportingError> {
     // RBAC: only an authenticated, non-suspended submitter (or higher) may ingest acknowledgments.
     require_active_submitter(env, caller)?;
+    ingest_acknowledgment_unchecked(
+        env,
+        caller,
+        submission,
+        payload,
+        reference_number,
+        accepted,
+        rejection_reason,
+        error_codes,
+        received_at,
+    )
+}
 
+/// `ingest_acknowledgment` without the RBAC/auth check, for callers that have
+/// already authenticated `caller` in the current frame (Soroban rejects a
+/// second `require_auth` for the same address within one invocation).
+#[allow(clippy::too_many_arguments)]
+fn ingest_acknowledgment_unchecked(
+    env: &Env,
+    caller: &Address,
+    submission: &RegulatorySubmission,
+    payload: Bytes,
+    reference_number: Bytes,
+    accepted: bool,
+    rejection_reason: Bytes,
+    error_codes: Vec<Bytes>,
+    received_at: u64,
+) -> Result<SubmissionAcknowledgment, ReportingError> {
     // The submission must be in Submitted state to receive an ack
     if submission.status != ReportStatus::Submitted
         && submission.status != ReportStatus::Acknowledged
@@ -306,7 +333,18 @@ pub fn apply_acknowledgment(
     now: u64,
 ) -> Result<ReportAction, ReportingError> {
     require_active_submitter(env, caller)?;
+    apply_acknowledgment_unchecked(env, caller, report, ack, now)
+}
 
+/// `apply_acknowledgment` without the RBAC/auth check (see
+/// `ingest_acknowledgment_unchecked`).
+fn apply_acknowledgment_unchecked(
+    env: &Env,
+    caller: &Address,
+    report: &mut RegulatoryReport,
+    ack: &SubmissionAcknowledgment,
+    now: u64,
+) -> Result<ReportAction, ReportingError> {
     // First, transition to Acknowledged
     check_transition(report.status, ReportStatus::Acknowledged)?;
     report.status = ReportStatus::Acknowledged;
@@ -478,6 +516,12 @@ pub enum SubmissionTrackerKey {
     SubmissionIndex(u32),
     /// Total number of submissions recorded.
     SubmissionCount,
+    /// Canonical (first-committed) acknowledgment id for a submission id.
+    SubmissionAck(BytesN<32>),
+    /// Stored RegulatoryReport keyed by report id.
+    Report(BytesN<32>),
+    /// Monotonic version counter for a stored report (optimistic concurrency).
+    ReportVersion(BytesN<32>),
 }
 
 /// Multi-predicate filter for read queries over submissions.
@@ -509,8 +553,27 @@ pub struct SubmissionPage {
 }
 
 /// Store a submission and append it to the ordered index.
-pub fn store_submission(env: &Env, submission: &RegulatorySubmission) {
+///
+/// Idempotent: re-storing an identical submission is a no-op (it is **not**
+/// re-indexed), so two validators racing to persist the same deterministic
+/// submission id cannot create duplicate index entries.  Storing a different
+/// submission under an existing id fails with `DuplicateSubmission`.
+pub fn store_submission(
+    env: &Env,
+    submission: &RegulatorySubmission,
+) -> Result<(), ReportingError> {
     let sub_key = SubmissionTrackerKey::Submission(submission.id.clone());
+    if let Some(existing) = env
+        .storage()
+        .persistent()
+        .get::<_, RegulatorySubmission>(&sub_key)
+    {
+        return if existing == *submission {
+            Ok(())
+        } else {
+            Err(ReportingError::DuplicateSubmission)
+        };
+    }
     env.storage().persistent().set(&sub_key, submission);
 
     let count: u32 = env
@@ -520,10 +583,11 @@ pub fn store_submission(env: &Env, submission: &RegulatorySubmission) {
         .unwrap_or(0);
     env.storage()
         .persistent()
-        .set(&SubmissionTrackerKey::SubmissionIndex(count), &submission.id.clone());
+        .set(&SubmissionTrackerKey::SubmissionIndex(count), &submission.id);
     env.storage()
         .persistent()
         .set(&SubmissionTrackerKey::SubmissionCount, &(count + 1));
+    Ok(())
 }
 
 /// Retrieve a submission by id.
@@ -667,6 +731,174 @@ pub fn bump_nonce_ttl(env: &Env, submitter: &Address, threshold: u32, expires_to
 }
 
 // ─────────────────────────────────────────────────────────────────────────────
+// Concurrency-safe attestation (race-free validator acknowledgments)
+// ─────────────────────────────────────────────────────────────────────────────
+//
+// The pure transition helpers above operate on a caller-held copy of a
+// report.  When several validators attest the same submission at once, each
+// works from the same snapshot, so a naive read-modify-write lets both
+// "win" (lost update / double transition) and lets them record conflicting
+// outcomes under different ack ids (ack ids depend on `received_at`).
+//
+// The storage-backed API below closes that window:
+//
+// * every stored report carries a monotonic version; writers must present
+//   the version they read (compare-and-swap) or get `StaleReportVersion`;
+// * the first acknowledgment committed for a submission is canonical.  An
+//   identical replay (same outcome + reference) is an idempotent no-op that
+//   returns the canonical ack regardless of arrival order; a different
+//   outcome is rejected with `ConflictingAcknowledgment`;
+// * every check runs before the first storage write, so a failed attestation
+//   leaves state untouched.
+
+/// Result of a (possibly replayed) attestation.
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct AttestationOutcome {
+    /// Canonical acknowledgment for the submission.
+    pub ack: SubmissionAcknowledgment,
+    /// Report action produced by the canonical acknowledgment.
+    pub action: ReportAction,
+    /// Report version after the call.
+    pub version: u32,
+    /// `true` when this call was an idempotent replay and changed nothing.
+    pub replayed: bool,
+}
+
+/// Load a stored report together with its current version.
+pub fn load_report(env: &Env, report_id: &BytesN<32>) -> Option<(RegulatoryReport, u32)> {
+    let report: RegulatoryReport = env
+        .storage()
+        .persistent()
+        .get(&SubmissionTrackerKey::Report(report_id.clone()))?;
+    let version: u32 = env
+        .storage()
+        .persistent()
+        .get(&SubmissionTrackerKey::ReportVersion(report_id.clone()))
+        .unwrap_or(0);
+    Some((report, version))
+}
+
+/// Persist `report` if its stored version still equals `expected_version`
+/// (0 for a report that has never been stored).  Returns the new version.
+pub fn save_report(
+    env: &Env,
+    report: &RegulatoryReport,
+    expected_version: u32,
+) -> Result<u32, ReportingError> {
+    let version_key = SubmissionTrackerKey::ReportVersion(report.id.clone());
+    let current: u32 = env.storage().persistent().get(&version_key).unwrap_or(0);
+    if current != expected_version {
+        return Err(ReportingError::StaleReportVersion);
+    }
+    let next = current
+        .checked_add(1)
+        .ok_or(ReportingError::StaleReportVersion)?;
+    env.storage()
+        .persistent()
+        .set(&SubmissionTrackerKey::Report(report.id.clone()), report);
+    env.storage().persistent().set(&version_key, &next);
+    Ok(next)
+}
+
+/// Canonical acknowledgment recorded for `submission_id`, if any.
+pub fn get_submission_ack(env: &Env, submission_id: &BytesN<32>) -> Option<SubmissionAcknowledgment> {
+    let ack_id: BytesN<32> = env
+        .storage()
+        .persistent()
+        .get(&SubmissionTrackerKey::SubmissionAck(submission_id.clone()))?;
+    get_receipt(env, &ack_id)
+}
+
+fn action_for(accepted: bool) -> ReportAction {
+    if accepted {
+        ReportAction::Accepted
+    } else {
+        ReportAction::Rejected
+    }
+}
+
+/// Atomically ingest and apply a validator's acknowledgment attestation.
+///
+/// `expected_version` is the report version the attesting validator observed.
+/// See the section comment above for the race-safety guarantees.
+#[allow(clippy::too_many_arguments)]
+pub fn attest_acknowledgment(
+    env: &Env,
+    caller: &Address,
+    report_id: &BytesN<32>,
+    submission_id: &BytesN<32>,
+    expected_version: u32,
+    payload: Bytes,
+    reference_number: Bytes,
+    accepted: bool,
+    rejection_reason: Bytes,
+    error_codes: Vec<Bytes>,
+    received_at: u64,
+) -> Result<AttestationOutcome, ReportingError> {
+    require_active_submitter(env, caller)?;
+
+    let (mut report, version) =
+        load_report(env, report_id).ok_or(ReportingError::ReportNotFound)?;
+    let mut submission =
+        get_submission(env, submission_id).ok_or(ReportingError::SubmissionNotFound)?;
+    if submission.report_id != *report_id {
+        return Err(ReportingError::AcknowledgmentOrphan);
+    }
+
+    // First-writer-wins: an ack already exists for this submission.
+    if let Some(existing) = get_submission_ack(env, submission_id) {
+        return if existing.accepted == accepted && existing.reference_number == reference_number {
+            Ok(AttestationOutcome {
+                action: action_for(existing.accepted),
+                ack: existing,
+                version,
+                replayed: true,
+            })
+        } else {
+            Err(ReportingError::ConflictingAcknowledgment)
+        };
+    }
+
+    if version != expected_version {
+        return Err(ReportingError::StaleReportVersion);
+    }
+
+    // Validate inputs and the full transition before any write.
+    let ack = ingest_acknowledgment_unchecked(
+        env,
+        caller,
+        &submission,
+        payload,
+        reference_number,
+        accepted,
+        rejection_reason,
+        error_codes,
+        received_at,
+    )?;
+    let action = apply_acknowledgment_unchecked(env, caller, &mut report, &ack, received_at)?;
+
+    // Commit.
+    submission.status = report.status;
+    submission.reference_number = Some(ack.reference_number.clone());
+    submission.retry_eligible = !ack.accepted && submission.retry_eligible;
+    env.storage()
+        .persistent()
+        .set(&SubmissionTrackerKey::Submission(submission.id.clone()), &submission);
+    store_receipt(env, &ack);
+    env.storage()
+        .persistent()
+        .set(&SubmissionTrackerKey::SubmissionAck(submission_id.clone()), &ack.id);
+    let version = save_report(env, &report, version)?;
+
+    Ok(AttestationOutcome {
+        ack,
+        action,
+        version,
+        replayed: false,
+    })
+}
+
+// ─────────────────────────────────────────────────────────────────────────────
 // Test support — contract context + RBAC fixtures
 // ─────────────────────────────────────────────────────────────────────────────
 
@@ -682,7 +914,7 @@ pub(crate) mod test_support {
     extern crate std;
 
     use soroban_sdk::testutils::Address as _;
-    use soroban_sdk::{contract, contractimpl, Address, Bytes, Env, Vec};
+    use soroban_sdk::{contract, contractimpl, Address, Bytes, BytesN, Env, Vec};
 
     use crate::rbac::{RbacStorageKey, Role};
     use crate::regulatory_reporting::{
@@ -811,6 +1043,60 @@ pub(crate) mod test_support {
         now: u64,
     ) -> Result<(), ReportingError> {
         in_ctx(env, || super::mark_validated(env, caller, report, now))
+    }
+
+    /// Persist a report as version 1 together with its submission.
+    pub fn seed(env: &Env, report: &RegulatoryReport, submission: &RegulatorySubmission) {
+        in_ctx(env, || {
+            super::save_report(env, report, 0).unwrap();
+            super::store_submission(env, submission).unwrap();
+        });
+    }
+
+    /// Attest with a fixed payload; `reference` / `accepted` drive the outcome.
+    #[allow(clippy::too_many_arguments)]
+    pub fn attest(
+        env: &Env,
+        caller: &Address,
+        report_id: &BytesN<32>,
+        submission_id: &BytesN<32>,
+        expected_version: u32,
+        reference: &[u8],
+        accepted: bool,
+        received_at: u64,
+    ) -> Result<super::AttestationOutcome, ReportingError> {
+        in_ctx(env, || {
+            super::attest_acknowledgment(
+                env,
+                caller,
+                report_id,
+                submission_id,
+                expected_version,
+                Bytes::from_slice(env, b"{}"),
+                Bytes::from_slice(env, reference),
+                accepted,
+                Bytes::new(env),
+                Vec::new(env),
+                received_at,
+            )
+        })
+    }
+
+    pub fn load_report(env: &Env, id: &BytesN<32>) -> Option<(RegulatoryReport, u32)> {
+        in_ctx(env, || super::load_report(env, id))
+    }
+
+    pub fn get_submission(env: &Env, id: &BytesN<32>) -> Option<RegulatorySubmission> {
+        in_ctx(env, || super::get_submission(env, id))
+    }
+
+    pub fn submission_count(env: &Env) -> u32 {
+        in_ctx(env, || {
+            env.storage()
+                .persistent()
+                .get(&super::SubmissionTrackerKey::SubmissionCount)
+                .unwrap_or(0)
+        })
     }
 }
 
@@ -1675,5 +1961,127 @@ mod tests {
             );
             assert_eq!(report.status, ReportStatus::Cancelled);
         }
+    }
+
+    // ════════════════════════════════════════════════════════════════════════════════
+    // Race-condition tests — simultaneous validator attestations
+    // ════════════════════════════════════════════════════════════════════════════════
+
+    use super::test_support::{attest, get_submission, load_report, seed, submission_count};
+
+    /// A Submitted report plus its attempt-1 submission, persisted at version 1.
+    fn seeded(env: &Env, caller: &Address) -> (BytesN<32>, BytesN<32>) {
+        let mut report = validated_report(env);
+        let sub = create_submission(env, caller, &report, 1, &dummy_config(env), 1_700_000_100).unwrap();
+        report.status = ReportStatus::Submitted;
+        seed(env, &report, &sub);
+        (report.id, sub.id)
+    }
+
+    #[test]
+    fn test_race_two_validators_same_snapshot_one_commits() {
+        let (env, v1) = setup();
+        let v2 = Address::generate(&env);
+        super::test_support::grant(&env, &v2, crate::rbac::Role::Submitter);
+        let (rid, sid) = seeded(&env, &v1);
+
+        // Both observed version 1; v1 commits first.
+        let a = attest(&env, &v1, &rid, &sid, 1, b"REF-1", true, 1_700_001_000).unwrap();
+        assert!(!a.replayed);
+        assert_eq!(a.version, 2);
+
+        // v2 attests the same outcome from a later clock: idempotent replay that
+        // returns the canonical ack, not a second transition.
+        let b = attest(&env, &v2, &rid, &sid, 1, b"REF-1", true, 1_700_001_005).unwrap();
+        assert!(b.replayed);
+        assert_eq!(b.ack, a.ack);
+        assert_eq!(b.version, 2);
+
+        let (report, version) = load_report(&env, &rid).unwrap();
+        assert_eq!(report.status, ReportStatus::Accepted);
+        assert_eq!(version, 2);
+    }
+
+    #[test]
+    fn test_race_conflicting_attestation_rejected_without_mutation() {
+        let (env, v1) = setup();
+        let (rid, sid) = seeded(&env, &v1);
+        attest(&env, &v1, &rid, &sid, 1, b"REF-1", true, 1_700_001_000).unwrap();
+        let before = load_report(&env, &rid).unwrap();
+
+        // Equivocation: same submission, opposite outcome.
+        let r = attest(&env, &v1, &rid, &sid, 2, b"REF-1", false, 1_700_001_001);
+        assert_eq!(r, Err(ReportingError::ConflictingAcknowledgment));
+        // Different reference for the same outcome is also a conflict.
+        let r = attest(&env, &v1, &rid, &sid, 2, b"REF-X", true, 1_700_001_001);
+        assert_eq!(r, Err(ReportingError::ConflictingAcknowledgment));
+
+        assert_eq!(load_report(&env, &rid).unwrap(), before);
+    }
+
+    #[test]
+    fn test_race_stale_version_rejected_without_mutation() {
+        let (env, v1) = setup();
+        let (rid, sid) = seeded(&env, &v1);
+        let before = load_report(&env, &rid).unwrap();
+        let r = attest(&env, &v1, &rid, &sid, 0, b"REF-1", true, 1_700_001_000);
+        assert_eq!(r, Err(ReportingError::StaleReportVersion));
+        assert_eq!(load_report(&env, &rid).unwrap(), before);
+        assert_eq!(get_submission(&env, &sid).unwrap().status, ReportStatus::Submitted);
+    }
+
+    #[test]
+    fn test_race_outcome_independent_of_arrival_order() {
+        // Two identical attestations with different clocks, in both orders,
+        // converge on the same canonical state.
+        let mut finals = std::vec::Vec::new();
+        for order in [[1_700_001_000u64, 1_700_001_009], [1_700_001_009, 1_700_001_000]] {
+            let (env, v) = setup();
+            let (rid, sid) = seeded(&env, &v);
+            for t in order {
+                attest(&env, &v, &rid, &sid, 1, b"REF-1", false, t).unwrap();
+            }
+            let (report, version) = load_report(&env, &rid).unwrap();
+            finals.push((report.status, version, get_submission(&env, &sid).unwrap().status));
+        }
+        assert_eq!(finals[0], finals[1]);
+        assert_eq!(finals[0].0, ReportStatus::Rejected);
+    }
+
+    #[test]
+    fn test_race_orphan_submission_rejected() {
+        let (env, v) = setup();
+        let (rid, _) = seeded(&env, &v);
+        let mut other = validated_report(&env);
+        other.id = BytesN::from_array(&env, &[9u8; 32]);
+        let foreign = create_submission(&env, &v, &other, 1, &dummy_config(&env), 1_700_000_100).unwrap();
+        super::test_support::in_ctx(&env, || store_submission(&env, &foreign).unwrap());
+        let r = attest(&env, &v, &rid, &foreign.id, 1, b"REF-1", true, 1_700_001_000);
+        assert_eq!(r, Err(ReportingError::AcknowledgmentOrphan));
+    }
+
+    #[test]
+    fn test_race_duplicate_store_is_idempotent() {
+        let (env, v) = setup();
+        let report = validated_report(&env);
+        let sub = create_submission(&env, &v, &report, 1, &dummy_config(&env), 1_700_000_100).unwrap();
+        super::test_support::in_ctx(&env, || {
+            store_submission(&env, &sub).unwrap();
+            store_submission(&env, &sub).unwrap();
+            let mut tampered = sub.clone();
+            tampered.attempt = 2;
+            assert_eq!(store_submission(&env, &tampered), Err(ReportingError::DuplicateSubmission));
+        });
+        assert_eq!(submission_count(&env), 1);
+    }
+
+    #[test]
+    fn test_race_unauthorized_validator_cannot_attest() {
+        let (env, v) = setup();
+        let (rid, sid) = seeded(&env, &v);
+        let outsider = Address::generate(&env);
+        let r = attest(&env, &outsider, &rid, &sid, 1, b"REF-1", true, 1_700_001_000);
+        assert_eq!(r, Err(ReportingError::UnauthorizedEntity));
+        assert_eq!(load_report(&env, &rid).unwrap().1, 1);
     }
 }
