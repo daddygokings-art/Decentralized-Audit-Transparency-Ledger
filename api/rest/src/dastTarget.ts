@@ -46,6 +46,15 @@ app.post(
   }
 );
 
+// Minimal favicon response so ZAP finds a 200 (not a 404 that lacks
+// security headers) when crawling /favicon.ico (issue #928).
+// The middleware stack above already applied CSP, Cache-Control, and
+// all other hardening headers to this response.
+app.get("/favicon.ico", (_req, res) => {
+  res.setHeader("Content-Type", "image/x-icon");
+  res.status(200).end();
+});
+
 app.get(["/", "/robots.txt", "/sitemap.xml"], (req, res) => {
   if (req.path === "/robots.txt") {
     res.type("text/plain").send("User-agent: *\nDisallow: /");

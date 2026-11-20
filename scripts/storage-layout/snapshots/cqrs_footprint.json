@@ -1,0 +1,38 @@
+{
+  "module": "src/cqrs.rs",
+  "description": "Pinned serialized XDR footprint of CQRS projection-engine records. Sizes are asserted by src/cqrs_storage_tests.rs and checked against byte_budget by scripts/storage-layout/validate_layout.py. Update both together.",
+  "storage_tiers": {
+    "Seq": "instance",
+    "Proj": "instance",
+    "SnapCnt": "instance",
+    "Event": "persistent",
+    "IdSeq": "persistent",
+    "Snap": "persistent",
+    "TypeIdx": "persistent",
+    "TypeCnt": "persistent",
+    "SubIdx": "persistent",
+    "SubCnt": "persistent",
+    "Idem": "temporary"
+  },
+  "ttl_policy": {
+    "instance": { "threshold_ledgers": 17280, "extend_to_ledgers": 518400 },
+    "persistent": { "threshold_ledgers": 518400, "extend_to_ledgers": 2073600, "permissionless_extend": true },
+    "temporary": { "threshold_ledgers": 17280, "extend_to_ledgers": 17280 }
+  },
+  "records": {
+    "PackedCqrsEvent.log_64b_metadata": { "xdr_size": 272, "legacy_xdr_size": 428, "byte_budget": 288 },
+    "PackedCqrsEvent.governance": { "xdr_size": 152, "legacy_xdr_size": 376, "byte_budget": 160 },
+    "PackedProjection.empty": { "xdr_size": 72, "legacy_xdr_size": 204, "byte_budget": 80 },
+    "CqrsStorageKey.Event": { "xdr_size": 36, "legacy_xdr_size": 40, "byte_budget": 40 },
+    "CqrsStorageKey.SubIdx": { "xdr_size": 80, "legacy_xdr_size": 92, "byte_budget": 88 }
+  },
+  "benchmark": {
+    "scenario": "1000 record_log_event txs, 64-byte metadata, 10 submitters, 4 event types",
+    "max_write_bytes_per_tx_budget": 2048,
+    "measured_max_write_bytes_per_tx": 1952,
+    "measured_total_write_bytes": 1946088,
+    "legacy_write_bytes_tx_1": 1408,
+    "legacy_write_bytes_tx_100": 62340,
+    "legacy_failure": "instance entry exceeded 65536-byte ledger entry limit at ~105 events"
+  }
+}

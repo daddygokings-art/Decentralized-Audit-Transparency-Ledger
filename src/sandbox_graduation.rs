@@ -540,11 +540,12 @@ impl GraduationManager {
 
     /// Compute assessment ID
     pub fn compute_assessment_id(env: &Env, participant_id: &BytesN<32>) -> BytesN<32> {
+        
         let mut input = Bytes::new(env);
         input.append(&participant_id.to_bytes());
         input.append(&Bytes::from_slice(env, b"GRADUATION"));
 
-        env.crypto().sha256(&input).to_bytes()
+        env.crypto().sha256(&input)
     }
 
     /// Evaluate graduation eligibility

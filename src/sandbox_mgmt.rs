@@ -56,7 +56,7 @@ impl SandboxManager {
         input.append(organization_name);
         input.append(&Bytes::from_slice(env, &env.ledger().timestamp().to_le_bytes()));
 
-        env.crypto().sha256(&input).to_bytes()
+        env.crypto().sha256(&input)
     }
 
     /// Approve application and create participant
@@ -125,7 +125,7 @@ impl SandboxManager {
         input.append(&applicant.to_xdr(env));
         input.append(&Bytes::from_slice(env, b"PARTICIPANT"));
 
-        env.crypto().sha256(&input).to_bytes()
+        env.crypto().sha256(&input)
     }
 
     /// Extend participant duration

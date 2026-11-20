@@ -17,10 +17,17 @@ fn create_ledger() -> (Env, Address, AuditLedgerClient<'static>) {
     (env, owner, client)
 }
 
+/// Generates an address holding the CQRS RBAC `Submitter` role.
+fn new_submitter(env: &Env, owner: &Address, client: &AuditLedgerClient<'static>) -> Address {
+    let submitter = Address::generate(env);
+    client.cqrs_set_role(owner, &submitter, &2);
+    submitter
+}
+
 #[test]
 fn test_cqrs_log_event_command_appends_to_event_store_and_updates_projection() {
-    let (env, _owner, client) = create_ledger();
-    let submitter = Address::generate(&env);
+    let (env, owner, client) = create_ledger();
+    let submitter = new_submitter(&env, &owner, &client);
     env.ledger().set_timestamp(1000);
 
     let cmd = LogEventCommand {
@@ -67,8 +74,8 @@ fn test_cqrs_log_event_command_appends_to_event_store_and_updates_projection() {
 
 #[test]
 fn test_cqrs_query_separation_does_not_mutate_state() {
-    let (env, _owner, client) = create_ledger();
-    let submitter = Address::generate(&env);
+    let (env, owner, client) = create_ledger();
+    let submitter = new_submitter(&env, &owner, &client);
     env.ledger().set_timestamp(1000);
 
     let cmd = LogEventCommand {
@@ -97,8 +104,8 @@ fn test_cqrs_query_separation_does_not_mutate_state() {
 
 #[test]
 fn test_cqrs_command_idempotency() {
-    let (env, _owner, client) = create_ledger();
-    let submitter = Address::generate(&env);
+    let (env, owner, client) = create_ledger();
+    let submitter = new_submitter(&env, &owner, &client);
     env.ledger().set_timestamp(1000);
 
     let idemp_key = BytesN::from_array(&env, &[42u8; 32]);
@@ -129,7 +136,7 @@ fn test_cqrs_command_idempotency() {
 #[test]
 fn test_cqrs_update_event_command() {
     let (env, owner, client) = create_ledger();
-    let submitter = Address::generate(&env);
+    let submitter = new_submitter(&env, &owner, &client);
     env.ledger().set_timestamp(1000);
 
     let log_cmd = LogEventCommand {
@@ -199,9 +206,9 @@ fn test_cqrs_governance_command() {
 
 #[test]
 fn test_cqrs_materialized_views_and_query_filtering() {
-    let (env, _owner, client) = create_ledger();
-    let alice = Address::generate(&env);
-    let bob = Address::generate(&env);
+    let (env, owner, client) = create_ledger();
+    let alice = new_submitter(&env, &owner, &client);
+    let bob = new_submitter(&env, &owner, &client);
     env.ledger().set_timestamp(1000);
 
     // Log 2 events for Alice (type "security")
@@ -276,7 +283,7 @@ fn test_cqrs_materialized_views_and_query_filtering() {
 #[test]
 fn test_cqrs_snapshot_and_projection_rebuilding() {
     let (env, owner, client) = create_ledger();
-    let submitter = Address::generate(&env);
+    let submitter = new_submitter(&env, &owner, &client);
     env.ledger().set_timestamp(1000);
 
     // Log 3 events

@@ -83,7 +83,7 @@ impl EnvironmentManager {
         input.append(&participant_id.to_bytes());
         input.append(&Bytes::from_slice(env, b"SANDBOX"));
 
-        env.crypto().sha256(&input).to_bytes()
+        env.crypto().sha256(&input)
     }
 
     /// Check transaction against sandbox limits
@@ -178,7 +178,7 @@ impl EnvironmentManager {
         input.append(&Bytes::from_slice(env, &sandbox.daily_volume_used.to_le_bytes()));
         input.append(&Bytes::from_slice(env, &sandbox.transaction_count.to_le_bytes()));
 
-        sandbox.state_hash = env.crypto().sha256(&input).to_bytes();
+        sandbox.state_hash = env.crypto().sha256(&input);
     }
 }
 
