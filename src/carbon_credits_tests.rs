@@ -687,13 +687,14 @@ mod tests {
         transfer_credit(&env, credit_id.clone(), issuer.clone(), new_holder.clone());
 
         // 6. Get portfolio
-        let portfolio = get_portfolio_status(&env, new_holder);
+        let portfolio = get_portfolio_status(&env, new_holder.clone());
         assert_eq!(portfolio.total_credits, 1);
 
-        // 7. Retire
+        // 7. Retire (only the current holder may retire)
+        setup_rbac(&env, &admin, &new_holder, Role::Submitter);
         retire_credit(
             &env,
-            issuer.clone(),
+            new_holder.clone(),
             credit_id.clone(),
             Bytes::from_slice(&env, b"Used for offset"),
         );

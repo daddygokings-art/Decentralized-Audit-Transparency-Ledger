@@ -37,6 +37,14 @@ pub enum CarbonCreditError {
     TransferFailed = 3012,
     /// A derived identifier collided with an existing entry
     IdentifierCollision = 3013,
+    /// The caller acted on a stale view of the credit (version mismatch)
+    StaleState = 3014,
+    /// An aggregate counter would overflow
+    CounterOverflow = 3015,
+    /// The credit is not in a state that accepts this operation
+    InvalidState = 3016,
+    /// The validator has already attested to this credit
+    DuplicateAttestation = 3017,
 }
 
 /// Carbon credit status
@@ -290,6 +298,29 @@ pub enum CarbonCreditKey {
     /// Marker that `verifier` has already attested to `credit_id`
     /// (one attestation per validator per credit).
     Attestation(BytesN<32>, Address),
+    /// Current holder of a credit (authoritative for transfer / retire).
+    CreditHolder(BytesN<32>),
+    /// Dense issuance-order index: `CreditByIndex(n)` is the n-th credit.
+    /// Enables bounded, resumable scans without loading a global list.
+    CreditByIndex(u32),
+    /// Checkpoint for an in-progress counter reconciliation.
+    ReconcileCheckpoint,
+}
+
+/// Progress of a resumable aggregate-counter reconciliation.
+#[contracttype]
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct ReconcileProgress {
+    /// Next issuance index to scan.
+    pub next_index: u32,
+    /// Total credits that must be scanned (issuance counter snapshot).
+    pub target: u32,
+    /// Retired credits counted so far.
+    pub retired_count: u32,
+    /// Retired CO2e tonnes counted so far.
+    pub co2e_retired: u32,
+    /// Whether the scan completed and the counters were rewritten.
+    pub complete: bool,
 }
 
 // ─────────────────────────────────────────────────────────────────────────────
@@ -386,10 +417,22 @@ pub fn issue_carbon_credit(
         .persistent()
         .set(&CarbonCreditKey::HolderCredits(issuer.clone()), &holder_credits);
 
-    // Increment counter
+    // Record the issuer as authoritative holder and append to the dense
+    // issuance index used by recovery scans.
     env.storage()
         .persistent()
-        .set(&CarbonCreditKey::CreditCounter, &(count + 1));
+        .set(&CarbonCreditKey::CreditHolder(credit_id.clone()), &issuer);
+    env.storage()
+        .persistent()
+        .set(&CarbonCreditKey::CreditByIndex(count), &credit_id);
+
+    // Increment counter
+    let next = count
+        .checked_add(1)
+        .unwrap_or_else(|| panic_with_error!(env, CarbonCreditError::CounterOverflow));
+    env.storage()
+        .persistent()
+        .set(&CarbonCreditKey::CreditCounter, &next);
 
     emit_carbon_credit_event(
         env,
@@ -399,7 +442,13 @@ pub fn issue_carbon_credit(
     credit_id
 }
 
-/// Verify renewable energy usage
+/// Verify renewable energy usage.
+///
+/// Returns `false` (without mutating state) when the verifier lacks the
+/// Auditor role, the credit is not attestable, the reading does not match, or
+/// the verifier has already attested. Use
+/// [`verify_renewable_energy_at_version`] for typed errors and stale-view
+/// protection.
 pub fn verify_renewable_energy(
     env: &Env,
     credit_id: BytesN<32>,
@@ -407,36 +456,73 @@ pub fn verify_renewable_energy(
     energy_mwh: u32,
 ) -> bool {
     verifier.require_auth();
+    attest(env, credit_id, verifier, energy_mwh, None).is_ok()
+}
+
+/// Partition-tolerant attestation with optimistic concurrency control.
+///
+/// A validator that was partitioned from the network attests against the
+/// credit `version` it last observed. If any other mutation landed in the
+/// meantime the attestation is rejected with [`CarbonCreditError::StaleState`]
+/// instead of being applied to state the validator never saw; the validator
+/// re-reads and retries. Replays of an already-applied attestation fail with
+/// [`CarbonCreditError::DuplicateAttestation`], so redelivery after the
+/// partition heals is idempotent.
+pub fn verify_renewable_energy_at_version(
+    env: &Env,
+    credit_id: BytesN<32>,
+    verifier: Address,
+    energy_mwh: u32,
+    expected_version: u32,
+) -> Result<u32, CarbonCreditError> {
+    verifier.require_auth();
+    attest(env, credit_id, verifier, energy_mwh, Some(expected_version))
+}
+
+/// Shared attestation logic. Validates everything before the first write so a
+/// rejected attestation never leaves partial state behind. Returns the new
+/// credit version.
+fn attest(
+    env: &Env,
+    credit_id: BytesN<32>,
+    verifier: Address,
+    energy_mwh: u32,
+    expected_version: Option<u32>,
+) -> Result<u32, CarbonCreditError> {
     if RbacManager::require_role_min(env, &verifier, Role::Auditor).is_err() {
-        return false;
+        return Err(CarbonCreditError::UnauthorizedAccess);
     }
 
     let mut credit: CarbonCredit = env
         .storage()
         .persistent()
         .get(&CarbonCreditKey::CarbonCredit(credit_id.clone()))
-        .unwrap_or_else(|| panic!("Credit not found"));
+        .ok_or(CarbonCreditError::CreditNotFound)?;
+
+    // Idempotent replay: checked before the version so a validator re-sending
+    // an attestation that already landed learns it was applied.
+    let attestation_key = CarbonCreditKey::Attestation(credit_id.clone(), verifier.clone());
+    if env.storage().persistent().has(&attestation_key) {
+        return Err(CarbonCreditError::DuplicateAttestation);
+    }
+
+    if let Some(expected) = expected_version {
+        if credit.version != expected {
+            return Err(CarbonCreditError::StaleState);
+        }
+    }
 
     // Only freshly issued or already active credits accept attestations. A
     // late attestation must never resurrect a retired, expired, or disputed
     // credit back to `Active`.
     if credit.status != CreditStatus::Issued && credit.status != CreditStatus::Active {
-        return false;
+        return Err(CarbonCreditError::InvalidState);
     }
 
-    // Verify energy generation matches
     if credit.renewable_source.energy_generated_mwh != energy_mwh {
-        return false;
+        return Err(CarbonCreditError::VerificationFailed);
     }
 
-    // One attestation per validator per credit: a duplicate or replayed
-    // submission is rejected without touching state.
-    let attestation_key = CarbonCreditKey::Attestation(credit_id.clone(), verifier.clone());
-    if env.storage().persistent().has(&attestation_key) {
-        return false;
-    }
-
-    // Create verification record
     let verification = VerificationRecord {
         verification_id: derive_record_id(
             env,
@@ -456,6 +542,7 @@ pub fn verify_renewable_energy(
     credit.verification_records.push_back(verification);
     credit.status = CreditStatus::Active;
     credit.version += 1;
+    let new_version = credit.version;
 
     env.storage()
         .persistent()
@@ -467,7 +554,7 @@ pub fn verify_renewable_energy(
         CarbonCreditEvent::CreditVerified(credit_id, verifier, energy_mwh),
     );
 
-    true
+    Ok(new_version)
 }
 
 /// Calculate carbon offset based on renewable energy
@@ -565,6 +652,12 @@ pub fn retire_credit(
         return false; // Already retired
     }
 
+    // Only the current holder may retire: a stale client that transferred the
+    // credit away (or never held it) cannot retire it on someone else's behalf.
+    if current_holder(env, &credit) != caller {
+        return false;
+    }
+
     let carbon_tonnes = credit.carbon_tonnes;
     credit.status = CreditStatus::Retired;
     credit.retirement_date = Some(env.ledger().timestamp());
@@ -580,9 +673,12 @@ pub fn retire_credit(
         .persistent()
         .get(&CarbonCreditKey::RetiredCount)
         .unwrap_or(0);
+    let retired = retired
+        .checked_add(1)
+        .unwrap_or_else(|| panic_with_error!(env, CarbonCreditError::CounterOverflow));
     env.storage()
         .persistent()
-        .set(&CarbonCreditKey::RetiredCount, &(retired + 1));
+        .set(&CarbonCreditKey::RetiredCount, &retired);
 
     // Update total CO2e retired
     let total_co2e: u32 = env
@@ -594,7 +690,9 @@ pub fn retire_credit(
         .persistent()
         .set(
             &CarbonCreditKey::TotalCo2eRetired,
-            &(total_co2e + carbon_tonnes),
+            &total_co2e
+                .checked_add(carbon_tonnes)
+                .unwrap_or_else(|| panic_with_error!(env, CarbonCreditError::CounterOverflow)),
         );
 
     emit_carbon_credit_event(
@@ -616,7 +714,11 @@ pub fn check_retirement_status(env: &Env, credit_id: BytesN<32>) -> bool {
     credit.status == CreditStatus::Retired
 }
 
-/// Transfer credit to new holder
+/// Transfer credit to new holder.
+///
+/// Replay-safe: `from` must be the current holder, so a transfer re-submitted
+/// after a partition heals (when ownership has already moved) is rejected
+/// rather than applied twice. Holder indexes are kept duplicate-free.
 pub fn transfer_credit(
     env: &Env,
     credit_id: BytesN<32>,
@@ -637,6 +739,9 @@ pub fn transfer_credit(
     if credit.status == CreditStatus::Retired {
         return false; // Can't transfer retired credits
     }
+    if from == to || current_holder(env, &credit) != from {
+        return false;
+    }
 
     // Update tokenization owner if applicable
     if credit.tokenization.token_id != zero_id(env) {
@@ -647,17 +752,32 @@ pub fn transfer_credit(
     env.storage()
         .persistent()
         .set(&CarbonCreditKey::CarbonCredit(credit_id.clone()), &credit);
+    env.storage()
+        .persistent()
+        .set(&CarbonCreditKey::CreditHolder(credit_id.clone()), &to);
 
-    // Update holder index
+    // Move the credit between holder indexes.
+    let from_key = CarbonCreditKey::HolderCredits(from.clone());
+    let mut from_credits: Vec<BytesN<32>> = env
+        .storage()
+        .persistent()
+        .get(&from_key)
+        .unwrap_or_else(|| Vec::new(env));
+    if let Some(pos) = from_credits.first_index_of(&credit_id) {
+        from_credits.remove(pos);
+        env.storage().persistent().set(&from_key, &from_credits);
+    }
+
+    let to_key = CarbonCreditKey::HolderCredits(to.clone());
     let mut to_credits: Vec<BytesN<32>> = env
         .storage()
         .persistent()
-        .get(&CarbonCreditKey::HolderCredits(to.clone()))
+        .get(&to_key)
         .unwrap_or_else(|| Vec::new(env));
-    to_credits.push_back(credit_id.clone());
-    env.storage()
-        .persistent()
-        .set(&CarbonCreditKey::HolderCredits(to.clone()), &to_credits);
+    if !to_credits.contains(&credit_id) {
+        to_credits.push_back(credit_id.clone());
+        env.storage().persistent().set(&to_key, &to_credits);
+    }
 
     emit_carbon_credit_event(
         env,
@@ -665,6 +785,113 @@ pub fn transfer_credit(
     );
 
     true
+}
+
+/// Authoritative holder of a credit. Falls back to the token owner (if
+/// tokenized) or the issuer for entries written before `CreditHolder` existed.
+fn current_holder(env: &Env, credit: &CarbonCredit) -> Address {
+    if let Some(holder) = env
+        .storage()
+        .persistent()
+        .get(&CarbonCreditKey::CreditHolder(credit.credit_id.clone()))
+    {
+        return holder;
+    }
+    if credit.tokenization.token_id != zero_id(env) {
+        credit.tokenization.token_owner.clone()
+    } else {
+        credit.issuer.clone()
+    }
+}
+
+/// Get the current holder of a credit.
+pub fn get_credit_holder(env: &Env, credit_id: BytesN<32>) -> Address {
+    let credit: CarbonCredit = env
+        .storage()
+        .persistent()
+        .get(&CarbonCreditKey::CarbonCredit(credit_id))
+        .unwrap_or_else(|| panic_with_error!(env, CarbonCreditError::CreditNotFound));
+    current_holder(env, &credit)
+}
+
+/// Recompute the global retirement counters from the credits themselves.
+///
+/// Recovery path for aggregate drift (e.g. after an operator restores state
+/// from a snapshot taken mid-partition). The scan walks the dense issuance
+/// index in chunks of at most `max_items` credits per call, persisting a
+/// checkpoint between calls. Each chunk is an independent transaction, so a
+/// call that runs out of budget or is dropped by the network simply rolls back
+/// and can be retried; no progress is lost and nothing is double counted.
+/// When the scan reaches the end it atomically rewrites `RetiredCount` and
+/// `TotalCo2eRetired` and clears the checkpoint.
+pub fn reconcile_retirement_counters(
+    env: &Env,
+    admin: Address,
+    max_items: u32,
+) -> Result<ReconcileProgress, CarbonCreditError> {
+    admin.require_auth();
+    if RbacManager::require_role_min(env, &admin, Role::Admin).is_err() {
+        return Err(CarbonCreditError::UnauthorizedAccess);
+    }
+    if max_items == 0 {
+        return Err(CarbonCreditError::InvalidCarbonAmount);
+    }
+
+    let storage = env.storage().persistent();
+    let mut progress: ReconcileProgress = storage
+        .get(&CarbonCreditKey::ReconcileCheckpoint)
+        .unwrap_or_else(|| ReconcileProgress {
+            next_index: 0,
+            target: storage.get(&CarbonCreditKey::CreditCounter).unwrap_or(0),
+            retired_count: 0,
+            co2e_retired: 0,
+            complete: false,
+        });
+
+    let end = progress
+        .next_index
+        .saturating_add(max_items)
+        .min(progress.target);
+    for index in progress.next_index..end {
+        let Some(credit_id) = storage.get::<_, BytesN<32>>(&CarbonCreditKey::CreditByIndex(index))
+        else {
+            continue;
+        };
+        let Some(credit) = storage.get::<_, CarbonCredit>(&CarbonCreditKey::CarbonCredit(credit_id))
+        else {
+            continue;
+        };
+        if credit.status == CreditStatus::Retired {
+            progress.retired_count = progress
+                .retired_count
+                .checked_add(1)
+                .ok_or(CarbonCreditError::CounterOverflow)?;
+            progress.co2e_retired = progress
+                .co2e_retired
+                .checked_add(credit.carbon_tonnes)
+                .ok_or(CarbonCreditError::CounterOverflow)?;
+        }
+    }
+    progress.next_index = end;
+
+    if progress.next_index >= progress.target {
+        progress.complete = true;
+        storage.set(&CarbonCreditKey::RetiredCount, &progress.retired_count);
+        storage.set(&CarbonCreditKey::TotalCo2eRetired, &progress.co2e_retired);
+        storage.remove(&CarbonCreditKey::ReconcileCheckpoint);
+    } else {
+        storage.set(&CarbonCreditKey::ReconcileCheckpoint, &progress);
+    }
+
+    Ok(progress)
+}
+
+/// Get the number of retired credits recorded in the global counter.
+pub fn get_retired_count(env: &Env) -> u32 {
+    env.storage()
+        .persistent()
+        .get(&CarbonCreditKey::RetiredCount)
+        .unwrap_or(0)
 }
 
 /// Verify sustainability claim
