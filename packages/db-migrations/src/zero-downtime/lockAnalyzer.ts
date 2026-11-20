@@ -23,6 +23,32 @@ export class LockAnalyzer {
   public static analyzeStatement(stmt: string, dialect: DatabaseDialect = 'postgres'): LockAnalysis {
     const lower = stmt.toLowerCase().replace(/\s+/g, ' ');
 
+    // 0. DROP TABLE (Destructive DDL - blocked from main)
+    if (lower.startsWith('drop table') || lower.includes(' drop table ')) {
+      return {
+        statement: stmt,
+        lockLevel: 'EXCLUSIVE',
+        potentialDowntime: true,
+        risk: 'high',
+        isDestructive: true,
+        destructiveViolation: true,
+        recommendation: 'DROP TABLE is a destructive statement causing irreversible data loss and downtime. Blocked from merging into main.',
+      };
+    }
+
+    // 0b. DROP DATABASE
+    if (lower.startsWith('drop database') || lower.includes(' drop database ')) {
+      return {
+        statement: stmt,
+        lockLevel: 'EXCLUSIVE',
+        potentialDowntime: true,
+        risk: 'high',
+        isDestructive: true,
+        destructiveViolation: true,
+        recommendation: 'DROP DATABASE is completely destructive. Blocked from merging into main.',
+      };
+    }
+
     // 1. ADD COLUMN NOT NULL without default or with non-constant default
     if (lower.includes('alter table') && lower.includes('add column') && lower.includes('not null') && !lower.includes('default')) {
       return {
@@ -34,13 +60,15 @@ export class LockAnalyzer {
       };
     }
 
-    // 2. DROP COLUMN
+    // 2. DROP COLUMN (Destructive)
     if (lower.includes('alter table') && (lower.includes('drop column') || lower.includes('drop '))) {
       return {
         statement: stmt,
         lockLevel: 'EXCLUSIVE',
         potentialDowntime: true,
         risk: 'high',
+        isDestructive: true,
+        destructiveViolation: true,
         recommendation: 'Directly dropping a column breaks running application instances that still reference it. Follow the expand/contract pattern: ignore column in code first, deploy, then drop column in contract phase.',
       };
     }
@@ -56,14 +84,16 @@ export class LockAnalyzer {
       };
     }
 
-    // 4. ALTER COLUMN TYPE
-    if (lower.includes('alter table') && (lower.includes('alter column') || lower.includes('modify column')) && lower.includes('type')) {
+    // 4. ALTER COLUMN TYPE (Destructive full rewrite)
+    if (lower.includes('alter table') && (lower.includes('alter column') || lower.includes('modify column') || lower.includes('modify ')) && (lower.includes('type') || lower.includes('varchar') || lower.includes('int') || lower.includes('text') || lower.includes('bigint') || lower.includes('timestamp') || lower.includes('json'))) {
       return {
         statement: stmt,
         lockLevel: 'EXCLUSIVE',
         potentialDowntime: true,
         risk: 'high',
-        recommendation: 'Changing column types requires rewriting the entire table under exclusive lock. Create a new column with the target type, dual-write, backfill asynchronously, and switch over.',
+        isDestructive: true,
+        destructiveViolation: true,
+        recommendation: 'Changing column types requires rewriting the entire table under exclusive lock and can truncate or invalidate existing data. Blocked from merging into main; use expand/contract dual-writing instead.',
       };
     }
 
@@ -89,14 +119,16 @@ export class LockAnalyzer {
       };
     }
 
-    // 7. VACUUM FULL / TRUNCATE
+    // 7. VACUUM FULL / TRUNCATE (Destructive)
     if (lower.startsWith('truncate') || lower.startsWith('vacuum full')) {
       return {
         statement: stmt,
         lockLevel: 'EXCLUSIVE',
         potentialDowntime: true,
         risk: 'high',
-        recommendation: 'TRUNCATE / VACUUM FULL takes ACCESS EXCLUSIVE locks. Use batch deletion or standard vacuuming instead.',
+        isDestructive: true,
+        destructiveViolation: true,
+        recommendation: 'TRUNCATE / VACUUM FULL takes ACCESS EXCLUSIVE locks and purges data. Blocked from merging into main.',
       };
     }
 
@@ -126,6 +158,29 @@ export class LockAnalyzer {
       lockLevel: 'NONE',
       potentialDowntime: false,
       risk: 'low',
+    };
+  }
+
+  /**
+   * Evaluates whether a SQL statement is classified as destructive.
+   */
+  public static isDestructive(statement: string): { isDestructive: boolean; reason?: string } {
+    const analysis = this.analyzeStatement(statement);
+    return {
+      isDestructive: !!analysis.isDestructive,
+      reason: analysis.recommendation,
+    };
+  }
+
+  /**
+   * Validates a batch or migration script against destructive SQL policies.
+   */
+  public static validateMigrationSafety(sql: string): { safe: boolean; violations: LockAnalysis[] } {
+    const analyses = this.analyzeStatements(sql);
+    const violations = analyses.filter((a) => a.destructiveViolation || a.isDestructive);
+    return {
+      safe: violations.length === 0,
+      violations,
     };
   }
 }
