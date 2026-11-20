@@ -9,7 +9,8 @@
 
 use crate::rbac::{RbacError, RbacManager, Role, RbacStorageKey};
 use soroban_sdk::{
-    contracterror, contracttype, panic_with_error, Address, Bytes, BytesN, Env, Symbol, Vec,
+    contracterror, contracttype, panic_with_error, xdr::ToXdr, Address, Bytes, BytesN, Env,
+    Symbol, Vec,
 };
 
 /// EU ESPR Compliance error types
@@ -48,13 +49,27 @@ pub enum DigitalPassportError {
 }
 
 /// Deterministic bounds to prevent unbounded storage growth and arithmetic overflow.
-const MAX_MATERIALS: usize = 64;
-const MAX_SUBSTANCES: usize = 64;
-const MAX_BYTES_LEN: usize = 1024;
+const MAX_MATERIALS: u32 = 64;
+const MAX_SUBSTANCES: u32 = 64;
+const MAX_BYTES_LEN: u32 = 1024;
 const PERCENTAGE_MAX: u32 = 100;
 const REPAIRABILITY_SCORE_MAX: u32 = 10;
 const END_OF_LIFE_SCORE_MAX: u32 = 100;
 const TEN_YEARS_SECONDS: u64 = 10 * 365 * 86400;
+
+/// Persistent-storage TTL policy (#886): entries are re-leased only once their
+/// remaining TTL drops to or below this threshold.
+pub const PASSPORT_TTL_BUMP_THRESHOLD_LEDGERS: u32 = 10_000;
+
+/// Hot-path lease extension applied to active passport records (#886).
+pub const PASSPORT_TTL_EXTEND_LEDGERS: u32 = 100_000;
+
+/// Long-tail lease extension applied to append-only history and archival
+/// records (#886).
+pub const PASSPORT_ARCHIVAL_TTL_EXTEND_LEDGERS: u32 = 300_000;
+
+/// Retention cap on the per-passport audit trail (#886 rent footprint bound).
+pub const MAX_AUDIT_TRAIL_LEN: u32 = 128;
 
 /// ESPR Compliance Status
 #[contracttype]
@@ -263,7 +278,7 @@ pub struct PassportExport {
 }
 
 /// Validate a material's bounded fields; panics deterministically on malformed input.
-fn validate_material(env: &Env, material: &Material) {
+fn validate_material(_env: &Env, material: &Material) {
     if material.percentage_by_weight > PERCENTAGE_MAX {
         panic!("material percentage exceeds 100%");
     }
@@ -276,7 +291,7 @@ fn validate_material(env: &Env, material: &Material) {
 }
 
 /// Validate durability bounded fields; panics deterministically on malformed input.
-fn validate_durability(env: &Env, durability: &Durability) {
+fn validate_durability(_env: &Env, durability: &Durability) {
     if durability.expected_lifetime_years == 0 {
         panic!("expected lifetime must be non-zero");
     }
@@ -295,7 +310,7 @@ fn validate_durability(env: &Env, durability: &Durability) {
 }
 
 /// Validate circularity bounded fields; panics deterministically on malformed input.
-fn validate_circularity(env: &Env, circularity: &Circularity) {
+fn validate_circularity(_env: &Env, circularity: &Circularity) {
     if circularity.recycled_content_percent > PERCENTAGE_MAX {
         panic!("recycled content percent exceeds 100%");
     }
@@ -314,14 +329,14 @@ fn validate_circularity(env: &Env, circularity: &Circularity) {
 }
 
 /// Validate carbon footprint bounded fields; panics deterministically on malformed input.
-fn validate_carbon_footprint(env: &Env, carbon: &CarbonFootprint) {
+fn validate_carbon_footprint(_env: &Env, carbon: &CarbonFootprint) {
     if carbon.carbon_offset_program.len() > MAX_BYTES_LEN {
         panic!("carbon offset program too long");
     }
 }
 
 /// Validate product identity bounded fields; panics deterministically on malformed input.
-fn validate_identity(env: &Env, identity: &ProductIdentity) {
+fn validate_identity(_env: &Env, identity: &ProductIdentity) {
     if identity.product_id.is_empty() {
         panic!("product id must not be empty");
     }
@@ -488,7 +503,7 @@ fn record_audit_event(
     let mut payload_input = Bytes::new(env);
     payload_input.append(&Bytes::from_slice(env, kind.tag().as_bytes()));
     payload_input.append(&passport_id.to_bytes());
-    payload_input.append(&actor.to_bytes());
+    payload_input.append(&actor.clone().to_xdr(env));
     payload_input.append(&Bytes::from_slice(
         env,
         &env.ledger().timestamp().to_be_bytes(),
@@ -715,7 +730,6 @@ pub fn create_passport(
         .persistent()
         .get(&PassportDataKey::PassportCount)
         .unwrap_or(0);
-    let index = count + 1;
     env.storage()
         .persistent()
         .set(&PassportDataKey::PassportIndex(count), &passport_id.clone());
@@ -725,6 +739,15 @@ pub fn create_passport(
     env.storage()
         .persistent()
         .set(&PassportDataKey::PassportCount, &(count.saturating_add(1)));
+
+    // #885: genesis entry of the per-passport tamper-evident audit chain.
+    record_audit_event(
+        env,
+        &passport_id,
+        AuditEventKind::PassportCreated,
+        &manufacturer,
+        &product_id,
+    );
 
     passport_id
 }
@@ -802,6 +825,12 @@ pub fn transition_lifecycle_stage(
     actor.require_auth();
     // #885: submitters (or higher) may advance the lifecycle state machine.
     ensure_role(env, &actor, Role::Submitter);
+
+    let mut passport: DigitalPassport = env
+        .storage()
+        .persistent()
+        .get(&PassportDataKey::Passport(passport_id.clone()))
+        .unwrap_or_else(|| panic!("Passport not found"));
 
     let old_stage = passport.lifecycle_stage.clone();
     passport.lifecycle_stage = new_stage.clone();
@@ -1088,7 +1117,7 @@ pub fn verify_espr_compliance(
         verifier: verifier.clone(),
         status: status.clone(),
         checked_fields,
-        issues_found: issues,
+        issues_found: issues.clone(),
         next_review_date: env.ledger().timestamp() + (365 * 86400), // 1 year
     };
 
@@ -1270,10 +1299,8 @@ pub fn export_to_standard_format(
         .unwrap_or_else(|| panic!("Passport not found"));
 
     // Simplified export - real system would generate proper XML/JSON
-    let mut export_data = Vec::new(&env);
-    export_data.push_back(passport.identity.product_id.clone());
-
-    Bytes::from_slice(&env, b"EXPORTED_DATA")
+    let _ = (passport, standard);
+    Bytes::from_slice(env, b"EXPORTED_DATA")
 }
 
 /// Validate interoperability compliance
@@ -1471,7 +1498,7 @@ pub struct PassportFilter {
 
 impl PassportFilter {
     /// A permissive filter that matches every passport.
-    pub fn new(env: &Env) -> Self {
+    pub fn new(_env: &Env) -> Self {
         PassportFilter {
             stage: None,
             manufacturer: None,
