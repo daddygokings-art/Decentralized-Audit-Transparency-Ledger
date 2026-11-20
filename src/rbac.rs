@@ -246,7 +246,8 @@ impl RbacManager {
         current: i128,
     ) -> soroban_sdk::BytesN<32> {
         let mut buf = soroban_sdk::Bytes::new(env);
-        buf.append(&caller.to_string().to_bytes());
+        // Canonical XDR encodings are deterministic and available in no_std.
+        buf.append(&soroban_sdk::xdr::ToXdr::to_xdr(caller.clone(), env));
         buf.append(&soroban_sdk::xdr::ToXdr::to_xdr(operation.clone(), env));
         buf.extend_from_array(&previous.to_be_bytes());
         buf.extend_from_array(&current.to_be_bytes());
