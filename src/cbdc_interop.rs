@@ -61,10 +61,28 @@
 //!   their TTL before expiry.
 //! * [`SettlementPath`] is derived/ephemeral and stored in `Temporary` storage.
 //! * Module-level configuration lives in `Instance` storage.
+//!
+//! # Error propagation & structured events
+//!
+//! Every [`InteropError`] has a stable numeric [`code`](InteropError::code)
+//! and a short on-chain [`symbol`](InteropError::as_symbol). Lifecycle events
+//! are typed `#[contractevent]` structs ([`SettlementStatusChanged`],
+//! [`AttestationRecorded`], [`SettlementFinalized`]) so their schema appears
+//! in the contract spec and indexers can decode them without guessing tuple
+//! layouts. Topic layouts are unchanged from the previous untyped events.
+//!
+//! [`InteropManager::observe`] wraps any fallible result for `?` propagation
+//! and emits an [`InteropFailure`] event on error. Note that Soroban discards
+//! contract events from an invocation that ultimately fails, so failure
+//! events are only persisted when the caller handles the error and the
+//! invocation succeeds (e.g. a batch processor that skips bad items); in a
+//! failing invocation the typed error code itself is the signal.
 
 use crate::cbdc_types::{CBDCTransaction, InteropProtocol};
-use soroban_sdk::{contracterror, contracttype, Address, Bytes, BytesN, Env, Symbol};
 use soroban_sdk::xdr::ToXdr;
+use soroban_sdk::{
+    contracterror, contractevent, contracttype, symbol_short, Address, Bytes, BytesN, Env, Symbol,
+};
 
 /// Maximum number of hops allowed in a [`SettlementPath`].
 pub const MAX_PATH_HOPS: u32 = 16;
@@ -147,6 +165,118 @@ pub enum InteropError {
     InvalidStatus = 28,
     /// No validator set has been configured.
     ValidatorsNotConfigured = 29,
+}
+
+impl InteropError {
+    /// Stable numeric code, identical to the on-chain contract error code.
+    pub fn code(&self) -> u32 {
+        *self as u32
+    }
+
+    /// Short on-chain symbol (≤ 9 chars, built without a host allocation)
+    /// used in structured failure events.
+    pub fn as_symbol(&self) -> Symbol {
+        match self {
+            InteropError::StaleRate => symbol_short!("STALE"),
+            InteropError::ZeroRate => symbol_short!("ZERO_RATE"),
+            InteropError::ZeroPrice => symbol_short!("ZERO_PX"),
+            InteropError::BidExceedsAsk => symbol_short!("BID_ASK"),
+            InteropError::ZeroAmount => symbol_short!("ZERO_AMT"),
+            InteropError::ConversionOverflow => symbol_short!("CONV_OVF"),
+            InteropError::DivisionByZero => symbol_short!("DIV_ZERO"),
+            InteropError::FeeBpsTooHigh => symbol_short!("FEE_BPS"),
+            InteropError::FeeOverflow => symbol_short!("FEE_OVF"),
+            InteropError::ZeroSettlementAmount => symbol_short!("ZERO_STL"),
+            InteropError::ZeroSettlementRate => symbol_short!("ZERO_SRT"),
+            InteropError::PathTooShort => symbol_short!("PATH_SHRT"),
+            InteropError::PathTooLong => symbol_short!("PATH_LONG"),
+            InteropError::RatesTooLong => symbol_short!("RATE_LONG"),
+            InteropError::PathLengthMismatch => symbol_short!("PATH_MISM"),
+            InteropError::SamePilot => symbol_short!("SAME_PLT"),
+            InteropError::InvalidPilot => symbol_short!("BAD_PLT"),
+            InteropError::SpreadOverflow => symbol_short!("SPRD_OVF"),
+            InteropError::NotAValidator => symbol_short!("NOT_VALID"),
+            InteropError::DuplicateAttestation => symbol_short!("DUP_ATT"),
+            InteropError::Equivocation => symbol_short!("EQUIVOC"),
+            InteropError::SettlementNotFound => symbol_short!("STL_NONE"),
+            InteropError::SettlementAlreadyExists => symbol_short!("STL_EXIST"),
+            InteropError::InvalidStatusTransition => symbol_short!("BAD_TRANS"),
+            InteropError::InvalidQuorum => symbol_short!("BAD_QRM"),
+            InteropError::InvalidValidatorSet => symbol_short!("BAD_VSET"),
+            InteropError::NotAwaitingAttestation => symbol_short!("NOT_AWAIT"),
+            InteropError::InvalidStatus => symbol_short!("BAD_STAT"),
+            InteropError::ValidatorsNotConfigured => symbol_short!("NO_VSET"),
+        }
+    }
+}
+
+// ════════════════════════════════════════════════════════════════════════════
+// Structured events
+// ════════════════════════════════════════════════════════════════════════════
+
+/// Emitted by [`InteropManager::observe`] when an observed operation fails.
+///
+/// Topics: `["cbdc_err", operation]`.
+#[contractevent(topics = ["cbdc_err"])]
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct InteropFailure {
+    /// Logical operation that failed (e.g. `convert`, `attest`).
+    #[topic]
+    pub operation: Symbol,
+    /// Stable numeric [`InteropError`] code.
+    pub error_code: u32,
+    /// Short symbolic [`InteropError`] name.
+    pub error: Symbol,
+    /// Ledger timestamp at the moment of failure.
+    pub timestamp: u64,
+}
+
+/// Emitted when a stored settlement moves between lifecycle states.
+///
+/// Topics: `["cbdc_settle", new_status_symbol]` (unchanged layout).
+#[contractevent(topics = ["cbdc_settle"])]
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct SettlementStatusChanged {
+    /// [`SettlementStatus::as_symbol`] of the new status.
+    #[topic]
+    pub status: Symbol,
+    /// Settlement whose status changed.
+    pub settlement_id: BytesN<32>,
+    /// Previous [`SettlementStatus`] code.
+    pub from_status: u32,
+    /// New [`SettlementStatus`] code.
+    pub to_status: u32,
+    /// Ledger timestamp of the transition.
+    pub timestamp: u64,
+}
+
+/// Emitted for every accepted validator attestation.
+///
+/// Topics: `["cbdc_att", "attest"]` (unchanged layout).
+#[contractevent(topics = ["cbdc_att", "attest"])]
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct AttestationRecorded {
+    pub settlement_id: BytesN<32>,
+    pub validator: Address,
+    pub confirmation_hash: BytesN<32>,
+    /// Votes for `confirmation_hash` after this attestation.
+    pub votes: u32,
+}
+
+/// Emitted exactly once when an attested settlement is finalized as
+/// `Completed` or `Failed`.
+///
+/// Topics: `["cbdc_att", "final"]` (unchanged layout).
+#[contractevent(topics = ["cbdc_att", "final"])]
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct SettlementFinalized {
+    pub settlement_id: BytesN<32>,
+    /// Final [`SettlementStatus`] code.
+    pub status: u32,
+    /// Hash that reached quorum, if the settlement completed.
+    pub finalized_hash: Option<BytesN<32>>,
+    /// Canonical [`AttestationState`] digest at finalization.
+    pub digest: BytesN<32>,
 }
 
 /// Exchange rate between two CBDC pilots.
@@ -252,6 +382,11 @@ impl SettlementStatus {
         matches!(self, SettlementStatus::Completed | SettlementStatus::Failed)
     }
 
+    /// Stable numeric code as stored in [`SettlementInstruction::status`].
+    pub fn code(&self) -> u32 {
+        *self as u32
+    }
+
     /// Decode the `u32` status stored in [`SettlementInstruction::status`].
     pub fn from_u32(value: u32) -> Option<SettlementStatus> {
         match value {
@@ -324,13 +459,13 @@ impl InteropManager {
         }
 
         // Generate swap ID
-                let mut input = Bytes::new(env);
-        input.append(&Bytes::from_slice(env, from.to_xdr().as_ref()));
-        input.append(&Bytes::from_slice(env, to.to_xdr().as_ref()));
+        let mut input = Bytes::new(env);
+        input.append(&from.to_xdr(env));
+        input.append(&to.to_xdr(env));
         input.append(&Bytes::from_slice(env, &source_amount.to_le_bytes()));
         input.append(&Bytes::from_slice(env, &dest_amount.to_le_bytes()));
 
-        Ok(env.crypto().sha256(&input))
+        Ok(env.crypto().sha256(&input).to_bytes())
     }
 
     /// Execute hub-and-spoke settlement
@@ -345,12 +480,12 @@ impl InteropManager {
         }
 
         // Generate settlement ID
-                let mut input = Bytes::new(env);
-        input.append(&Bytes::from_slice(env, hub_address.to_xdr().as_ref()));
+        let mut input = Bytes::new(env);
+        input.append(&hub_address.to_xdr(env));
         input.append(&Bytes::from_slice(env, &source_amount.to_le_bytes()));
         input.append(&Bytes::from_slice(env, &dest_amount.to_le_bytes()));
 
-        Ok(env.crypto().sha256(&input))
+        Ok(env.crypto().sha256(&input).to_bytes())
     }
 
     /// Validate settlement instruction
@@ -407,6 +542,38 @@ impl InteropManager {
                 // Any non-terminal state may fail.
                 | (_, SettlementStatus::Failed)
         )
+    }
+
+    /// Pass a result through unchanged, emitting a structured
+    /// [`InteropFailure`] event if it is an error.
+    ///
+    /// Designed for `?`-style propagation inside contract entrypoints:
+    ///
+    /// ```ignore
+    /// let out = InteropManager::observe(
+    ///     &env,
+    ///     symbol_short!("convert"),
+    ///     InteropManager::convert_amount(amount, rate),
+    /// )?;
+    /// ```
+    ///
+    /// Must be called from within a contract frame (events require one). See
+    /// the module docs for when failure events are persisted.
+    pub fn observe<T>(
+        env: &Env,
+        operation: Symbol,
+        result: Result<T, InteropError>,
+    ) -> Result<T, InteropError> {
+        if let Err(err) = &result {
+            InteropFailure {
+                operation,
+                error_code: err.code(),
+                error: err.as_symbol(),
+                timestamp: env.ledger().timestamp(),
+            }
+            .publish(env);
+        }
+        result
     }
 
     /// Compute settlement fee based on amount
@@ -629,12 +796,16 @@ impl InteropManager {
             Self::store_attestation_state(env, settlement_id, &state);
         }
 
-        instruction.status = to as u32;
+        instruction.status = to.code();
         Self::store_settlement(env, &instruction);
-        env.events().publish(
-            (Symbol::new(env, "cbdc_settle"), to.as_symbol(env)),
-            settlement_id.clone(),
-        );
+        SettlementStatusChanged {
+            status: to.as_symbol(env),
+            settlement_id: settlement_id.clone(),
+            from_status: from.code(),
+            to_status: to.code(),
+            timestamp: env.ledger().timestamp(),
+        }
+        .publish(env);
         Ok(())
     }
 
@@ -755,20 +926,21 @@ impl InteropManager {
             Self::store_settlement(env, &instruction);
         }
 
-        env.events().publish(
-            (Symbol::new(env, "cbdc_att"), Symbol::new(env, "attest")),
-            (settlement_id.clone(), validator.clone(), confirmation_hash.clone(), votes),
-        );
+        AttestationRecorded {
+            settlement_id: settlement_id.clone(),
+            validator: validator.clone(),
+            confirmation_hash: confirmation_hash.clone(),
+            votes,
+        }
+        .publish(env);
         if matches!(outcome, AttestationOutcome::Finalized | AttestationOutcome::Failed) {
-            env.events().publish(
-                (Symbol::new(env, "cbdc_att"), Symbol::new(env, "final")),
-                (
-                    settlement_id.clone(),
-                    instruction.status,
-                    state.finalized_hash.clone(),
-                    state.digest.clone(),
-                ),
-            );
+            SettlementFinalized {
+                settlement_id: settlement_id.clone(),
+                status: instruction.status,
+                finalized_hash: state.finalized_hash.clone(),
+                digest: state.digest.clone(),
+            }
+            .publish(env);
         }
 
         Ok(outcome)
@@ -2136,5 +2308,155 @@ mod tests {
                 None => prop_assert_ne!(f.status(&id_a), SettlementStatus::Completed),
             }
         }
+    }
+
+    // ════════════════════════════════════════════════════════════════════════════════
+    // Error propagation & structured events
+    // ════════════════════════════════════════════════════════════════════════════════
+
+    use soroban_sdk::testutils::Ledger as _;
+    use soroban_sdk::Event as _;
+
+    fn last_event(env: &Env) -> soroban_sdk::xdr::ContractEvent {
+        env.events().all().events().last().cloned().expect("no events")
+    }
+
+    #[test]
+    fn test_error_codes_are_stable_and_symbols_unique() {
+        let all = [
+            InteropError::StaleRate,
+            InteropError::ZeroRate,
+            InteropError::ZeroPrice,
+            InteropError::BidExceedsAsk,
+            InteropError::ZeroAmount,
+            InteropError::ConversionOverflow,
+            InteropError::DivisionByZero,
+            InteropError::FeeBpsTooHigh,
+            InteropError::FeeOverflow,
+            InteropError::ZeroSettlementAmount,
+            InteropError::ZeroSettlementRate,
+            InteropError::PathTooShort,
+            InteropError::PathTooLong,
+            InteropError::RatesTooLong,
+            InteropError::PathLengthMismatch,
+            InteropError::SamePilot,
+            InteropError::InvalidPilot,
+            InteropError::SpreadOverflow,
+            InteropError::NotAValidator,
+            InteropError::DuplicateAttestation,
+            InteropError::Equivocation,
+            InteropError::SettlementNotFound,
+            InteropError::SettlementAlreadyExists,
+            InteropError::InvalidStatusTransition,
+            InteropError::InvalidQuorum,
+            InteropError::InvalidValidatorSet,
+            InteropError::NotAwaitingAttestation,
+            InteropError::InvalidStatus,
+            InteropError::ValidatorsNotConfigured,
+        ];
+        for (i, e) in all.iter().enumerate() {
+            assert_eq!(e.code(), i as u32 + 1, "code drift for {e:?}");
+            for other in &all[i + 1..] {
+                assert_ne!(e.as_symbol(), other.as_symbol(), "{e:?} vs {other:?}");
+            }
+        }
+    }
+
+    #[test]
+    fn test_status_code_matches_from_u32() {
+        for code in 0..=5u32 {
+            assert_eq!(SettlementStatus::from_u32(code).unwrap().code(), code);
+        }
+    }
+
+    #[test]
+    fn test_status_change_event_is_structured() {
+        let f = Fixture::new(3, 2);
+        f.env.ledger().set_timestamp(4_242);
+        let id = f.open_settlement(1);
+        let expected = SettlementStatusChanged {
+            status: SettlementStatus::AwaitingDestination.as_symbol(&f.env),
+            settlement_id: id,
+            from_status: SettlementStatus::ConfirmedSource.code(),
+            to_status: SettlementStatus::AwaitingDestination.code(),
+            timestamp: 4_242,
+        };
+        assert_eq!(last_event(&f.env), expected.to_xdr(&f.env, &f.contract));
+    }
+
+    #[test]
+    fn test_attestation_events_are_structured() {
+        let f = Fixture::new(3, 2);
+        let id = f.open_settlement(2);
+        let h = f.hash(0xAA);
+
+        assert_eq!(f.attest(0, &id, &h), Ok(AttestationOutcome::Recorded));
+        let recorded = AttestationRecorded {
+            settlement_id: id.clone(),
+            validator: f.validators[0].clone(),
+            confirmation_hash: h.clone(),
+            votes: 1,
+        };
+        assert_eq!(last_event(&f.env), recorded.to_xdr(&f.env, &f.contract));
+
+        assert_eq!(f.attest(1, &id, &h), Ok(AttestationOutcome::Finalized));
+        // `events().all()` reflects the latest invocation only; read it first.
+        let emitted = last_event(&f.env);
+        let finalized = SettlementFinalized {
+            settlement_id: id.clone(),
+            status: SettlementStatus::Completed.code(),
+            finalized_hash: Some(h),
+            digest: f.state(&id).digest,
+        };
+        assert_eq!(emitted, finalized.to_xdr(&f.env, &f.contract));
+    }
+
+    #[test]
+    fn test_observe_passes_ok_through_silently() {
+        let f = Fixture::new(1, 1);
+        let before = f.env.events().all().events().len();
+        let out = f.run(|env| {
+            InteropManager::observe(env, symbol_short!("convert"), InteropManager::convert_amount(10, RATE_SCALE))
+        });
+        assert_eq!(out, Ok(10));
+        assert_eq!(f.env.events().all().events().len(), before);
+    }
+
+    #[test]
+    fn test_observe_emits_failure_and_supports_question_mark() {
+        fn pipeline(env: &Env, amount: u128, rate: u128) -> Result<u128, InteropError> {
+            let converted = InteropManager::observe(
+                env,
+                symbol_short!("convert"),
+                InteropManager::convert_amount(amount, rate),
+            )?;
+            InteropManager::observe(env, symbol_short!("fee"), InteropManager::compute_settlement_fee(converted, 25))
+        }
+        let f = Fixture::new(1, 1);
+        f.env.ledger().set_timestamp(77);
+        let res = f.run(|env| pipeline(env, 0, RATE_SCALE));
+        assert_eq!(res, Err(InteropError::ZeroAmount));
+
+        let failures: Vec<_> = f
+            .env
+            .events()
+            .all()
+            .events()
+            .iter()
+            .filter(|e| match &e.body {
+                ContractEventBody::V0(b) => {
+                    matches!(b.topics.first(), Some(ScVal::Symbol(s)) if s.0.as_slice() == b"cbdc_err")
+                }
+            })
+            .cloned()
+            .collect();
+        // Propagation stopped at the first error: exactly one failure event.
+        let expected = InteropFailure {
+            operation: symbol_short!("convert"),
+            error_code: InteropError::ZeroAmount.code(),
+            error: InteropError::ZeroAmount.as_symbol(),
+            timestamp: 77,
+        };
+        assert_eq!(failures, std::vec![expected.to_xdr(&f.env, &f.contract)]);
     }
 }
