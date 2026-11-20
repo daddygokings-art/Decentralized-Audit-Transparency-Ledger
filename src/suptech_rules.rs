@@ -1180,6 +1180,27 @@ mod tests {
         assert_eq!(page.items.get(0).unwrap().executed_at, 20);
     }
 
+    #[test]
+    fn test_ruleset_batch_rejects_empty_context() {
+        let env = soroban_sdk::Env::default();
+        let ruleset = RulesEngine::create_ruleset(
+            &env,
+            RegulatoryFramework::FSB,
+        )
+        .unwrap();
+        let rules: Vec<SupervisionRule> = Vec::new(&env);
+        let mut contexts: Vec<Bytes> = Vec::new(&env);
+        contexts.push_back(Bytes::new(&env));
+
+        assert!(RulesEngine::execute_ruleset_batch(
+            &env,
+            &ruleset,
+            &rules,
+            &contexts,
+        )
+        .is_err());
+    }
+
     struct Lcg(u64);
 
     impl Lcg {
