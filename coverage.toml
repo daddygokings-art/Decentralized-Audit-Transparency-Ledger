@@ -76,6 +76,10 @@ files = [
     "src/export_controls/tests.rs",
     "src/responsible_sourcing/tests.rs",
     "src/trade_compliance/tests.rs",
+    "src/proof_encoding_tests.rs",
+    "src/settlement_reserves_tests.rs",
+    "src/regulatory_consensus_sim_tests.rs",
+    "src/test_events.rs",
 
     # Integration tests live outside src/
     "tests/",
@@ -581,3 +585,41 @@ name = "ssi_integration"
 path_prefix = "src/ssi_integration.rs"
 line = 50.0
 description = "Self-sovereign identity integration"
+
+# ─ Canonical proof serialization ──────────────────────────────────────────────
+# Pure, allocation-free byte validation with exhaustive slot/boundary tests in
+# src/proof_encoding_tests.rs, so every branch is reachable.
+[[module]]
+name = "proof_encoding"
+path_prefix = "src/proof_encoding.rs"
+line = 95.0
+branch = 90.0
+description = "Groth16/BN254 proof (de)serialization — rejects non-canonical point encodings"
+
+# ─ Settlement reserve monitoring ──────────────────────────────────────────────
+[[module]]
+name = "settlement_reserves"
+path_prefix = "src/settlement_reserves.rs"
+line = 90.0
+branch = 85.0
+description = "Settlement reserve ratio monitoring with below-floor warning/critical events (RBAC-gated)"
+
+# ─ Regulatory state-transition consensus ──────────────────────────────────────
+# Rogue-validator simulation suite: src/regulatory_consensus_sim_tests.rs
+[[module]]
+name = "regulatory_consensus"
+path_prefix = "src/regulatory_consensus.rs"
+line = 90.0
+branch = 85.0
+description = "Validator-quorum regulatory state transitions with rogue detection and quarantine"
+
+# ─ CQRS read/write projection engine ──────────────────────────────────────────
+# Every mutator is RBAC-gated via CqrsAuthorization; the positive/negative role
+# matrix in src/rbac_gating_tests.rs (cqrs_rbac_matrix) and src/cqrs_tests.rs
+# exercise the allow, deny, suspend and revoke branches.
+[[module]]
+name = "cqrs"
+path_prefix = "src/cqrs.rs"
+line = 85.0
+branch = 75.0
+description = "CQRS event store and projections — RBAC-gated mutations with tamper-evident audit events"

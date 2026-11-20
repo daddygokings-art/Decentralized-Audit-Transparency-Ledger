@@ -135,6 +135,30 @@ pub mod cqrs;
 #[cfg(test)]
 mod cqrs_tests;
 
+// Canonical Groth16 / BN254 proof serialization: rejects non-canonical point
+// encodings, identity points, and aliased public inputs.
+pub mod proof_encoding;
+
+#[cfg(test)]
+mod proof_encoding_tests;
+
+// Shared event-assertion helpers for host tests.
+#[cfg(test)]
+pub(crate) mod test_events;
+
+// Settlement reserve ratio monitoring with below-floor warning events.
+pub mod settlement_reserves;
+
+#[cfg(test)]
+mod settlement_reserves_tests;
+
+// Validator-quorum consensus for regulatory state transitions with rogue
+// validator detection and quarantine.
+pub mod regulatory_consensus;
+
+#[cfg(test)]
+mod regulatory_consensus_sim_tests;
+
 #[cfg(test)]
 mod cqrs_storage_tests;
 
@@ -7079,12 +7103,20 @@ impl AuditLedger {
 
     /// Command: Log a new event through the CQRS write model.
     ///
-    /// Validates caller auth, pause state, rate limits, metadata size, schemas,
-    /// and idempotency, persists to both primary ledger and append-only event store,
-    /// updates materialized views and projections, and returns a `CommandResult`.
+    /// Validates caller auth, RBAC role (`Submitter`+, not suspended), pause
+    /// state, rate limits, metadata size, schemas, and idempotency, persists to
+    /// both primary ledger and append-only event store, updates materialized
+    /// views and projections, and returns a `CommandResult`. RBAC rejections
+    /// return `success = false` with the stable `RbacError` code and emit
+    /// `cqrs_audit`/`cqrs_denied` events.
     pub fn cqrs_log_event(env: Env, cmd: LogEventCommand) -> Result<CommandResult, CqrsError> {
         Self::require_initialized(&env);
         Self::require_log_events_not_paused(&env);
+        Self::cqrs_bootstrap_rbac(&env);
+        let auth = match CqrsEngine::authorize(&env, &cmd.submitter, CqrsOperation::LogEvent) {
+            Ok(auth) => auth,
+            Err(err) => return Ok(CqrsEngine::denied_result(&env, err)),
+        };
 
         // Check command-level idempotency
         if let Some(ref idemp) = cmd.idempotency_key {
@@ -7108,14 +7140,21 @@ impl AuditLedger {
         );
 
         // Append to CQRS event store and update projection
-        CqrsEngine::record_log_event(&env, event_id, &cmd, env.ledger().timestamp())
+        CqrsEngine::record_log_event(&env, &auth, event_id, &cmd, env.ledger().timestamp())
     }
 
     /// Command: Update an event's metadata through the CQRS write model.
+    ///
+    /// Requires RBAC `Auditor`+ (not suspended) in addition to the legacy
+    /// owner/multisig check.
     pub fn cqrs_update_event(env: Env, cmd: UpdateEventCommand) -> Result<CommandResult, CqrsError> {
         Self::require_initialized(&env);
         Self::require_log_events_not_paused(&env);
-        cmd.caller.require_auth();
+        Self::cqrs_bootstrap_rbac(&env);
+        let auth = match CqrsEngine::authorize(&env, &cmd.caller, CqrsOperation::UpdateEvent) {
+            Ok(auth) => auth,
+            Err(err) => return Ok(CqrsEngine::denied_result(&env, err)),
+        };
         Self::require_owner_or_multisig(&env, &cmd.caller);
 
         let evt: Event = match env
@@ -7148,8 +7187,8 @@ impl AuditLedger {
 
         CqrsEngine::record_update_event(
             &env,
+            &auth,
             new_id,
-            cmd.caller,
             cmd.event_id,
             evt.event_type,
             cmd.new_metadata,
@@ -7159,10 +7198,17 @@ impl AuditLedger {
     }
 
     /// Command: Execute a governance command via CQRS pipeline.
+    ///
+    /// Requires RBAC `Admin` (not suspended) in addition to the legacy
+    /// owner/multisig check.
     pub fn cqrs_governance(env: Env, cmd: GovernanceCommand) -> Result<CommandResult, CqrsError> {
         Self::require_initialized(&env);
         Self::require_governance_not_paused(&env);
-        cmd.caller.require_auth();
+        Self::cqrs_bootstrap_rbac(&env);
+        let auth = match CqrsEngine::authorize(&env, &cmd.caller, CqrsOperation::Governance) {
+            Ok(auth) => auth,
+            Err(err) => return Ok(CqrsEngine::denied_result(&env, err)),
+        };
         Self::require_owner_or_multisig(&env, &cmd.caller);
 
         // Execute recognized governance action
@@ -7188,28 +7234,36 @@ impl AuditLedger {
             }
         }
 
-        CqrsEngine::record_governance_command(&env, cmd.caller, cmd.action, env.ledger().timestamp())
+        CqrsEngine::record_governance_command(&env, &auth, cmd.action, env.ledger().timestamp())
     }
 
     /// Command: Capture a point-in-time snapshot of the projection state.
+    ///
+    /// Requires RBAC `Admin`; panics with the stable `RbacError` code otherwise.
     pub fn cqrs_create_snapshot(env: Env, caller: Address) -> Result<u32, CqrsError> {
         Self::require_initialized(&env);
-        caller.require_auth();
+        Self::cqrs_bootstrap_rbac(&env);
+        let auth = CqrsEngine::authorize(&env, &caller, CqrsOperation::Snapshot)
+            .unwrap_or_else(|err| panic_with_error!(&env, err));
         Self::require_owner_or_multisig(&env, &caller);
-        CqrsEngine::create_snapshot(&env)
+        CqrsEngine::create_snapshot(&env, &auth)
     }
 
     /// Command: Rebuild projection state by replaying all sequenced events from the log.
     ///
     /// If `from_snapshot` is true and a snapshot exists, replays only events after that snapshot.
     /// If CQRS event store has not yet ingested events from the primary ledger, imports them first.
+    ///
+    /// Requires RBAC `Admin`; panics with the stable `RbacError` code otherwise.
     pub fn cqrs_rebuild_projection(
         env: Env,
         caller: Address,
         from_snapshot: bool,
     ) -> Result<EventProjection, CqrsError> {
         Self::require_initialized(&env);
-        caller.require_auth();
+        Self::cqrs_bootstrap_rbac(&env);
+        let auth = CqrsEngine::authorize(&env, &caller, CqrsOperation::RebuildProjection)
+            .unwrap_or_else(|err| panic_with_error!(&env, err));
         Self::require_owner_or_multisig(&env, &caller);
 
         let current_cqrs_seq = CqrsEngine::current_sequence(&env);
@@ -7231,13 +7285,68 @@ impl AuditLedger {
                             idempotency_key: None,
                             force: true,
                         };
-                        CqrsEngine::record_log_event(&env, id, &cmd, evt.timestamp)?;
+                        // Admin replay on behalf of the historical submitter.
+                        CqrsEngine::record_log_event(&env, &auth, id, &cmd, evt.timestamp)?;
                     }
                 }
             }
         }
 
-        CqrsEngine::rebuild_projection(&env, from_snapshot)
+        CqrsEngine::rebuild_projection(&env, &auth, from_snapshot)
+    }
+
+    // ── CQRS RBAC administration ────────────────────────────────────────────
+
+    /// Seeds the contract owners as `crate::rbac` Admins the first time a CQRS
+    /// mutation runs, if RBAC was never initialized. This keeps `initialize`
+    /// unchanged and stops existing owners being locked out of the CQRS write
+    /// path.
+    fn cqrs_bootstrap_rbac(env: &Env) {
+        rbac::RbacManager::bootstrap_admins_if_unset(env, &Self::get_owners(env));
+    }
+
+    /// Assigns a CQRS RBAC role (`1 = Viewer`, `2 = Submitter`, `3 = Auditor`,
+    /// `4 = Admin`) to `target`. Caller must be an RBAC Admin. Assigning
+    /// `Viewer` revokes write access.
+    pub fn cqrs_set_role(env: Env, caller: Address, target: Address, level: u32) {
+        Self::require_initialized(&env);
+        Self::require_governance_not_paused(&env);
+        Self::cqrs_bootstrap_rbac(&env);
+        let role = rbac::Role::from_u32(level)
+            .unwrap_or_else(|| panic_with_error!(&env, rbac::RbacError::InvalidRoleAssignment));
+        rbac::RbacManager::set_role(&env, &caller, &target, role)
+            .unwrap_or_else(|err| panic_with_error!(&env, err));
+        env.events().publish(
+            (Symbol::new(&env, AUDIT_TOPIC), Symbol::new(&env, "set_role")),
+            (caller, target, level, env.ledger().timestamp()),
+        );
+    }
+
+    /// Suspends a submitter DID; suspension overrides any assigned role on
+    /// every CQRS mutation. Caller must be an RBAC Admin.
+    pub fn cqrs_suspend_submitter(env: Env, caller: Address, target: Address) {
+        Self::require_initialized(&env);
+        Self::require_governance_not_paused(&env);
+        Self::cqrs_bootstrap_rbac(&env);
+        rbac::RbacManager::suspend_submitter(&env, &caller, &target)
+            .unwrap_or_else(|err| panic_with_error!(&env, err));
+        env.events().publish(
+            (Symbol::new(&env, AUDIT_TOPIC), Symbol::new(&env, "suspend")),
+            (caller, target, env.ledger().timestamp()),
+        );
+    }
+
+    /// Lifts a submitter DID suspension. Caller must be an RBAC Admin.
+    pub fn cqrs_reinstate_submitter(env: Env, caller: Address, target: Address) {
+        Self::require_initialized(&env);
+        Self::require_governance_not_paused(&env);
+        Self::cqrs_bootstrap_rbac(&env);
+        rbac::RbacManager::reinstate_submitter(&env, &caller, &target)
+            .unwrap_or_else(|err| panic_with_error!(&env, err));
+        env.events().publish(
+            (Symbol::new(&env, AUDIT_TOPIC), Symbol::new(&env, "reinstate")),
+            (caller, target, env.ledger().timestamp()),
+        );
     }
 
     // ── CQRS Query Side (Read Path) ─────────────────────────────────────────

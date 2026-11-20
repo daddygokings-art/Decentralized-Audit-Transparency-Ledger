@@ -42,15 +42,15 @@ impl CqrsStorageHarness {
             force: true,
         };
         let ts = env.ledger().timestamp();
-        CqrsEngine::record_log_event(&env, id, &cmd, ts)
+        CqrsEngine::record_log_event_raw(&env, id, &cmd, ts)
     }
 
     pub fn snapshot(env: Env) -> Result<u32, CqrsError> {
-        CqrsEngine::create_snapshot(&env)
+        CqrsEngine::create_snapshot_raw(&env)
     }
 
     pub fn rebuild(env: Env, from_snapshot: bool) -> Result<EventProjection, CqrsError> {
-        CqrsEngine::rebuild_projection(&env, from_snapshot)
+        CqrsEngine::rebuild_projection_raw(&env, from_snapshot)
     }
 
     pub fn extend_event(env: Env, sequence: u32) -> Result<(), CqrsError> {

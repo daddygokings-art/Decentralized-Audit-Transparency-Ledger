@@ -14,6 +14,46 @@
 //! - **Snapshotting**: Point-in-time state capture for performant projection reconstruction.
 //! - **Materialized Views**: Per-type and per-submitter indexes for low-gas query operations.
 //!
+//! ## Access control and audit events (RBAC)
+//!
+//! Every state-mutating function in [`CqrsEngine`] takes a [`CqrsAuthorization`].
+//! Only [`CqrsEngine::authorize`] can create one, after it has
+//!
+//! 1. authenticated the caller (`Address::require_auth`),
+//! 2. rejected suspended submitter DIDs ([`RbacError::SubmitterSuspended`], `423`),
+//! 3. rejected callers holding no role ([`RbacError::UnauthorizedSubmitter`], `424`),
+//! 4. checked role precedence `Viewer < Submitter < Auditor < Admin` against the
+//!    operation's minimum role ([`RbacError::InsufficientRole`], `403`).
+//!
+//! A mutation therefore cannot be reached without passing [`crate::rbac`].
+//!
+//! | Operation | Entry point(s) | Minimum role |
+//! |-----------|----------------|--------------|
+//! | [`CqrsOperation::LogEvent`] | `record_log_event` | `Submitter` (caller must be the submitter unless `Admin`) |
+//! | [`CqrsOperation::UpdateEvent`] | `record_update_event` | `Auditor` |
+//! | [`CqrsOperation::Governance`] | `record_governance_command` | `Admin` |
+//! | [`CqrsOperation::Snapshot`] | `create_snapshot` | `Admin` |
+//! | [`CqrsOperation::RebuildProjection`] | `rebuild_projection` | `Admin` |
+//!
+//! Each successful mutation emits a tamper-evident audit event, and so does
+//! each rejected access attempt:
+//!
+//! | Topics | Data |
+//! |--------|------|
+//! | `("cqrs_audit", op)` | `(caller, timestamp, "ok" \| "denied", state_diff_digest)` |
+//! | `("cqrs_denied", op)` | `(caller, timestamp, rbac_error_code)` — diagnostic, rejections only |
+//!
+//! `state_diff_digest = sha256(xdr(caller) ‖ xdr(op) ‖ prev_seq ‖ next_seq ‖ timestamp ‖ subject?)`,
+//! where `prev_seq`/`next_seq` are the event-store sequence (or snapshot id)
+//! before and after the mutation and `subject` is the affected event id. An
+//! off-chain verifier can recompute it from the event store. Denied attempts
+//! use `prev_seq == next_seq`.
+//!
+//! An entrypoint that panics on denial (snapshot, rebuild) rolls back its
+//! events with the rest of the invocation. Command entrypoints instead return a
+//! failed [`CommandResult`] carrying the RBAC error code, so their denial
+//! events persist on-ledger.
+//!
 //! ## Storage tiers & TTL policy
 //!
 //! Every [`CqrsStorageKey`] is assigned to exactly one Soroban storage tier
@@ -73,6 +113,8 @@
 //! public read models (`CqrsStoredEvent`, `EventView`, `EventProjection`,
 //! `ProjectionSnapshot`) are unchanged for callers.
 
+use crate::rbac::{RbacError, RbacManager, Role as RbacRole};
+use soroban_sdk::xdr::ToXdr;
 use soroban_sdk::{
     contracterror, contracttype, Address, Bytes, BytesN, Env, Symbol, Vec,
 };
@@ -443,6 +485,77 @@ impl CqrsStorageKey {
     }
 }
 
+// ── RBAC Authorization ──────────────────────────────────────────────────────
+
+/// Topic for the tamper-evident audit event emitted on every mutation attempt.
+pub const AUDIT_TOPIC: &str = "cqrs_audit";
+/// Topic for the diagnostic event emitted on rejected access attempts.
+pub const DENIED_TOPIC: &str = "cqrs_denied";
+/// Audit outcome for an applied mutation.
+pub const OUTCOME_OK: &str = "ok";
+/// Audit outcome for a rejected access attempt.
+pub const OUTCOME_DENIED: &str = "denied";
+
+/// State-mutating CQRS operations and their minimum RBAC role.
+#[derive(Copy, Clone, Debug, Eq, PartialEq)]
+pub enum CqrsOperation {
+    LogEvent,
+    UpdateEvent,
+    Governance,
+    Snapshot,
+    RebuildProjection,
+}
+
+impl CqrsOperation {
+    /// Minimum role in the `Viewer < Submitter < Auditor < Admin` hierarchy.
+    pub fn required_role(self) -> RbacRole {
+        match self {
+            CqrsOperation::LogEvent => RbacRole::Submitter,
+            CqrsOperation::UpdateEvent => RbacRole::Auditor,
+            CqrsOperation::Governance
+            | CqrsOperation::Snapshot
+            | CqrsOperation::RebuildProjection => RbacRole::Admin,
+        }
+    }
+
+    /// Stable symbol used as the second audit-event topic.
+    pub fn symbol(self, env: &Env) -> Symbol {
+        Symbol::new(
+            env,
+            match self {
+                CqrsOperation::LogEvent => "log",
+                CqrsOperation::UpdateEvent => "update",
+                CqrsOperation::Governance => "governance",
+                CqrsOperation::Snapshot => "snapshot",
+                CqrsOperation::RebuildProjection => "rebuild",
+            },
+        )
+    }
+}
+
+/// Proof that a caller passed RBAC checks for an operation.
+///
+/// Fields are private, so [`CqrsEngine::authorize`] is the only constructor;
+/// this makes RBAC enforcement on every mutator a compile-time guarantee.
+#[derive(Clone, Debug)]
+pub struct CqrsAuthorization {
+    caller: Address,
+    role: RbacRole,
+    operation: CqrsOperation,
+}
+
+impl CqrsAuthorization {
+    pub fn caller(&self) -> &Address {
+        &self.caller
+    }
+    pub fn role(&self) -> RbacRole {
+        self.role
+    }
+    pub fn operation(&self) -> CqrsOperation {
+        self.operation
+    }
+}
+
 // ── CQRS Engine Implementation ──────────────────────────────────────────────
 
 pub struct CqrsEngine;
@@ -485,6 +598,114 @@ impl CqrsEngine {
                 );
             }
         }
+    }
+
+    // ── RBAC Gate & Audit Events ────────────────────────────────────────────
+
+    /// Authenticates `caller` and checks its RBAC role for `operation`.
+    ///
+    /// On success returns the [`CqrsAuthorization`] that every mutator needs.
+    /// On failure emits `cqrs_audit`/`denied` and `cqrs_denied` events and
+    /// returns a stable [`RbacError`]:
+    /// - `SubmitterSuspended` (423) — the DID is suspended (checked first,
+    ///   so suspension overrides any role);
+    /// - `UnauthorizedSubmitter` (424) — the caller holds no role (never
+    ///   granted, or revoked);
+    /// - `InsufficientRole` (403) — the role ranks below the operation's minimum.
+    pub fn authorize(
+        env: &Env,
+        caller: &Address,
+        operation: CqrsOperation,
+    ) -> Result<CqrsAuthorization, RbacError> {
+        caller.require_auth();
+
+        let checked = if RbacManager::is_suspended(env, caller) {
+            Err(RbacError::SubmitterSuspended)
+        } else {
+            match RbacManager::get_role(env, caller) {
+                None => Err(RbacError::UnauthorizedSubmitter),
+                Some(role) if role >= operation.required_role() => Ok(role),
+                Some(_) => Err(RbacError::InsufficientRole),
+            }
+        };
+
+        match checked {
+            Ok(role) => Ok(CqrsAuthorization {
+                caller: caller.clone(),
+                role,
+                operation,
+            }),
+            Err(err) => {
+                Self::emit_denied(env, caller, operation, err);
+                Err(err)
+            }
+        }
+    }
+
+    /// Failed [`CommandResult`] carrying the stable RBAC error code.
+    pub fn denied_result(env: &Env, err: RbacError) -> CommandResult {
+        CommandResult {
+            success: false,
+            event_id: None,
+            sequence_number: Self::current_sequence(env),
+            error_code: Some(err as u32),
+            message: Some(Symbol::new(env, "rbac_denied")),
+        }
+    }
+
+    /// Tamper-evident digest binding caller, operation, the before/after
+    /// sequence (or snapshot id), the ledger timestamp and the affected event.
+    pub fn state_diff_digest(
+        env: &Env,
+        caller: &Address,
+        operation: CqrsOperation,
+        prev: u32,
+        next: u32,
+        subject: Option<&BytesN<32>>,
+    ) -> BytesN<32> {
+        let mut buf = Bytes::new(env);
+        buf.append(&caller.clone().to_xdr(env));
+        buf.append(&operation.symbol(env).to_xdr(env));
+        buf.extend_from_array(&prev.to_be_bytes());
+        buf.extend_from_array(&next.to_be_bytes());
+        buf.extend_from_array(&env.ledger().timestamp().to_be_bytes());
+        if let Some(id) = subject {
+            buf.extend_from_array(&id.to_array());
+        }
+        env.crypto().sha256(&buf).into()
+    }
+
+    /// Re-checks that `auth` covers `operation`, so an authorization obtained
+    /// for a lower-privilege operation cannot be reused for a higher one.
+    pub fn ensure(env: &Env, auth: &CqrsAuthorization, operation: CqrsOperation) -> Result<(), RbacError> {
+        if auth.role >= operation.required_role() {
+            Ok(())
+        } else {
+            Self::emit_denied(env, &auth.caller, operation, RbacError::InsufficientRole);
+            Err(RbacError::InsufficientRole)
+        }
+    }
+
+    pub fn emit_audit(env: &Env, caller: &Address, operation: CqrsOperation, outcome: &str, digest: BytesN<32>) {
+        env.events().publish(
+            (Symbol::new(env, AUDIT_TOPIC), operation.symbol(env)),
+            (
+                caller.clone(),
+                env.ledger().timestamp(),
+                Symbol::new(env, outcome),
+                digest,
+            ),
+        );
+    }
+
+    pub fn emit_denied(env: &Env, caller: &Address, operation: CqrsOperation, err: RbacError) {
+        let seq = Self::current_sequence(env);
+        let digest = Self::state_diff_digest(env, caller, operation, seq, seq, None);
+        Self::emit_audit(env, caller, operation, OUTCOME_DENIED, digest);
+        env.events().publish(
+            (Symbol::new(env, DENIED_TOPIC), operation.symbol(env)),
+            (caller.clone(), env.ledger().timestamp(), err as u32),
+        );
     }
 
     /// Extend the TTL of a persistent key if it exists. Returns `false` when
@@ -595,7 +816,43 @@ impl CqrsEngine {
 
     /// Record a successfully executed event in the append-only event store,
     /// allocate sequence number, update projections and materialized views.
+    ///
+    /// Requires [`CqrsOperation::LogEvent`] (`Submitter`). The authorized
+    /// caller must be `cmd.submitter`, unless it is an `Admin` replaying
+    /// historical events (e.g. during [`Self::rebuild_projection`] backfill).
     pub fn record_log_event(
+        env: &Env,
+        auth: &CqrsAuthorization,
+        event_id: BytesN<32>,
+        cmd: &LogEventCommand,
+        timestamp: u64,
+    ) -> Result<CommandResult, CqrsError> {
+        Self::ensure(env, auth, CqrsOperation::LogEvent)
+            .map_err(|_| CqrsError::NotAuthorized)?;
+        if auth.caller != cmd.submitter && auth.role < RbacRole::Admin {
+            Self::emit_denied(env, &auth.caller, CqrsOperation::LogEvent, RbacError::UnauthorizedSubmitter);
+            return Err(CqrsError::NotAuthorized);
+        }
+
+        let current_seq = Self::current_sequence(env);
+        let res = Self::record_log_event_raw(env, event_id.clone(), cmd, timestamp)?;
+        let next_seq = res.sequence_number;
+
+        let digest = Self::state_diff_digest(
+            env,
+            &auth.caller,
+            CqrsOperation::LogEvent,
+            current_seq,
+            next_seq,
+            Some(&event_id),
+        );
+        Self::emit_audit(env, &auth.caller, CqrsOperation::LogEvent, OUTCOME_OK, digest);
+
+        Ok(res)
+    }
+
+    /// Direct unauthenticated recording used by storage footprint tests.
+    pub fn record_log_event_raw(
         env: &Env,
         event_id: BytesN<32>,
         cmd: &LogEventCommand,
@@ -661,16 +918,23 @@ impl CqrsEngine {
     }
 
     /// Record an event update in the append-only log and advance projection.
+    ///
+    /// Requires [`CqrsOperation::UpdateEvent`] (`Auditor`). The authorized
+    /// caller is recorded as the author of the new version.
     pub fn record_update_event(
         env: &Env,
+        auth: &CqrsAuthorization,
         new_event_id: BytesN<32>,
-        caller: Address,
         original_event_id: BytesN<32>,
         event_type: Symbol,
         new_metadata: Bytes,
         new_version: u32,
         timestamp: u64,
     ) -> Result<CommandResult, CqrsError> {
+        Self::ensure(env, auth, CqrsOperation::UpdateEvent)
+            .map_err(|_| CqrsError::NotAuthorized)?;
+
+        let current_seq = Self::current_sequence(env);
         if new_metadata.len() > CQRS_MAX_METADATA_BYTES {
             return Err(CqrsError::MetadataTooLarge);
         }
@@ -681,7 +945,7 @@ impl CqrsEngine {
             event_id: Some(new_event_id.clone()),
             timestamp,
             event_type,
-            submitter: caller,
+            submitter: auth.caller.clone(),
             metadata: new_metadata,
             category: None,
             sub_event_type: None,
@@ -694,7 +958,7 @@ impl CqrsEngine {
         Self::store(env, &CqrsStorageKey::Event(next_seq), &stored.pack());
         Self::store(env, &CqrsStorageKey::Seq, &next_seq);
         Self::store(env, &CqrsStorageKey::IdSeq(new_event_id.clone()), &next_seq);
-        Self::store(env, &CqrsStorageKey::IdSeq(original_event_id), &next_seq);
+        Self::store(env, &CqrsStorageKey::IdSeq(original_event_id.clone()), &next_seq);
 
         // Update live projection
         let mut proj = Self::get_projection(env);
@@ -717,16 +981,32 @@ impl CqrsEngine {
             (new_event_id, next_seq),
         );
 
+        let digest = Self::state_diff_digest(
+            env,
+            &auth.caller,
+            CqrsOperation::UpdateEvent,
+            current_seq,
+            next_seq,
+            Some(&original_event_id),
+        );
+        Self::emit_audit(env, &auth.caller, CqrsOperation::UpdateEvent, OUTCOME_OK, digest);
+
         Ok(result)
     }
 
     /// Record a governance command execution in the event store.
+    ///
+    /// Requires [`CqrsOperation::Governance`] (`Admin`).
     pub fn record_governance_command(
         env: &Env,
-        caller: Address,
+        auth: &CqrsAuthorization,
         action: Symbol,
         timestamp: u64,
     ) -> Result<CommandResult, CqrsError> {
+        Self::ensure(env, auth, CqrsOperation::Governance)
+            .map_err(|_| CqrsError::NotAuthorized)?;
+
+        let current_seq = Self::current_sequence(env);
         let next_seq = Self::next_sequence(env)?;
 
         let stored = CqrsStoredEvent {
@@ -734,7 +1014,7 @@ impl CqrsEngine {
             event_id: None,
             timestamp,
             event_type: action.clone(),
-            submitter: caller,
+            submitter: auth.caller.clone(),
             metadata: Bytes::new(env),
             category: None,
             sub_event_type: None,
@@ -766,6 +1046,16 @@ impl CqrsEngine {
             (action, next_seq),
         );
 
+        let digest = Self::state_diff_digest(
+            env,
+            &auth.caller,
+            CqrsOperation::Governance,
+            current_seq,
+            next_seq,
+            None,
+        );
+        Self::emit_audit(env, &auth.caller, CqrsOperation::Governance, OUTCOME_OK, digest);
+
         Ok(result)
     }
 
@@ -777,135 +1067,96 @@ impl CqrsEngine {
         Self::get_event_by_sequence(env, seq)
     }
 
-    /// Get read-optimized `EventView` by monotonic sequence number.
+    /// Get read-optimized `EventView` by sequential counter.
     pub fn get_event_by_sequence(env: &Env, sequence: u32) -> Option<EventView> {
         let stored = Self::get_stored_event(env, sequence)?;
-        Some(Self::to_view(env, stored))
-    }
-
-    fn to_view(env: &Env, stored: CqrsStoredEvent) -> EventView {
-        let category = match stored.kind {
-            CqrsCommandKind::Log => stored.category,
-            other => Some(other.as_symbol(env)),
-        };
-        EventView {
-            event_id: stored
-                .event_id
-                .unwrap_or_else(|| BytesN::from_array(env, &[0u8; 32])),
+        Some(EventView {
             sequence: stored.sequence,
+            event_id: stored.event_id,
             timestamp: stored.timestamp,
             event_type: stored.event_type,
-            category,
             submitter: stored.submitter,
             metadata: stored.metadata,
+            category: stored.category,
+            sub_event_type: stored.sub_event_type,
             version: stored.version,
-        }
+        })
     }
 
-    /// Query the read model with filtering on type, submitter, and sequence range.
-    pub fn query_events(env: &Env, query: EventQuery) -> Vec<EventView> {
-        let total_seq = Self::current_sequence(env);
+    /// Query events by type with pagination. Uses the `TypeIdx` materialized view.
+    pub fn get_events_by_type(
+        env: &Env,
+        event_type: Symbol,
+        limit: u32,
+        offset: u32,
+    ) -> Vec<EventView> {
+        let limit = Self::effective_limit(limit);
+        let total: u32 = Self::load(env, &CqrsStorageKey::TypeCnt(event_type.clone())).unwrap_or(0);
         let mut results = Vec::new(env);
-        if total_seq == 0 {
+        if offset >= total {
             return results;
         }
-
-        let eff_limit = Self::effective_limit(query.limit);
-        let mut scanned: u32 = 0;
-
-        let start_seq = if query.from_sequence == 0 {
-            1
-        } else {
-            query.from_sequence
-        };
-        let end_seq = if query.to_sequence == 0 || query.to_sequence > total_seq {
-            total_seq
-        } else {
-            query.to_sequence
-        };
-
-        if start_seq > end_seq {
-            return results;
-        }
-
-        // Fast path 1: Materialized type index lookup
-        if let (Some(q_type), None) = (&query.event_type, &query.submitter) {
-            let count = Self::get_materialized_type_count(env, q_type.clone());
-            for pos in 0..count {
-                if scanned >= CQRS_MAX_QUERY_SCAN {
-                    break;
-                }
-                scanned += 1;
-                let seq: Option<u32> =
-                    Self::load(env, &CqrsStorageKey::TypeIdx(q_type.clone(), pos));
-                if let Some(seq) = seq {
-                    if seq > end_seq {
-                        break;
-                    }
-                    if seq >= start_seq {
-                        if let Some(view) = Self::get_event_by_sequence(env, seq) {
-                            results.push_back(view);
-                            if results.len() >= eff_limit {
-                                break;
-                            }
-                        }
-                    }
-                }
-            }
-            return results;
-        }
-
-        // Fast path 2: Materialized submitter index lookup
-        if let (None, Some(q_sub)) = (&query.event_type, &query.submitter) {
-            let count = Self::get_materialized_submitter_count(env, q_sub.clone());
-            for pos in 0..count {
-                if scanned >= CQRS_MAX_QUERY_SCAN {
-                    break;
-                }
-                scanned += 1;
-                let seq: Option<u32> =
-                    Self::load(env, &CqrsStorageKey::SubIdx(q_sub.clone(), pos));
-                if let Some(seq) = seq {
-                    if seq > end_seq {
-                        break;
-                    }
-                    if seq >= start_seq {
-                        if let Some(view) = Self::get_event_by_sequence(env, seq) {
-                            results.push_back(view);
-                            if results.len() >= eff_limit {
-                                break;
-                            }
-                        }
-                    }
-                }
-            }
-            return results;
-        }
-
-        // Sequential range scan fallback (bounded by CQRS_MAX_QUERY_SCAN)
-        let scan_end = core::cmp::min(
-            end_seq,
-            start_seq.saturating_add(CQRS_MAX_QUERY_SCAN - 1),
-        );
-        for seq in start_seq..=scan_end {
-            if let Some(view) = Self::get_event_by_sequence(env, seq) {
-                let matches_type = match &query.event_type {
-                    Some(t) => &view.event_type == t,
-                    None => true,
-                };
-                let matches_sub = match &query.submitter {
-                    Some(s) => &view.submitter == s,
-                    None => true,
-                };
-                if matches_type && matches_sub {
+        let end = core::cmp::min(offset.saturating_add(limit), total);
+        for pos in offset..end {
+            if let Some(seq) = Self::load::<u32>(env, &CqrsStorageKey::TypeIdx(event_type.clone(), pos)) {
+                if let Some(view) = Self::get_event_by_sequence(env, seq) {
                     results.push_back(view);
-                    if results.len() >= eff_limit {
-                        break;
-                    }
                 }
             }
         }
+        results
+    }
 
+    /// Query events by submitter with pagination. Uses the `SubIdx` materialized view.
+    pub fn get_events_by_submitter(
+        env: &Env,
+        submitter: Address,
+        limit: u32,
+        offset: u32,
+    ) -> Vec<EventView> {
+        let limit = Self::effective_limit(limit);
+        let total: u32 = Self::load(env, &CqrsStorageKey::SubCnt(submitter.clone())).unwrap_or(0);
+        let mut results = Vec::new(env);
+        if offset >= total {
+            return results;
+        }
+        let end = core::cmp::min(offset.saturating_add(limit), total);
+        for pos in offset..end {
+            if let Some(seq) = Self::load::<u32>(env, &CqrsStorageKey::SubIdx(submitter.clone(), pos)) {
+                if let Some(view) = Self::get_event_by_sequence(env, seq) {
+                    results.push_back(view);
+                }
+            }
+        }
+        results
+    }
+
+    /// Query events by sequence range [from_seq, to_seq] with bounded scan.
+    pub fn query_events(
+        env: &Env,
+        from_seq: u32,
+        to_seq: u32,
+        limit: u32,
+    ) -> Vec<EventView> {
+        let limit = Self::effective_limit(limit);
+        let mut results = Vec::new(env);
+        let total = Self::current_sequence(env);
+        if from_seq == 0 || from_seq > total || from_seq > to_seq {
+            return results;
+        }
+        let end = core::cmp::min(to_seq, total);
+        let bounded_end = core::cmp::min(
+            end,
+            from_seq.saturating_add(CQRS_MAX_QUERY_SCAN).saturating_sub(1),
+        );
+        for seq in from_seq..=bounded_end {
+            if results.len() >= limit {
+                break;
+            }
+            if let Some(view) = Self::get_event_by_sequence(env, seq) {
+                results.push_back(view);
+            }
+        }
         results
     }
 
@@ -920,13 +1171,32 @@ impl CqrsEngine {
 
     /// Rebuild projection state by replaying events from genesis (or from the latest snapshot).
     ///
-    /// Materialized indexes are maintained at write time (and their positions
-    /// are recorded on each event), so replay only recomputes the projection and
-    /// never re-appends index entries.
-    ///
-    /// Returns [`CqrsError::ReplayWindowTooLarge`] if more than
-    /// [`CQRS_MAX_REPLAY_EVENTS`] events would have to be replayed.
-    pub fn rebuild_projection(env: &Env, from_snapshot: bool) -> Result<EventProjection, CqrsError> {
+    /// Requires [`CqrsOperation::RebuildProjection`] (`Admin`).
+    pub fn rebuild_projection(
+        env: &Env,
+        auth: &CqrsAuthorization,
+        from_snapshot: bool,
+    ) -> Result<EventProjection, CqrsError> {
+        Self::ensure(env, auth, CqrsOperation::RebuildProjection)
+            .map_err(|_| CqrsError::NotAuthorized)?;
+        let previous_last_sequence = Self::get_projection(env).last_sequence;
+        let proj = Self::rebuild_projection_raw(env, from_snapshot)?;
+
+        let digest = Self::state_diff_digest(
+            env,
+            &auth.caller,
+            CqrsOperation::RebuildProjection,
+            previous_last_sequence,
+            proj.last_sequence,
+            None,
+        );
+        Self::emit_audit(env, &auth.caller, CqrsOperation::RebuildProjection, OUTCOME_OK, digest);
+
+        Ok(proj)
+    }
+
+    /// Unauthenticated rebuild used by storage harness tests.
+    pub fn rebuild_projection_raw(env: &Env, from_snapshot: bool) -> Result<EventProjection, CqrsError> {
         let total_seq = Self::current_sequence(env);
 
         let latest_snapshot = if from_snapshot {
@@ -975,7 +1245,24 @@ impl CqrsEngine {
     }
 
     /// Capture a snapshot of the current projection state.
-    pub fn create_snapshot(env: &Env) -> Result<u32, CqrsError> {
+    ///
+    /// Requires [`CqrsOperation::Snapshot`] (`Admin`). The audit digest binds
+    /// the previous and new snapshot ids.
+    pub fn create_snapshot(env: &Env, auth: &CqrsAuthorization) -> Result<u32, CqrsError> {
+        Self::ensure(env, auth, CqrsOperation::Snapshot)
+            .map_err(|_| CqrsError::NotAuthorized)?;
+
+        let count: u32 = Self::load(env, &CqrsStorageKey::SnapCnt).unwrap_or(0);
+        let next_id = Self::create_snapshot_raw(env)?;
+
+        let digest = Self::state_diff_digest(env, &auth.caller, CqrsOperation::Snapshot, count, next_id, None);
+        Self::emit_audit(env, &auth.caller, CqrsOperation::Snapshot, OUTCOME_OK, digest);
+
+        Ok(next_id)
+    }
+
+    /// Unauthenticated snapshot creation used by storage harness tests.
+    pub fn create_snapshot_raw(env: &Env) -> Result<u32, CqrsError> {
         let count: u32 = Self::load(env, &CqrsStorageKey::SnapCnt).unwrap_or(0);
         let next_id = Self::checked_inc(count)?;
         let proj = Self::get_projection(env);
@@ -1004,8 +1291,6 @@ impl CqrsEngine {
             Some(id) => Some(id),
         }
     }
-
-    /// Retrieve a saved snapshot by ID.
     pub fn get_snapshot(env: &Env, snapshot_id: u32) -> Option<ProjectionSnapshot> {
         let packed: PackedSnapshot = Self::load(env, &CqrsStorageKey::Snap(snapshot_id))?;
         let projection = EventProjection::unpack(packed.0);
