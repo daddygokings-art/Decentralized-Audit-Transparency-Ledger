@@ -61,10 +61,56 @@
 //!   their TTL before expiry.
 //! * [`SettlementPath`] is derived/ephemeral and stored in `Temporary` storage.
 //! * Module-level configuration lives in `Instance` storage.
+//!
+//! # Error propagation & structured events
+//!
+//! Every [`InteropError`] has a stable numeric [`code`](InteropError::code)
+//! and a short on-chain [`symbol`](InteropError::as_symbol). Lifecycle events
+//! are typed `#[contractevent]` structs ([`SettlementStatusChanged`],
+//! [`AttestationRecorded`], [`SettlementFinalized`]) so their schema appears
+//! in the contract spec and indexers can decode them without guessing tuple
+//! layouts. Topic layouts are unchanged from the previous untyped events.
+//!
+//! [`InteropManager::observe`] wraps any fallible result for `?` propagation
+//! and emits an [`InteropFailure`] event on error. Note that Soroban discards
+//! contract events from an invocation that ultimately fails, so failure
+//! events are only persisted when the caller handles the error and the
+//! invocation succeeds (e.g. a batch processor that skips bad items); in a
+//! failing invocation the typed error code itself is the signal.
+//!
+//! # Signature verification & replay protection
+//!
+//! Cross-ledger settlement approvals are ed25519 signatures over a
+//! [`SettlementAuthorization`]. The signed message is the SHA-256
+//! [`authorization_digest`](InteropManager::authorization_digest) of a
+//! fixed-layout payload that binds:
+//!
+//! * a versioned domain tag ([`AUTH_DOMAIN_TAG`]) — no cross-protocol reuse;
+//! * the network id — no cross-network (testnet ↔ mainnet) replay;
+//! * the verifying contract address — no cross-deployment replay;
+//! * the settlement id — no cross-settlement replay;
+//! * the signer key, a per-signer nonce and an expiry timestamp.
+//!
+//! Nonces are strictly monotonic per signer and stored in `Persistent`
+//! storage, so a consumed signature (or any older one) can never be accepted
+//! again, and an equivocating signer cannot authorize two settlements with the
+//! same nonce. Archived persistent entries cannot be read as "missing" by the
+//! host, so TTL expiry cannot resurrect old nonces. Expiry is capped at
+//! [`MAX_AUTH_VALIDITY_SECS`] to bound the exposure window of a leaked
+//! signature.
+//!
+//! [`InteropManager::verify_quorum`] checks every attestation (membership,
+//! duplicates, settlement binding, expiry, nonce) before any signature is
+//! verified and before any nonce is written, so a rejected quorum never
+//! leaves partial state behind. Invalid ed25519 signatures trap the host
+//! (Soroban has no non-aborting verify), which aborts and rolls back the
+//! whole invocation.
 
 use crate::cbdc_types::{CBDCTransaction, InteropProtocol};
-use soroban_sdk::{contracterror, contracttype, Address, Bytes, BytesN, Env, Symbol};
 use soroban_sdk::xdr::ToXdr;
+use soroban_sdk::{
+    contracterror, contractevent, contracttype, symbol_short, Address, Bytes, BytesN, Env, Symbol,
+};
 
 /// Maximum number of hops allowed in a [`SettlementPath`].
 pub const MAX_PATH_HOPS: u32 = 16;
@@ -76,6 +122,10 @@ pub const MIN_PATH_HOPS: u32 = 2;
 pub const MAX_BPS: u32 = 10_000;
 /// Scale factor for exchange rates (1e18).
 pub const RATE_SCALE: u128 = 1_000_000_000_000_000_000;
+/// Versioned domain-separation tag prefixed to every signed authorization.
+pub const AUTH_DOMAIN_TAG: [u8; 16] = *b"CBDC-IOP-AUTH-V1";
+/// Maximum lifetime of a settlement authorization (1 hour).
+pub const MAX_AUTH_VALIDITY_SECS: u64 = 3_600;
 /// Default TTL extension (in ledgers) for archival-critical records.
 pub const DEFAULT_TTL_EXTEND_LEDGERS: u32 = 100_000;
 /// Threshold (in ledgers) below which archival-critical records are bumped.
@@ -147,6 +197,179 @@ pub enum InteropError {
     InvalidStatus = 28,
     /// No validator set has been configured.
     ValidatorsNotConfigured = 29,
+    /// Authorization expiry is in the past.
+    AuthorizationExpired = 30,
+    /// Authorization expiry exceeds [`MAX_AUTH_VALIDITY_SECS`] from now.
+    AuthorizationValidityTooLong = 31,
+    /// Nonce is not strictly greater than the signer's last consumed nonce.
+    NonceReplayed = 32,
+    /// Fewer distinct valid attestations than the quorum threshold.
+    QuorumNotReached = 33,
+    /// Signed authorization is bound to a different settlement id.
+    SettlementMismatch = 34,
+    /// Attestation bundle is longer than [`MAX_VALIDATORS`].
+    TooManyAttestations = 35,
+}
+
+impl InteropError {
+    /// Stable numeric code, identical to the on-chain contract error code.
+    pub fn code(&self) -> u32 {
+        *self as u32
+    }
+
+    /// Short on-chain symbol (≤ 9 chars, built without a host allocation)
+    /// used in structured failure events.
+    pub fn as_symbol(&self) -> Symbol {
+        match self {
+            InteropError::StaleRate => symbol_short!("STALE"),
+            InteropError::ZeroRate => symbol_short!("ZERO_RATE"),
+            InteropError::ZeroPrice => symbol_short!("ZERO_PX"),
+            InteropError::BidExceedsAsk => symbol_short!("BID_ASK"),
+            InteropError::ZeroAmount => symbol_short!("ZERO_AMT"),
+            InteropError::ConversionOverflow => symbol_short!("CONV_OVF"),
+            InteropError::DivisionByZero => symbol_short!("DIV_ZERO"),
+            InteropError::FeeBpsTooHigh => symbol_short!("FEE_BPS"),
+            InteropError::FeeOverflow => symbol_short!("FEE_OVF"),
+            InteropError::ZeroSettlementAmount => symbol_short!("ZERO_STL"),
+            InteropError::ZeroSettlementRate => symbol_short!("ZERO_SRT"),
+            InteropError::PathTooShort => symbol_short!("PATH_SHRT"),
+            InteropError::PathTooLong => symbol_short!("PATH_LONG"),
+            InteropError::RatesTooLong => symbol_short!("RATE_LONG"),
+            InteropError::PathLengthMismatch => symbol_short!("PATH_MISM"),
+            InteropError::SamePilot => symbol_short!("SAME_PLT"),
+            InteropError::InvalidPilot => symbol_short!("BAD_PLT"),
+            InteropError::SpreadOverflow => symbol_short!("SPRD_OVF"),
+            InteropError::NotAValidator => symbol_short!("NOT_VALID"),
+            InteropError::DuplicateAttestation => symbol_short!("DUP_ATT"),
+            InteropError::Equivocation => symbol_short!("EQUIVOC"),
+            InteropError::SettlementNotFound => symbol_short!("STL_NONE"),
+            InteropError::SettlementAlreadyExists => symbol_short!("STL_EXIST"),
+            InteropError::InvalidStatusTransition => symbol_short!("BAD_TRANS"),
+            InteropError::InvalidQuorum => symbol_short!("BAD_QRM"),
+            InteropError::InvalidValidatorSet => symbol_short!("BAD_VSET"),
+            InteropError::NotAwaitingAttestation => symbol_short!("NOT_AWAIT"),
+            InteropError::InvalidStatus => symbol_short!("BAD_STAT"),
+            InteropError::ValidatorsNotConfigured => symbol_short!("NO_VSET"),
+            InteropError::AuthorizationExpired => symbol_short!("AUTH_EXP"),
+            InteropError::AuthorizationValidityTooLong => symbol_short!("AUTH_LONG"),
+            InteropError::NonceReplayed => symbol_short!("REPLAY"),
+            InteropError::QuorumNotReached => symbol_short!("NO_QUORUM"),
+            InteropError::SettlementMismatch => symbol_short!("STL_MISM"),
+            InteropError::TooManyAttestations => symbol_short!("TOO_MANY"),
+        }
+    }
+}
+
+// ════════════════════════════════════════════════════════════════════════════
+// Structured events
+// ════════════════════════════════════════════════════════════════════════════
+
+/// Emitted by [`InteropManager::observe`] when an observed operation fails.
+///
+/// Topics: `["cbdc_err", operation]`.
+#[contractevent(topics = ["cbdc_err"])]
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct InteropFailure {
+    /// Logical operation that failed (e.g. `convert`, `attest`).
+    #[topic]
+    pub operation: Symbol,
+    /// Stable numeric [`InteropError`] code.
+    pub error_code: u32,
+    /// Short symbolic [`InteropError`] name.
+    pub error: Symbol,
+    /// Ledger timestamp at the moment of failure.
+    pub timestamp: u64,
+}
+
+/// Emitted when a signed settlement authorization is accepted and its nonce
+/// consumed.
+///
+/// Topics: `["cbdc_auth", "accepted", signer]`.
+#[contractevent(topics = ["cbdc_auth", "accepted"])]
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct AuthorizationAccepted {
+    /// ed25519 public key of the signer.
+    #[topic]
+    pub signer: BytesN<32>,
+    /// Settlement the signature authorizes.
+    pub settlement_id: BytesN<32>,
+    /// Nonce consumed by this authorization.
+    pub nonce: u64,
+}
+
+// ════════════════════════════════════════════════════════════════════════════
+// Signed authorizations
+// ════════════════════════════════════════════════════════════════════════════
+
+/// The statement a signer (bank, validator, settlement agent) approves.
+#[contracttype]
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct SettlementAuthorization {
+    /// Settlement being authorized.
+    pub settlement_id: BytesN<32>,
+    /// ed25519 public key of the signer.
+    pub signer: BytesN<32>,
+    /// Strictly increasing per-signer nonce; the first valid nonce is 1.
+    pub nonce: u64,
+    /// Ledger timestamp (seconds) after which the signature is void.
+    pub expires_at: u64,
+}
+
+/// A [`SettlementAuthorization`] together with its ed25519 signature over
+/// [`InteropManager::authorization_digest`].
+#[contracttype]
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct SignedAuthorization {
+    pub auth: SettlementAuthorization,
+    pub signature: BytesN<64>,
+}
+
+/// Emitted when a stored settlement moves between lifecycle states.
+///
+/// Topics: `["cbdc_settle", new_status_symbol]` (unchanged layout).
+#[contractevent(topics = ["cbdc_settle"])]
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct SettlementStatusChanged {
+    /// [`SettlementStatus::as_symbol`] of the new status.
+    #[topic]
+    pub status: Symbol,
+    /// Settlement whose status changed.
+    pub settlement_id: BytesN<32>,
+    /// Previous [`SettlementStatus`] code.
+    pub from_status: u32,
+    /// New [`SettlementStatus`] code.
+    pub to_status: u32,
+    /// Ledger timestamp of the transition.
+    pub timestamp: u64,
+}
+
+/// Emitted for every accepted validator attestation.
+///
+/// Topics: `["cbdc_att", "attest"]` (unchanged layout).
+#[contractevent(topics = ["cbdc_att", "attest"])]
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct AttestationRecorded {
+    pub settlement_id: BytesN<32>,
+    pub validator: Address,
+    pub confirmation_hash: BytesN<32>,
+    /// Votes for `confirmation_hash` after this attestation.
+    pub votes: u32,
+}
+
+/// Emitted exactly once when an attested settlement is finalized as
+/// `Completed` or `Failed`.
+///
+/// Topics: `["cbdc_att", "final"]` (unchanged layout).
+#[contractevent(topics = ["cbdc_att", "final"])]
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct SettlementFinalized {
+    pub settlement_id: BytesN<32>,
+    /// Final [`SettlementStatus`] code.
+    pub status: u32,
+    /// Hash that reached quorum, if the settlement completed.
+    pub finalized_hash: Option<BytesN<32>>,
+    /// Canonical [`AttestationState`] digest at finalization.
+    pub digest: BytesN<32>,
 }
 
 /// Exchange rate between two CBDC pilots.
@@ -252,6 +475,11 @@ impl SettlementStatus {
         matches!(self, SettlementStatus::Completed | SettlementStatus::Failed)
     }
 
+    /// Stable numeric code as stored in [`SettlementInstruction::status`].
+    pub fn code(&self) -> u32 {
+        *self as u32
+    }
+
     /// Decode the `u32` status stored in [`SettlementInstruction::status`].
     pub fn from_u32(value: u32) -> Option<SettlementStatus> {
         match value {
@@ -324,13 +552,13 @@ impl InteropManager {
         }
 
         // Generate swap ID
-                let mut input = Bytes::new(env);
-        input.append(&Bytes::from_slice(env, from.to_xdr().as_ref()));
-        input.append(&Bytes::from_slice(env, to.to_xdr().as_ref()));
+        let mut input = Bytes::new(env);
+        input.append(&from.to_xdr(env));
+        input.append(&to.to_xdr(env));
         input.append(&Bytes::from_slice(env, &source_amount.to_le_bytes()));
         input.append(&Bytes::from_slice(env, &dest_amount.to_le_bytes()));
 
-        Ok(env.crypto().sha256(&input))
+        Ok(env.crypto().sha256(&input).to_bytes())
     }
 
     /// Execute hub-and-spoke settlement
@@ -345,12 +573,12 @@ impl InteropManager {
         }
 
         // Generate settlement ID
-                let mut input = Bytes::new(env);
-        input.append(&Bytes::from_slice(env, hub_address.to_xdr().as_ref()));
+        let mut input = Bytes::new(env);
+        input.append(&hub_address.to_xdr(env));
         input.append(&Bytes::from_slice(env, &source_amount.to_le_bytes()));
         input.append(&Bytes::from_slice(env, &dest_amount.to_le_bytes()));
 
-        Ok(env.crypto().sha256(&input))
+        Ok(env.crypto().sha256(&input).to_bytes())
     }
 
     /// Validate settlement instruction
@@ -409,6 +637,202 @@ impl InteropManager {
         )
     }
 
+    /// Pass a result through unchanged, emitting a structured
+    /// [`InteropFailure`] event if it is an error.
+    ///
+    /// Designed for `?`-style propagation inside contract entrypoints:
+    ///
+    /// ```ignore
+    /// let out = InteropManager::observe(
+    ///     &env,
+    ///     symbol_short!("convert"),
+    ///     InteropManager::convert_amount(amount, rate),
+    /// )?;
+    /// ```
+    ///
+    /// Must be called from within a contract frame (events require one). See
+    /// the module docs for when failure events are persisted.
+    pub fn observe<T>(
+        env: &Env,
+        operation: Symbol,
+        result: Result<T, InteropError>,
+    ) -> Result<T, InteropError> {
+        if let Err(err) = &result {
+            InteropFailure {
+                operation,
+                error_code: err.code(),
+                error: err.as_symbol(),
+                timestamp: env.ledger().timestamp(),
+            }
+            .publish(env);
+        }
+        result
+    }
+
+    // ── Signature verification & replay protection ───────────────────────
+
+    /// Deterministic message digest an off-chain signer must sign.
+    ///
+    /// Layout (all fixed-width, so the encoding is unambiguous):
+    /// `AUTH_DOMAIN_TAG(16) ‖ network_id(32) ‖ xdr(verifier) ‖ settlement_id(32)
+    ///  ‖ signer(32) ‖ nonce(u64 BE) ‖ expires_at(u64 BE)`.
+    ///
+    /// `verifier` is the address of the contract that will check the
+    /// signature (normally `env.current_contract_address()`).
+    pub fn authorization_digest(
+        env: &Env,
+        verifier: &Address,
+        auth: &SettlementAuthorization,
+    ) -> BytesN<32> {
+        let mut msg = Bytes::from_array(env, &AUTH_DOMAIN_TAG);
+        msg.append(&env.ledger().network_id().into());
+        msg.append(&verifier.to_xdr(env));
+        msg.append(&auth.settlement_id.clone().into());
+        msg.append(&auth.signer.clone().into());
+        let mut tail = [0u8; 16];
+        tail[..8].copy_from_slice(&auth.nonce.to_be_bytes());
+        tail[8..].copy_from_slice(&auth.expires_at.to_be_bytes());
+        msg.extend_from_array(&tail);
+        env.crypto().sha256(&msg).to_bytes()
+    }
+
+    /// Last nonce consumed by `signer` (0 if it has never signed).
+    pub fn last_nonce(env: &Env, signer: &BytesN<32>) -> u64 {
+        env.storage()
+            .persistent()
+            .get(&InteropDataKey::SignerNonce(signer.clone()))
+            .unwrap_or(0)
+    }
+
+    /// Read-only freshness checks: expiry window and nonce monotonicity.
+    fn check_freshness(env: &Env, auth: &SettlementAuthorization) -> Result<(), InteropError> {
+        let now = env.ledger().timestamp();
+        if now > auth.expires_at {
+            return Err(InteropError::AuthorizationExpired);
+        }
+        if auth.expires_at - now > MAX_AUTH_VALIDITY_SECS {
+            return Err(InteropError::AuthorizationValidityTooLong);
+        }
+        if auth.nonce <= Self::last_nonce(env, &auth.signer) {
+            return Err(InteropError::NonceReplayed);
+        }
+        Ok(())
+    }
+
+    /// Verify the ed25519 signature. Traps (aborting the invocation) if the
+    /// signature is invalid.
+    fn verify_signature(env: &Env, signed: &SignedAuthorization) {
+        let digest = Self::authorization_digest(env, &env.current_contract_address(), &signed.auth);
+        env.crypto()
+            .ed25519_verify(&signed.auth.signer, &digest.into(), &signed.signature);
+    }
+
+    /// Record the nonce as consumed and emit [`AuthorizationAccepted`].
+    fn consume_nonce(env: &Env, auth: &SettlementAuthorization) {
+        let key = InteropDataKey::SignerNonce(auth.signer.clone());
+        let storage = env.storage().persistent();
+        storage.set(&key, &auth.nonce);
+        storage.extend_ttl(&key, TTL_BUMP_THRESHOLD_LEDGERS, DEFAULT_TTL_EXTEND_LEDGERS);
+        AuthorizationAccepted {
+            signer: auth.signer.clone(),
+            settlement_id: auth.settlement_id.clone(),
+            nonce: auth.nonce,
+        }
+        .publish(env);
+    }
+
+    /// Verify a single signed authorization for `settlement_id` and consume
+    /// its nonce.
+    ///
+    /// Typed errors are returned (with no state change) for expired,
+    /// over-long, replayed or mis-bound authorizations. An invalid signature
+    /// traps the host. Must run inside a contract frame.
+    pub fn verify_authorization(
+        env: &Env,
+        settlement_id: &BytesN<32>,
+        signed: &SignedAuthorization,
+    ) -> Result<(), InteropError> {
+        if signed.auth.settlement_id != *settlement_id {
+            return Err(InteropError::SettlementMismatch);
+        }
+        Self::check_freshness(env, &signed.auth)?;
+        Self::verify_signature(env, signed);
+        Self::consume_nonce(env, &signed.auth);
+        Ok(())
+    }
+
+    /// Verify that at least `threshold` distinct registered validators signed
+    /// `settlement_id`, consuming each attestation's nonce.
+    ///
+    /// Uses the same set/quorum rules as [`Self::configure_validators`]: the
+    /// set must be non-empty, duplicate-free and at most [`MAX_VALIDATORS`]
+    /// keys, and `threshold` must be a strict majority
+    /// (`n / 2 < threshold <= n`) so two conflicting settlements can never
+    /// both gather a quorum from the same set.
+    ///
+    /// All structural and freshness checks run first and no nonce is written
+    /// unless the whole quorum is valid, so a rejected call leaves no partial
+    /// state even if the caller swallows the error. Returns the number of
+    /// accepted attestations.
+    pub fn verify_quorum(
+        env: &Env,
+        settlement_id: &BytesN<32>,
+        validators: &soroban_sdk::Vec<BytesN<32>>,
+        threshold: u32,
+        attestations: &soroban_sdk::Vec<SignedAuthorization>,
+    ) -> Result<u32, InteropError> {
+        let n = validators.len();
+        if n == 0 || n > MAX_VALIDATORS {
+            return Err(InteropError::InvalidValidatorSet);
+        }
+        if attestations.len() > MAX_VALIDATORS {
+            return Err(InteropError::TooManyAttestations);
+        }
+        if threshold > n || threshold.saturating_mul(2) <= n {
+            return Err(InteropError::InvalidQuorum);
+        }
+        for i in 0..n {
+            let v = validators.get_unchecked(i);
+            for j in (i + 1)..n {
+                if validators.get_unchecked(j) == v {
+                    return Err(InteropError::InvalidValidatorSet);
+                }
+            }
+        }
+
+        // Phase 1: structural + freshness checks (read-only).
+        let count = attestations.len();
+        for i in 0..count {
+            let a = attestations.get_unchecked(i).auth;
+            if a.settlement_id != *settlement_id {
+                return Err(InteropError::SettlementMismatch);
+            }
+            if !validators.contains(&a.signer) {
+                return Err(InteropError::NotAValidator);
+            }
+            for j in 0..i {
+                if attestations.get_unchecked(j).auth.signer == a.signer {
+                    return Err(InteropError::DuplicateAttestation);
+                }
+            }
+            Self::check_freshness(env, &a)?;
+        }
+        if count < threshold {
+            return Err(InteropError::QuorumNotReached);
+        }
+
+        // Phase 2: cryptographic verification (traps on forgery).
+        for signed in attestations.iter() {
+            Self::verify_signature(env, &signed);
+        }
+
+        // Phase 3: commit nonces only after every check has passed.
+        for signed in attestations.iter() {
+            Self::consume_nonce(env, &signed.auth);
+        }
+        Ok(count)
+    }
+
     /// Compute settlement fee based on amount
     pub fn compute_settlement_fee(amount: u128, fee_bps: u32) -> Result<u128, InteropError> {
         if fee_bps > MAX_BPS {
@@ -452,6 +876,8 @@ pub enum InteropDataKey {
     Settlement(BytesN<32>),
     /// `Persistent`: [`AttestationState`] by settlement ID.
     Attestations(BytesN<32>),
+    /// `Persistent`: last consumed authorization nonce of an ed25519 signer.
+    SignerNonce(BytesN<32>),
 }
 
 /// A single validator's vote for a destination-ledger confirmation hash.
@@ -629,12 +1055,16 @@ impl InteropManager {
             Self::store_attestation_state(env, settlement_id, &state);
         }
 
-        instruction.status = to as u32;
+        instruction.status = to.code();
         Self::store_settlement(env, &instruction);
-        env.events().publish(
-            (Symbol::new(env, "cbdc_settle"), to.as_symbol(env)),
-            settlement_id.clone(),
-        );
+        SettlementStatusChanged {
+            status: to.as_symbol(env),
+            settlement_id: settlement_id.clone(),
+            from_status: from.code(),
+            to_status: to.code(),
+            timestamp: env.ledger().timestamp(),
+        }
+        .publish(env);
         Ok(())
     }
 
@@ -755,20 +1185,21 @@ impl InteropManager {
             Self::store_settlement(env, &instruction);
         }
 
-        env.events().publish(
-            (Symbol::new(env, "cbdc_att"), Symbol::new(env, "attest")),
-            (settlement_id.clone(), validator.clone(), confirmation_hash.clone(), votes),
-        );
+        AttestationRecorded {
+            settlement_id: settlement_id.clone(),
+            validator: validator.clone(),
+            confirmation_hash: confirmation_hash.clone(),
+            votes,
+        }
+        .publish(env);
         if matches!(outcome, AttestationOutcome::Finalized | AttestationOutcome::Failed) {
-            env.events().publish(
-                (Symbol::new(env, "cbdc_att"), Symbol::new(env, "final")),
-                (
-                    settlement_id.clone(),
-                    instruction.status,
-                    state.finalized_hash.clone(),
-                    state.digest.clone(),
-                ),
-            );
+            SettlementFinalized {
+                settlement_id: settlement_id.clone(),
+                status: instruction.status,
+                finalized_hash: state.finalized_hash.clone(),
+                digest: state.digest.clone(),
+            }
+            .publish(env);
         }
 
         Ok(outcome)
@@ -2089,6 +2520,53 @@ mod tests {
     proptest::proptest! {
         #![proptest_config(proptest::test_runner::Config::with_cases(256))]
 
+        /// Byzantine fuzz: duplicate, equivocation and split-vote behavior must
+        /// never corrupt canonical state or allow conflicting finality.
+        #[test]
+        fn prop_byzantine_attestation_state_is_safe(
+            (quorum, votes, order) in vote_plan_strategy(),
+        ) {
+            let n = votes.len() as u32;
+            let f = Fixture::new(n, quorum);
+            let id = f.open_settlement(0xC0);
+
+            for &v in &order {
+                if let Some(k) = votes[v] {
+                    let h = f.hash(k);
+                    let first = f.attest(v, &id, &h);
+                    prop_assert!(matches!(
+                        first,
+                        Ok(AttestationOutcome::Recorded)
+                            | Ok(AttestationOutcome::Finalized)
+                            | Ok(AttestationOutcome::Failed)
+                            | Ok(AttestationOutcome::LateRecorded)
+                    ));
+
+                    let replay = f.attest(v, &id, &h);
+                    prop_assert_eq!(replay, Err(InteropError::DuplicateAttestation));
+
+                    let conflicting = f.attest(v, &id, &f.hash(k.wrapping_add(1)));
+                    prop_assert_eq!(conflicting, Err(InteropError::Equivocation));
+                }
+            }
+
+            let state = f.state(&id);
+            let reaching: Vec<_> = state
+                .tallies
+                .iter()
+                .filter(|t| t.votes >= quorum)
+                .collect();
+            prop_assert!(reaching.len() <= 1);
+            prop_assert!(state.attestations.len() <= n);
+            let mut previous = None;
+            for attestation in state.attestations.iter() {
+                if let Some(last) = previous {
+                    prop_assert!(last < attestation.validator);
+                }
+                previous = Some(attestation.validator);
+            }
+        }
+
         /// INV-ATT-2/3/4: for any set of honest votes, applying them in
         /// validator order and in a random shuffled order yields byte-identical
         /// attestation state, digest and settlement status; at most one hash is
@@ -2136,5 +2614,428 @@ mod tests {
                 None => prop_assert_ne!(f.status(&id_a), SettlementStatus::Completed),
             }
         }
+    }
+
+    // ════════════════════════════════════════════════════════════════════════════════
+    // Error propagation & structured events
+    // ════════════════════════════════════════════════════════════════════════════════
+
+    use soroban_sdk::testutils::Ledger as _;
+    use soroban_sdk::Event as _;
+
+    fn last_event(env: &Env) -> soroban_sdk::xdr::ContractEvent {
+        env.events().all().events().last().cloned().expect("no events")
+    }
+
+    // ── Signed authorization & replay protection ─────────────────────────
+
+    mod auth {
+        use super::*;
+        use ed25519_dalek::{Signer, SigningKey};
+
+        pub(super) const NOW: u64 = 1_000_000;
+
+        pub(super) fn key(seed: u8) -> SigningKey {
+            SigningKey::from_bytes(&[seed; 32])
+        }
+
+        pub(super) fn pubkey(env: &Env, k: &SigningKey) -> BytesN<32> {
+            BytesN::from_array(env, &k.verifying_key().to_bytes())
+        }
+
+        pub(super) fn sign(
+            env: &Env,
+            verifier: &Address,
+            k: &SigningKey,
+            settlement_id: &BytesN<32>,
+            nonce: u64,
+            expires_at: u64,
+        ) -> SignedAuthorization {
+            let auth = SettlementAuthorization {
+                settlement_id: settlement_id.clone(),
+                signer: pubkey(env, k),
+                nonce,
+                expires_at,
+            };
+            let digest = InteropManager::authorization_digest(env, verifier, &auth);
+            let sig = k.sign(&digest.to_array()).to_bytes();
+            SignedAuthorization { auth, signature: BytesN::from_array(env, &sig) }
+        }
+
+        pub(super) fn setup() -> (Env, Address, BytesN<32>) {
+            let env = Env::default();
+            env.ledger().set_timestamp(NOW);
+            let id = env.register(InteropHarness, ());
+            let sid = BytesN::from_array(&env, &[0xAB; 32]);
+            (env, id, sid)
+        }
+    }
+
+    #[test]
+    fn test_valid_authorization_accepted_then_replay_rejected() {
+        let (env, id, sid) = auth::setup();
+        let k = auth::key(1);
+        let signed = auth::sign(&env, &id, &k, &sid, 1, auth::NOW + 60);
+        env.as_contract(&id, || {
+            assert_eq!(InteropManager::verify_authorization(&env, &sid, &signed), Ok(()));
+            assert_eq!(InteropManager::last_nonce(&env, &signed.auth.signer), 1);
+            // Exact replay of the same signature.
+            assert_eq!(
+                InteropManager::verify_authorization(&env, &sid, &signed),
+                Err(InteropError::NonceReplayed)
+            );
+        });
+    }
+
+    #[test]
+    fn test_nonce_zero_and_rollback_rejected() {
+        let (env, id, sid) = auth::setup();
+        let k = auth::key(2);
+        env.as_contract(&id, || {
+            let zero = auth::sign(&env, &id, &k, &sid, 0, auth::NOW + 60);
+            assert_eq!(
+                InteropManager::verify_authorization(&env, &sid, &zero),
+                Err(InteropError::NonceReplayed)
+            );
+            let n5 = auth::sign(&env, &id, &k, &sid, 5, auth::NOW + 60);
+            InteropManager::verify_authorization(&env, &sid, &n5).unwrap();
+            let n3 = auth::sign(&env, &id, &k, &sid, 3, auth::NOW + 60);
+            assert_eq!(
+                InteropManager::verify_authorization(&env, &sid, &n3),
+                Err(InteropError::NonceReplayed)
+            );
+        });
+    }
+
+    #[test]
+    fn test_expiry_window_enforced() {
+        let (env, id, sid) = auth::setup();
+        let k = auth::key(3);
+        env.as_contract(&id, || {
+            let expired = auth::sign(&env, &id, &k, &sid, 1, auth::NOW - 1);
+            assert_eq!(
+                InteropManager::verify_authorization(&env, &sid, &expired),
+                Err(InteropError::AuthorizationExpired)
+            );
+            let too_long = auth::sign(&env, &id, &k, &sid, 1, auth::NOW + MAX_AUTH_VALIDITY_SECS + 1);
+            assert_eq!(
+                InteropManager::verify_authorization(&env, &sid, &too_long),
+                Err(InteropError::AuthorizationValidityTooLong)
+            );
+            // Boundaries are inclusive.
+            let at_now = auth::sign(&env, &id, &k, &sid, 1, auth::NOW);
+            assert_eq!(InteropManager::verify_authorization(&env, &sid, &at_now), Ok(()));
+            let at_max = auth::sign(&env, &id, &k, &sid, 2, auth::NOW + MAX_AUTH_VALIDITY_SECS);
+            assert_eq!(InteropManager::verify_authorization(&env, &sid, &at_max), Ok(()));
+        });
+    }
+
+    #[test]
+    fn test_cross_settlement_replay_rejected() {
+        let (env, id, sid) = auth::setup();
+        let other = BytesN::from_array(&env, &[0xCD; 32]);
+        let signed = auth::sign(&env, &id, &auth::key(4), &sid, 1, auth::NOW + 60);
+        let res = env.as_contract(&id, || InteropManager::verify_authorization(&env, &other, &signed));
+        assert_eq!(res, Err(InteropError::SettlementMismatch));
+    }
+
+    #[test]
+    #[should_panic]
+    fn test_forged_signature_traps() {
+        let (env, id, sid) = auth::setup();
+        let mut signed = auth::sign(&env, &id, &auth::key(5), &sid, 1, auth::NOW + 60);
+        // Tamper with the authorized nonce after signing.
+        signed.auth.nonce = 2;
+        env.as_contract(&id, || {
+            let _ = InteropManager::verify_authorization(&env, &sid, &signed);
+        });
+    }
+
+    #[test]
+    #[should_panic]
+    fn test_cross_deployment_replay_traps() {
+        let (env, id, sid) = auth::setup();
+        let other_deployment = env.register(InteropHarness, ());
+        // Signed for `id`, submitted to `other_deployment`.
+        let signed = auth::sign(&env, &id, &auth::key(6), &sid, 1, auth::NOW + 60);
+        env.as_contract(&other_deployment, || {
+            let _ = InteropManager::verify_authorization(&env, &sid, &signed);
+        });
+    }
+
+    #[test]
+    fn test_authorization_digest_deterministic_and_bound() {
+        let (env, id, sid) = auth::setup();
+        let base = SettlementAuthorization {
+            settlement_id: sid.clone(),
+            signer: auth::pubkey(&env, &auth::key(7)),
+            nonce: 1,
+            expires_at: 10,
+        };
+        let d = InteropManager::authorization_digest(&env, &id, &base);
+        assert_eq!(d, InteropManager::authorization_digest(&env, &id, &base));
+
+        let mut v = base.clone();
+        v.nonce = 2;
+        assert_ne!(d, InteropManager::authorization_digest(&env, &id, &v));
+        let mut v = base.clone();
+        v.expires_at = 11;
+        assert_ne!(d, InteropManager::authorization_digest(&env, &id, &v));
+        let mut v = base.clone();
+        v.settlement_id = BytesN::from_array(&env, &[0; 32]);
+        assert_ne!(d, InteropManager::authorization_digest(&env, &id, &v));
+        let other = env.register(InteropHarness, ());
+        assert_ne!(d, InteropManager::authorization_digest(&env, &other, &base));
+    }
+
+    #[test]
+    fn test_quorum_happy_path_and_atomic_rejection() {
+        let (env, id, sid) = auth::setup();
+        let keys: Vec<_> = (10u8..14).map(auth::key).collect();
+        let validators = soroban_sdk::Vec::from_iter(&env, keys.iter().map(|k| auth::pubkey(&env, k)));
+
+        env.as_contract(&id, || {
+            // 2 of 4 signatures but threshold 3 → rejected, no nonce consumed.
+            let mut atts = soroban_sdk::Vec::new(&env);
+            atts.push_back(auth::sign(&env, &id, &keys[0], &sid, 1, auth::NOW + 60));
+            atts.push_back(auth::sign(&env, &id, &keys[1], &sid, 1, auth::NOW + 60));
+            assert_eq!(
+                InteropManager::verify_quorum(&env, &sid, &validators, 3, &atts),
+                Err(InteropError::QuorumNotReached)
+            );
+            assert_eq!(InteropManager::last_nonce(&env, &validators.get(0).unwrap()), 0);
+
+            // Third signature reaches the quorum.
+            atts.push_back(auth::sign(&env, &id, &keys[2], &sid, 1, auth::NOW + 60));
+            assert_eq!(InteropManager::verify_quorum(&env, &sid, &validators, 3, &atts), Ok(3));
+            // Whole bundle replayed.
+            assert_eq!(
+                InteropManager::verify_quorum(&env, &sid, &validators, 3, &atts),
+                Err(InteropError::NonceReplayed)
+            );
+        });
+    }
+
+    #[test]
+    fn test_quorum_structural_rejections() {
+        let (env, id, sid) = auth::setup();
+        let keys: Vec<_> = (20u8..23).map(auth::key).collect();
+        let validators = soroban_sdk::Vec::from_iter(&env, keys.iter().map(|k| auth::pubkey(&env, k)));
+        let outsider = auth::key(99);
+
+        env.as_contract(&id, || {
+            let one = |k: &ed25519_dalek::SigningKey| auth::sign(&env, &id, k, &sid, 1, auth::NOW + 60);
+            let empty = soroban_sdk::Vec::new(&env);
+
+            // Threshold must be a strict majority of 3: only 2 or 3.
+            for bad in [0, 1, 4] {
+                assert_eq!(
+                    InteropManager::verify_quorum(&env, &sid, &validators, bad, &empty),
+                    Err(InteropError::InvalidQuorum)
+                );
+            }
+
+            // Same validator counted twice.
+            let dup = soroban_sdk::Vec::from_array(&env, [one(&keys[0]), one(&keys[0])]);
+            assert_eq!(
+                InteropManager::verify_quorum(&env, &sid, &validators, 2, &dup),
+                Err(InteropError::DuplicateAttestation)
+            );
+
+            // Duplicate entry in the validator set itself.
+            let bad_set = soroban_sdk::Vec::from_array(
+                &env,
+                [auth::pubkey(&env, &keys[0]), auth::pubkey(&env, &keys[0])],
+            );
+            assert_eq!(
+                InteropManager::verify_quorum(&env, &sid, &bad_set, 2, &empty),
+                Err(InteropError::InvalidValidatorSet)
+            );
+            assert_eq!(
+                InteropManager::verify_quorum(&env, &sid, &soroban_sdk::Vec::new(&env), 1, &empty),
+                Err(InteropError::InvalidValidatorSet)
+            );
+
+            let unknown = soroban_sdk::Vec::from_array(&env, [one(&keys[0]), one(&outsider)]);
+            assert_eq!(
+                InteropManager::verify_quorum(&env, &sid, &validators, 2, &unknown),
+                Err(InteropError::NotAValidator)
+            );
+
+            let other_sid = BytesN::from_array(&env, &[1; 32]);
+            let wrong = soroban_sdk::Vec::from_array(
+                &env,
+                [auth::sign(&env, &id, &keys[0], &other_sid, 1, auth::NOW + 60)],
+            );
+            assert_eq!(
+                InteropManager::verify_quorum(&env, &sid, &validators, 2, &wrong),
+                Err(InteropError::SettlementMismatch)
+            );
+
+            let mut big = soroban_sdk::Vec::new(&env);
+            for i in 0..=MAX_VALIDATORS {
+                big.push_back(BytesN::from_array(&env, &[i as u8; 32]));
+            }
+            assert_eq!(
+                InteropManager::verify_quorum(&env, &sid, &big, 20, &empty),
+                Err(InteropError::InvalidValidatorSet)
+            );
+            let flood = soroban_sdk::Vec::from_iter(&env, (0..=MAX_VALIDATORS).map(|_| one(&keys[0])));
+            assert_eq!(
+                InteropManager::verify_quorum(&env, &sid, &validators, 2, &flood),
+                Err(InteropError::TooManyAttestations)
+            );
+        });
+        // None of the rejected calls consumed a nonce.
+        env.as_contract(&id, || {
+            for k in &keys {
+                assert_eq!(InteropManager::last_nonce(&env, &auth::pubkey(&env, k)), 0);
+            }
+        });
+    }
+
+    #[test]
+    fn test_error_codes_are_stable_and_symbols_unique() {
+        let all = [
+            InteropError::StaleRate,
+            InteropError::ZeroRate,
+            InteropError::ZeroPrice,
+            InteropError::BidExceedsAsk,
+            InteropError::ZeroAmount,
+            InteropError::ConversionOverflow,
+            InteropError::DivisionByZero,
+            InteropError::FeeBpsTooHigh,
+            InteropError::FeeOverflow,
+            InteropError::ZeroSettlementAmount,
+            InteropError::ZeroSettlementRate,
+            InteropError::PathTooShort,
+            InteropError::PathTooLong,
+            InteropError::RatesTooLong,
+            InteropError::PathLengthMismatch,
+            InteropError::SamePilot,
+            InteropError::InvalidPilot,
+            InteropError::SpreadOverflow,
+            InteropError::NotAValidator,
+            InteropError::DuplicateAttestation,
+            InteropError::Equivocation,
+            InteropError::SettlementNotFound,
+            InteropError::SettlementAlreadyExists,
+            InteropError::InvalidStatusTransition,
+            InteropError::InvalidQuorum,
+            InteropError::InvalidValidatorSet,
+            InteropError::NotAwaitingAttestation,
+            InteropError::InvalidStatus,
+            InteropError::ValidatorsNotConfigured,
+            InteropError::AuthorizationExpired,
+            InteropError::AuthorizationValidityTooLong,
+            InteropError::NonceReplayed,
+            InteropError::QuorumNotReached,
+            InteropError::SettlementMismatch,
+            InteropError::TooManyAttestations,
+        ];
+        for (i, e) in all.iter().enumerate() {
+            assert_eq!(e.code(), i as u32 + 1, "code drift for {e:?}");
+            for other in &all[i + 1..] {
+                assert_ne!(e.as_symbol(), other.as_symbol(), "{e:?} vs {other:?}");
+            }
+        }
+    }
+
+    #[test]
+    fn test_status_code_matches_from_u32() {
+        for code in 0..=5u32 {
+            assert_eq!(SettlementStatus::from_u32(code).unwrap().code(), code);
+        }
+    }
+
+    #[test]
+    fn test_status_change_event_is_structured() {
+        let f = Fixture::new(3, 2);
+        f.env.ledger().set_timestamp(4_242);
+        let id = f.open_settlement(1);
+        let expected = SettlementStatusChanged {
+            status: SettlementStatus::AwaitingDestination.as_symbol(&f.env),
+            settlement_id: id,
+            from_status: SettlementStatus::ConfirmedSource.code(),
+            to_status: SettlementStatus::AwaitingDestination.code(),
+            timestamp: 4_242,
+        };
+        assert_eq!(last_event(&f.env), expected.to_xdr(&f.env, &f.contract));
+    }
+
+    #[test]
+    fn test_attestation_events_are_structured() {
+        let f = Fixture::new(3, 2);
+        let id = f.open_settlement(2);
+        let h = f.hash(0xAA);
+
+        assert_eq!(f.attest(0, &id, &h), Ok(AttestationOutcome::Recorded));
+        let recorded = AttestationRecorded {
+            settlement_id: id.clone(),
+            validator: f.validators[0].clone(),
+            confirmation_hash: h.clone(),
+            votes: 1,
+        };
+        assert_eq!(last_event(&f.env), recorded.to_xdr(&f.env, &f.contract));
+
+        assert_eq!(f.attest(1, &id, &h), Ok(AttestationOutcome::Finalized));
+        // `events().all()` reflects the latest invocation only; read it first.
+        let emitted = last_event(&f.env);
+        let finalized = SettlementFinalized {
+            settlement_id: id.clone(),
+            status: SettlementStatus::Completed.code(),
+            finalized_hash: Some(h),
+            digest: f.state(&id).digest,
+        };
+        assert_eq!(emitted, finalized.to_xdr(&f.env, &f.contract));
+    }
+
+    #[test]
+    fn test_observe_passes_ok_through_silently() {
+        let f = Fixture::new(1, 1);
+        let before = f.env.events().all().events().len();
+        let out = f.run(|env| {
+            InteropManager::observe(env, symbol_short!("convert"), InteropManager::convert_amount(10, RATE_SCALE))
+        });
+        assert_eq!(out, Ok(10));
+        assert_eq!(f.env.events().all().events().len(), before);
+    }
+
+    #[test]
+    fn test_observe_emits_failure_and_supports_question_mark() {
+        fn pipeline(env: &Env, amount: u128, rate: u128) -> Result<u128, InteropError> {
+            let converted = InteropManager::observe(
+                env,
+                symbol_short!("convert"),
+                InteropManager::convert_amount(amount, rate),
+            )?;
+            InteropManager::observe(env, symbol_short!("fee"), InteropManager::compute_settlement_fee(converted, 25))
+        }
+        let f = Fixture::new(1, 1);
+        f.env.ledger().set_timestamp(77);
+        let res = f.run(|env| pipeline(env, 0, RATE_SCALE));
+        assert_eq!(res, Err(InteropError::ZeroAmount));
+
+        let failures: Vec<_> = f
+            .env
+            .events()
+            .all()
+            .events()
+            .iter()
+            .filter(|e| match &e.body {
+                ContractEventBody::V0(b) => {
+                    matches!(b.topics.first(), Some(ScVal::Symbol(s)) if s.0.as_slice() == b"cbdc_err")
+                }
+            })
+            .cloned()
+            .collect();
+        // Propagation stopped at the first error: exactly one failure event.
+        let expected = InteropFailure {
+            operation: symbol_short!("convert"),
+            error_code: InteropError::ZeroAmount.code(),
+            error: InteropError::ZeroAmount.as_symbol(),
+            timestamp: 77,
+        };
+        assert_eq!(failures, std::vec![expected.to_xdr(&f.env, &f.contract)]);
     }
 }
