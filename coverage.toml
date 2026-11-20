@@ -75,6 +75,8 @@ files = [
     "src/responsible_sourcing/tests.rs",
     "src/trade_compliance/tests.rs",
     "src/proof_encoding_tests.rs",
+    "src/settlement_reserves_tests.rs",
+    "src/test_events.rs",
 
     # Integration tests live outside src/
     "tests/",
@@ -580,3 +582,11 @@ path_prefix = "src/proof_encoding.rs"
 line = 95.0
 branch = 90.0
 description = "Groth16/BN254 proof (de)serialization — rejects non-canonical point encodings"
+
+# ─ Settlement reserve monitoring ──────────────────────────────────────────────
+[[module]]
+name = "settlement_reserves"
+path_prefix = "src/settlement_reserves.rs"
+line = 90.0
+branch = 85.0
+description = "Settlement reserve ratio monitoring with below-floor warning/critical events (RBAC-gated)"

@@ -130,6 +130,16 @@ pub mod proof_encoding;
 #[cfg(test)]
 mod proof_encoding_tests;
 
+// Shared event-assertion helpers for host tests.
+#[cfg(test)]
+pub(crate) mod test_events;
+
+// Settlement reserve ratio monitoring with below-floor warning events.
+pub mod settlement_reserves;
+
+#[cfg(test)]
+mod settlement_reserves_tests;
+
 #[cfg(test)]
 mod pause_granular_tests;
 
