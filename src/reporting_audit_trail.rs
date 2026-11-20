@@ -38,13 +38,18 @@ pub fn compute_entry_hash(
     context: &Bytes,
     prev_entry_hash: &BytesN<32>,
 ) -> BytesN<32> {
-    let mut buf = Bytes::new(env);
-    buf.append(&report_id.to_bytes());
-    buf.extend_from_array(&(action as u32).to_le_bytes());
-    buf.extend_from_array(&sequence.to_le_bytes());
-    buf.extend_from_array(&timestamp.to_le_bytes());
+    // The fixed-width fields are packed into one stack buffer so the preimage
+    // is built with 3 host calls instead of 6.  The byte layout (and therefore
+    // every hash) is identical to the field-by-field encoding.
+    let mut header = [0u8; 16];
+    header[0..4].copy_from_slice(&(action as u32).to_le_bytes());
+    header[4..8].copy_from_slice(&sequence.to_le_bytes());
+    header[8..16].copy_from_slice(&timestamp.to_le_bytes());
+
+    let mut buf = report_id.to_bytes();
+    buf.extend_from_array(&header);
     buf.append(context);
-    buf.append(&prev_entry_hash.to_bytes());
+    buf.append(prev_entry_hash.as_ref());
     env.crypto().sha256(&buf).to_bytes()
 }
 
@@ -70,10 +75,9 @@ pub fn append_entry(
     timestamp: u64,
 ) -> ReportingAuditEntry {
     let sequence = trail.len();
-    let prev_entry_hash: BytesN<32> = if sequence == 0 {
-        BytesN::from_array(env, &[0u8; 32])
-    } else {
-        trail.get(sequence - 1).unwrap().entry_hash.clone()
+    let prev_entry_hash: BytesN<32> = match trail.last() {
+        Some(last) => last.entry_hash,
+        None => BytesN::from_array(env, &[0u8; 32]),
     };
 
     let entry_hash = compute_entry_hash(
@@ -115,23 +119,37 @@ pub fn append_entry(
 /// Returns `Err(sequence)` when the first broken link is at that sequence
 /// number.
 pub fn verify_trail(env: &Env, trail: &Vec<ReportingAuditEntry>) -> Result<(), u32> {
-    let zero_hash = BytesN::<32>::from_array(env, &[0u8; 32]);
+    verify_trail_segment(env, trail, 0, &BytesN::from_array(env, &[0u8; 32])).map(|_| ())
+}
 
-    for i in 0..trail.len() {
-        let entry = trail.get(i).unwrap();
-
-        // Verify prev_entry_hash linkage
-        let expected_prev = if i == 0 {
-            zero_hash.clone()
-        } else {
-            trail.get(i - 1).unwrap().entry_hash.clone()
-        };
-        if entry.prev_entry_hash != expected_prev {
-            return Err(i);
+/// Verify a contiguous segment of a trail that starts at `start_sequence`
+/// and must link to `prev_hash` (the zero hash for the genesis segment).
+///
+/// Returns the last verified `entry_hash` (or `prev_hash` for an empty
+/// segment) so very large trails can be verified across several invocations,
+/// each staying within the Soroban CPU budget:
+///
+/// ```text
+/// let h = verify_trail_segment(env, &chunk0, 0,  &zero)?;
+/// let h = verify_trail_segment(env, &chunk1, n0, &h)?;
+/// ```
+///
+/// Each entry is decoded exactly once and the running hash is carried
+/// forward, rather than re-reading the previous entry.  `Err(sequence)`
+/// reports the first broken link (absolute sequence number).
+pub fn verify_trail_segment(
+    env: &Env,
+    segment: &Vec<ReportingAuditEntry>,
+    start_sequence: u32,
+    prev_hash: &BytesN<32>,
+) -> Result<BytesN<32>, u32> {
+    let mut expected_prev = prev_hash.clone();
+    let mut expected_seq = start_sequence;
+    for entry in segment.iter() {
+        if entry.sequence != expected_seq || entry.prev_entry_hash != expected_prev {
+            return Err(expected_seq);
         }
-
-        // Recompute and verify entry_hash
-        let expected_hash = compute_entry_hash(
+        let recomputed = compute_entry_hash(
             env,
             &entry.report_id,
             entry.action,
@@ -140,11 +158,13 @@ pub fn verify_trail(env: &Env, trail: &Vec<ReportingAuditEntry>) -> Result<(), u
             &entry.context,
             &entry.prev_entry_hash,
         );
-        if entry.entry_hash != expected_hash {
-            return Err(i);
+        if entry.entry_hash != recomputed {
+            return Err(expected_seq);
         }
+        expected_prev = recomputed;
+        expected_seq = expected_seq.checked_add(1).ok_or(expected_seq)?;
     }
-    Ok(())
+    Ok(expected_prev)
 }
 
 // ─────────────────────────────────────────────────────────────────────────────
@@ -726,5 +746,103 @@ mod tests {
         e.timestamp += 1;
         bad.set(1, e);
         assert_eq!(reconcile_trails(&env, &good, &bad), Err((ReportingError::TrailCorrupted, 1)));
+    }
+
+    // ── CPU / memory optimisation guards ──────────────────────────────────
+
+    /// Reference encoding (pre-optimisation, field by field).  Pins the hash
+    /// format so the optimised preimage can never silently change proofs.
+    fn legacy_entry_hash(
+        env: &Env,
+        report_id: &BytesN<32>,
+        action: ReportAction,
+        sequence: u32,
+        timestamp: u64,
+        context: &Bytes,
+        prev: &BytesN<32>,
+    ) -> BytesN<32> {
+        let mut buf = Bytes::new(env);
+        buf.append(&report_id.to_bytes());
+        buf.extend_from_array(&(action as u32).to_le_bytes());
+        buf.extend_from_array(&sequence.to_le_bytes());
+        buf.extend_from_array(&timestamp.to_le_bytes());
+        buf.append(context);
+        buf.append(&prev.to_bytes());
+        env.crypto().sha256(&buf).to_bytes()
+    }
+
+    #[test]
+    fn test_entry_hash_matches_legacy_encoding() {
+        let env = Env::default();
+        let ctx = Bytes::from_slice(&env, b"reason=x\n");
+        for (seq, ts, act) in [
+            (0u32, 0u64, ReportAction::Generated),
+            (7, 1_700_000_000, ReportAction::Rejected),
+            (u32::MAX, u64::MAX, ReportAction::ConfigUpdated),
+        ] {
+            let prev = BytesN::from_array(&env, &[seq as u8; 32]);
+            assert_eq!(
+                compute_entry_hash(&env, &report_id(&env), act, seq, ts, &ctx, &prev),
+                legacy_entry_hash(&env, &report_id(&env), act, seq, ts, &ctx, &prev),
+            );
+        }
+    }
+
+    fn long_trail(env: &Env, n: u64) -> Vec<ReportingAuditEntry> {
+        let actor = Address::generate(env);
+        let mut trail = Vec::new(env);
+        for i in 0..n {
+            record_generated(env, &mut trail, &report_id(env), actor.clone(), Bytes::from_slice(env, b"x"), i);
+        }
+        trail
+    }
+
+    #[test]
+    fn test_chunked_verification_equals_full_verification() {
+        let env = Env::default();
+        let trail = long_trail(&env, 25);
+        let zero = BytesN::from_array(&env, &[0u8; 32]);
+        let mut prev = zero.clone();
+        let mut start = 0;
+        while start < trail.len() {
+            let end = (start + 7).min(trail.len());
+            prev = verify_trail_segment(&env, &trail.slice(start..end), start, &prev).unwrap();
+            start = end;
+        }
+        assert_eq!(prev, trail.last().unwrap().entry_hash);
+        assert_eq!(verify_trail_segment(&env, &trail, 0, &zero).unwrap(), prev);
+    }
+
+    #[test]
+    fn test_chunked_verification_rejects_misaligned_segment() {
+        let env = Env::default();
+        let trail = long_trail(&env, 10);
+        let zero = BytesN::from_array(&env, &[0u8; 32]);
+        // Wrong anchor hash.
+        assert_eq!(verify_trail_segment(&env, &trail.slice(5..10), 5, &zero), Err(5));
+        // Wrong starting sequence.
+        let anchor = trail.get(4).unwrap().entry_hash;
+        assert_eq!(verify_trail_segment(&env, &trail.slice(5..10), 6, &anchor), Err(6));
+        assert!(verify_trail_segment(&env, &trail.slice(5..10), 5, &anchor).is_ok());
+    }
+
+    #[test]
+    fn test_verify_trail_cpu_scales_linearly() {
+        // Guard against reintroducing per-entry double decoding: verifying a
+        // trail must cost at most ~1.1x the per-entry hashing work.
+        let env = Env::default();
+        let trail = long_trail(&env, 100);
+        let mut budget = env.cost_estimate().budget();
+
+        budget.reset_unlimited();
+        for e in trail.iter() {
+            compute_entry_hash(&env, &e.report_id, e.action, e.sequence, e.timestamp, &e.context, &e.prev_entry_hash);
+        }
+        let hashing = budget.cpu_instruction_cost();
+
+        budget.reset_unlimited();
+        verify_trail(&env, &trail).unwrap();
+        let verify = budget.cpu_instruction_cost();
+        assert!(verify * 10 <= hashing * 11, "verify={verify} hashing={hashing}");
     }
 }

@@ -99,8 +99,7 @@ pub fn check_transition(
 
 /// Compute a deterministic submission ID from report_id + attempt number.
 pub fn compute_submission_id(env: &Env, report_id: &BytesN<32>, attempt: u32) -> BytesN<32> {
-    let mut buf = Bytes::new(env);
-    buf.append(&report_id.to_bytes());
+    let mut buf = report_id.to_bytes();
     buf.extend_from_array(&attempt.to_le_bytes());
     env.crypto().sha256(&buf).to_bytes()
 }
@@ -218,8 +217,7 @@ fn emit_audit_event(
 
 /// Compute an acknowledgment ID from submission_id + received_at timestamp.
 pub fn compute_ack_id(env: &Env, submission_id: &BytesN<32>, received_at: u64) -> BytesN<32> {
-    let mut buf = Bytes::new(env);
-    buf.append(&submission_id.to_bytes());
+    let mut buf = submission_id.to_bytes();
     buf.extend_from_array(&received_at.to_le_bytes());
     env.crypto().sha256(&buf).to_bytes()
 }
@@ -566,6 +564,52 @@ pub struct SubmissionPage {
     pub next_cursor: Option<u32>,
 }
 
+/// Maximum submissions accepted by one `store_submissions_batch` call.
+///
+/// Each new submission writes two unique ledger entries (record + index slot)
+/// and resubmissions a third (latest attempt); with the shared counter this
+/// keeps a full batch well inside Soroban's per-invocation footprint limits
+/// (the host rejects >200 written / >400 total entries).
+pub const MAX_SUBMISSION_BATCH: u32 = 48;
+
+/// Check whether `submission` may be stored.  Returns `Ok(true)` when it is
+/// new, `Ok(false)` for an identical already-stored copy (idempotent no-op).
+fn check_storable(env: &Env, submission: &RegulatorySubmission) -> Result<bool, ReportingError> {
+    match env
+        .storage()
+        .persistent()
+        .get::<_, RegulatorySubmission>(&SubmissionTrackerKey::Submission(submission.id.clone()))
+    {
+        None => Ok(true),
+        Some(existing) if existing == *submission => Ok(false),
+        Some(_) => Err(ReportingError::DuplicateSubmission),
+    }
+}
+
+/// Write a new submission at index slot `index` (counter not touched).
+fn insert_submission(env: &Env, submission: &RegulatorySubmission, index: u32) {
+    let storage = env.storage().persistent();
+    storage.set(&SubmissionTrackerKey::Submission(submission.id.clone()), submission);
+    storage.set(&SubmissionTrackerKey::SubmissionIndex(index), &submission.id);
+
+    // Attempt 1 is implied by the absence of the key, so first submissions
+    // (the bulk of any batch) skip this write entirely.
+    if submission.attempt > 1 {
+        let latest_key = SubmissionTrackerKey::LatestAttempt(submission.report_id.clone());
+        let latest: u32 = storage.get(&latest_key).unwrap_or(0);
+        if submission.attempt > latest {
+            storage.set(&latest_key, &submission.attempt);
+        }
+    }
+}
+
+fn submission_count(env: &Env) -> u32 {
+    env.storage()
+        .persistent()
+        .get(&SubmissionTrackerKey::SubmissionCount)
+        .unwrap_or(0)
+}
+
 /// Store a submission and append it to the ordered index.
 ///
 /// Idempotent: re-storing an identical submission is a no-op (it is **not**
@@ -576,38 +620,62 @@ pub fn store_submission(
     env: &Env,
     submission: &RegulatorySubmission,
 ) -> Result<(), ReportingError> {
-    let sub_key = SubmissionTrackerKey::Submission(submission.id.clone());
-    if let Some(existing) = env
-        .storage()
-        .persistent()
-        .get::<_, RegulatorySubmission>(&sub_key)
-    {
-        return if existing == *submission {
-            Ok(())
-        } else {
-            Err(ReportingError::DuplicateSubmission)
-        };
+    if !check_storable(env, submission)? {
+        return Ok(());
     }
-    env.storage().persistent().set(&sub_key, submission);
-
-    let count: u32 = env
-        .storage()
-        .persistent()
-        .get(&SubmissionTrackerKey::SubmissionCount)
-        .unwrap_or(0);
-    env.storage()
-        .persistent()
-        .set(&SubmissionTrackerKey::SubmissionIndex(count), &submission.id);
+    let count = submission_count(env);
+    insert_submission(env, submission, count);
     env.storage()
         .persistent()
         .set(&SubmissionTrackerKey::SubmissionCount, &(count + 1));
-
-    let latest_key = SubmissionTrackerKey::LatestAttempt(submission.report_id.clone());
-    let latest: u32 = env.storage().persistent().get(&latest_key).unwrap_or(0);
-    if submission.attempt > latest {
-        env.storage().persistent().set(&latest_key, &submission.attempt);
-    }
     Ok(())
+}
+
+/// Store up to `MAX_SUBMISSION_BATCH` submissions in one invocation.
+///
+/// All-or-nothing: every item is validated (size, in-batch duplicate ids,
+/// conflicts with stored records) before the first write, so an error leaves
+/// storage untouched.  Identical already-stored items are skipped exactly
+/// as in `store_submission`.  The submission counter is read and written
+/// once per batch instead of once per item.  Returns the number of newly
+/// stored submissions.
+pub fn store_submissions_batch(
+    env: &Env,
+    submissions: &Vec<RegulatorySubmission>,
+) -> Result<u32, ReportingError> {
+    let n = submissions.len();
+    if n > MAX_SUBMISSION_BATCH {
+        return Err(ReportingError::BatchTooLarge);
+    }
+
+    // Validation pass.  Ids are copied to a fixed stack buffer so in-batch
+    // duplicate detection runs on guest memory, not host object compares.
+    let mut ids = [[0u8; 32]; MAX_SUBMISSION_BATCH as usize];
+    let mut fresh = [false; MAX_SUBMISSION_BATCH as usize];
+    for (i, sub) in submissions.iter().enumerate() {
+        let id = sub.id.to_array();
+        if ids[..i].contains(&id) {
+            return Err(ReportingError::DuplicateSubmission);
+        }
+        ids[i] = id;
+        fresh[i] = check_storable(env, &sub)?;
+    }
+
+    // Commit pass.
+    let start = submission_count(env);
+    let mut next = start;
+    for (i, sub) in submissions.iter().enumerate() {
+        if fresh[i] {
+            insert_submission(env, &sub, next);
+            next += 1;
+        }
+    }
+    if next != start {
+        env.storage()
+            .persistent()
+            .set(&SubmissionTrackerKey::SubmissionCount, &next);
+    }
+    Ok(next - start)
 }
 
 /// Highest attempt number stored for `report_id` (0 if none).
@@ -718,15 +786,17 @@ pub fn list_submissions(
     let mut items = Vec::new(env);
     let mut i = start;
     while i < end && items.len() < limit {
-        let id: BytesN<32> = env
+        // A missing index slot is skipped instead of probing storage with a
+        // placeholder id (saves a wasted read per gap).
+        if let Some(id) = env
             .storage()
             .persistent()
-            .get(&SubmissionTrackerKey::SubmissionIndex(i))
-            .unwrap_or_else(|| BytesN::from_array(env, &[0u8; 32]));
-        let key = SubmissionTrackerKey::Submission(id.clone());
-        if let Some(submission) = env.storage().persistent().get::<_, RegulatorySubmission>(&key) {
-            if matches_filter(env, &submission, filter) {
-                items.push_back(submission);
+            .get::<_, BytesN<32>>(&SubmissionTrackerKey::SubmissionIndex(i))
+        {
+            if let Some(submission) = get_submission(env, &id) {
+                if matches_filter(env, &submission, filter) {
+                    items.push_back(submission);
+                }
             }
         }
         i += 1;
@@ -1024,11 +1094,7 @@ pub fn find_stalled_submissions(
     cursor: u32,
     limit: u32,
 ) -> StalledPage {
-    let count: u32 = env
-        .storage()
-        .persistent()
-        .get(&SubmissionTrackerKey::SubmissionCount)
-        .unwrap_or(0);
+    let count = submission_count(env);
     let start = cursor.min(count);
     let end = start
         .saturating_add(limit.min(SUBMISSION_PAGE_SCAN_CAP))
@@ -1364,12 +1430,7 @@ pub(crate) mod test_support {
     }
 
     pub fn submission_count(env: &Env) -> u32 {
-        in_ctx(env, || {
-            env.storage()
-                .persistent()
-                .get(&super::SubmissionTrackerKey::SubmissionCount)
-                .unwrap_or(0)
-        })
+        in_ctx(env, || super::submission_count(env))
     }
 }
 
@@ -2485,5 +2546,113 @@ mod tests {
         super::test_support::suspend(&env, &v);
         let r = recover(&env, &v, &rid, &sid, &dummy_config(&env), ACK_TIMEOUT, 1, 1_700_010_000);
         assert_eq!(r, Err(ReportingError::UnauthorizedEntity));
+    }
+
+    // ════════════════════════════════════════════════════════════════════════════════
+    // Large-batch CPU / memory optimisation
+    // ════════════════════════════════════════════════════════════════════════════════
+
+    use super::test_support::in_ctx;
+
+    fn batch(env: &Env, n: u32, tag: u8) -> Vec<RegulatorySubmission> {
+        let mut out = Vec::new(env);
+        for i in 0..n {
+            let mut rid = [tag; 32];
+            rid[..4].copy_from_slice(&i.to_le_bytes());
+            let report_id = BytesN::from_array(env, &rid);
+            let mut sub = dummy_submission(env);
+            sub.id = compute_submission_id(env, &report_id, 1);
+            sub.report_id = report_id;
+            out.push_back(sub);
+        }
+        out
+    }
+
+    #[test]
+    fn test_batch_store_matches_sequential_store() {
+        let (env_a, _) = setup();
+        let (env_b, _) = setup();
+        let subs_a = batch(&env_a, 20, 1);
+        let subs_b = batch(&env_b, 20, 1);
+        assert_eq!(in_ctx(&env_a, || store_submissions_batch(&env_a, &subs_a)), Ok(20));
+        in_ctx(&env_b, || subs_b.iter().for_each(|s| store_submission(&env_b, &s).unwrap()));
+
+        let page_a = in_ctx(&env_a, || list_submissions(&env_a, &SubmissionFilter::default(), 0, 50));
+        let page_b = in_ctx(&env_b, || list_submissions(&env_b, &SubmissionFilter::default(), 0, 50));
+        assert_eq!(page_a.items, page_b.items);
+        assert_eq!(page_a.items.len(), 20);
+    }
+
+    #[test]
+    fn test_batch_store_is_idempotent_and_all_or_nothing() {
+        let (env, _) = setup();
+        let subs = batch(&env, 10, 2);
+        in_ctx(&env, || {
+            assert_eq!(store_submissions_batch(&env, &subs), Ok(10));
+            // Replaying the same batch stores nothing new.
+            assert_eq!(store_submissions_batch(&env, &subs), Ok(0));
+
+            // A batch with one conflicting item writes nothing at all.
+            let mut mixed = batch(&env, 5, 3);
+            let mut conflict = subs.get(0).unwrap();
+            conflict.endpoint = Bytes::from_slice(&env, b"https://evil.example");
+            mixed.push_back(conflict);
+            assert_eq!(store_submissions_batch(&env, &mixed), Err(ReportingError::DuplicateSubmission));
+
+            // In-batch duplicate ids are rejected before any write.
+            let mut dup = batch(&env, 3, 4);
+            dup.push_back(dup.get(1).unwrap());
+            assert_eq!(store_submissions_batch(&env, &dup), Err(ReportingError::DuplicateSubmission));
+
+            assert_eq!(
+                store_submissions_batch(&env, &batch(&env, MAX_SUBMISSION_BATCH + 1, 5)),
+                Err(ReportingError::BatchTooLarge)
+            );
+        });
+        assert_eq!(super::test_support::submission_count(&env), 10);
+    }
+
+    #[test]
+    fn test_max_batch_fits_invocation_footprint() {
+        // A full batch must stay within Soroban's per-invocation ledger-entry
+        // limits (the host panics if exceeded).
+        let (env, _) = setup();
+        let subs = batch(&env, MAX_SUBMISSION_BATCH, 6);
+        assert_eq!(in_ctx(&env, || store_submissions_batch(&env, &subs)), Ok(MAX_SUBMISSION_BATCH));
+    }
+
+    #[test]
+    fn test_batch_store_cheaper_than_sequential() {
+        let (env_a, _) = setup();
+        let (env_b, _) = setup();
+        let subs_a = batch(&env_a, 40, 7);
+        let subs_b = batch(&env_b, 40, 7);
+
+        env_a.cost_estimate().budget().reset_unlimited();
+        in_ctx(&env_a, || store_submissions_batch(&env_a, &subs_a).unwrap());
+        let batched = env_a.cost_estimate().budget().cpu_instruction_cost();
+
+        env_b.cost_estimate().budget().reset_unlimited();
+        in_ctx(&env_b, || subs_b.iter().for_each(|s| store_submission(&env_b, &s).unwrap()));
+        let sequential = env_b.cost_estimate().budget().cpu_instruction_cost();
+
+        assert!(batched < sequential, "batched={batched} sequential={sequential}");
+    }
+
+    #[test]
+    fn test_submission_and_ack_ids_match_legacy_encoding() {
+        let env = Env::default();
+        let id = BytesN::from_array(&env, &[0x5Au8; 32]);
+        for n in [0u32, 1, 7, u32::MAX] {
+            let mut legacy = Bytes::new(&env);
+            legacy.append(&id.to_bytes());
+            legacy.extend_from_array(&n.to_le_bytes());
+            assert_eq!(compute_submission_id(&env, &id, n), env.crypto().sha256(&legacy).to_bytes());
+
+            let mut legacy = Bytes::new(&env);
+            legacy.append(&id.to_bytes());
+            legacy.extend_from_array(&u64::from(n).to_le_bytes());
+            assert_eq!(compute_ack_id(&env, &id, u64::from(n)), env.crypto().sha256(&legacy).to_bytes());
+        }
     }
 }

@@ -493,6 +493,8 @@ pub enum ReportingError {
     TrailForkDetected = 221,
     /// An audit trail failed hash-chain verification.
     TrailCorrupted = 222,
+    /// A batch exceeds the per-invocation size limit.
+    BatchTooLarge = 223,
 }
 
 // ─────────────────────────────────────────────────────────────────────────────

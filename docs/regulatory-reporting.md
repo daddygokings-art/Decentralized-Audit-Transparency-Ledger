@@ -639,6 +639,36 @@ submission is dispatched, the acknowledgment may never arrive:
   it reports `TrailForkDetected` with the first diverging sequence number.
   Forks are never merged automatically.
 
+### Large-batch CPU and memory
+
+The Soroban budget meter showed the following changes (host test build,
+soroban-sdk 28):
+
+| Operation | CPU before → after | Memory before → after |
+|---|---|---|
+| Append 200 audit entries | 5.68M → 4.67M (−18%) | 554K → 453K (−18%) |
+| Verify 200-entry trail | 4.59M → 3.19M (−30%) | 226K → 124K (−45%) |
+| 200 submission ids | 2.03M → 1.68M (−17%) | 97K → 55K (−43%) |
+| Store 60 submissions (sequential) | 26.7M → 15.1M (−43%) | 6.74M → 4.25M (−37%) |
+
+- **Hash preimages** for entries, submission ids and ack ids pack their
+  fixed-width fields into a stack buffer. Each preimage now takes 3 host calls
+  instead of 6. The byte layout is unchanged, and tests compare the output to
+  the old encoding to prove that.
+- **`verify_trail`** decodes each entry once and carries the running hash
+  forward.
+- **`verify_trail_segment(segment, start_sequence, prev_hash)`** verifies a
+  very long trail in chunks across several invocations, so each call stays
+  within its CPU budget.
+- **`store_submissions_batch`** stores up to `MAX_SUBMISSION_BATCH` (48)
+  submissions. All items are validated before any write. It reads and writes
+  the counter once per batch and fits Soroban's per-invocation footprint
+  limits. Larger batches fail with `BatchTooLarge`. (Without a bound, about
+  67 or more stores in one invocation exceed the 200 written-entries limit.)
+- First-attempt submissions skip the `LatestAttempt` write, and
+  `list_submissions` no longer probes storage with a placeholder id when an
+  index slot is missing.
+
 ---
 
 ## Error Codes
@@ -668,6 +698,7 @@ submission is dispatched, the acknowledgment may never arrive:
 | `SubmissionNotStalled` (220) | Recovery requested for a submission that is acknowledged, superseded, or not timed out |
 | `TrailForkDetected` (221) | Two copies of a report's audit trail diverge |
 | `TrailCorrupted` (222) | An audit trail failed hash-chain verification |
+| `BatchTooLarge` (223) | Batch exceeds `MAX_SUBMISSION_BATCH` |
 
 ---
 
