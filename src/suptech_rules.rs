@@ -1,8 +1,9 @@
 #![no_std]
 
-use crate::suptech_types::{SupervisionRule, ComplianceAlert, AlertStatus, RegulatoryFramework};
-use soroban_sdk::{contracttype, Address, Bytes, BytesN, Env, Vec};
+use crate::rbac::{RbacManager, Role};
+use crate::suptech_types::{AlertStatus, ComplianceAlert, RegulatoryFramework, SupervisionRule};
 use soroban_sdk::xdr::ToXdr;
+use soroban_sdk::{contracterror, contracttype, Address, Bytes, BytesN, Env, Symbol, Vec};
 
 /// Hard cap on the number of items returned in a single page.
 pub const MAX_PAGE_LIMIT: u32 = 100;
@@ -23,6 +24,67 @@ pub const MAX_RULE_CONDITION_LEN: u32 = 1_024;
 
 /// Maximum allowed length (bytes) for a rule action.
 pub const MAX_RULE_ACTION_LEN: u32 = 1_024;
+
+/// Maximum validator-set size for a rule-proof attestation round.
+pub const MAX_RULE_VALIDATORS: u32 = 32;
+
+/// Maximum proof payload length accepted by the attestation API.
+pub const MAX_RULE_PROOF_LEN: u32 = 64 * 1024;
+
+#[contracterror]
+#[derive(Clone, Copy, Debug, Eq, PartialEq, PartialOrd, Ord)]
+#[repr(u32)]
+pub enum RulesEngineError {
+    Unauthorized = 7401,
+    InvalidValidatorSet = 7402,
+    NotValidator = 7403,
+    InvalidRulesetVersion = 7404,
+    ProofTooLarge = 7405,
+    ValidatorEquivocation = 7406,
+    ConflictingFinalization = 7407,
+    CounterExhausted = 7408,
+}
+
+#[contracttype]
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct RuleValidatorConfig {
+    pub validators: Vec<Address>,
+    pub quorum: u32,
+}
+
+#[contracttype]
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct RuleProofCandidate {
+    pub proof_hash: BytesN<32>,
+    pub approvals: Vec<Address>,
+}
+
+#[contracttype]
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct RuleProofAttestationRound {
+    pub ruleset_id: BytesN<32>,
+    pub ruleset_version: u32,
+    pub validators: Vec<Address>,
+    pub quorum: u32,
+    pub candidates: Vec<RuleProofCandidate>,
+    pub finalized_proof_hash: Option<BytesN<32>>,
+}
+
+#[contracttype]
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub enum RuleAttestationOutcome {
+    Pending(u32),
+    Finalized(u32),
+    AlreadyRecorded(u32),
+    AlreadyFinalized,
+}
+
+#[contracttype]
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub enum RulesEngineStorageKey {
+    ValidatorConfig,
+    AttestationRound(BytesN<32>, u32),
+}
 
 /// Cursor token used for deterministic cursor-based pagination.
 ///
@@ -55,11 +117,7 @@ impl PageLimit {
             return Err("Page limit must be greater than zero");
         }
         Ok(Self {
-            limit: if limit > MAX_PAGE_LIMIT {
-                MAX_PAGE_LIMIT
-            } else {
-                limit
-            },
+            limit: if limit > MAX_PAGE_LIMIT { MAX_PAGE_LIMIT } else { limit },
         })
     }
 
@@ -188,8 +246,7 @@ fn compare_keys(a: &(u64, BytesN<32>), b: &(u64, BytesN<32>)) -> core::cmp::Orde
 
 /// Returns true when `key` sorts strictly after `cursor`.
 fn key_after_cursor(key: &(u32, BytesN<32>), cursor: &PageCursor) -> bool {
-    compare_keys(key, &(cursor.ledger_sequence, cursor.id.clone()))
-        == core::cmp::Ordering::Greater
+    compare_keys(key, &(cursor.ledger_sequence, cursor.id.clone())) == core::cmp::Ordering::Greater
 }
 
 /// Build the next cursor from the last item of a full page.
@@ -262,6 +319,159 @@ pub struct RuleSet {
 pub struct RulesEngine;
 
 impl RulesEngine {
+    /// Configure the validator set used for future proof-attestation rounds.
+    pub fn configure_validators(
+        env: &Env,
+        caller: &Address,
+        validators: Vec<Address>,
+        quorum: u32,
+    ) -> Result<(), RulesEngineError> {
+        RbacManager::require_role_precedence(env, caller, Role::Admin).map_err(|_| RulesEngineError::Unauthorized)?;
+
+        let count = validators.len();
+        if count == 0 || count > MAX_RULE_VALIDATORS || quorum == 0 || quorum > count || quorum <= count / 2 {
+            return Err(RulesEngineError::InvalidValidatorSet);
+        }
+        for i in 0..count {
+            let validator = validators.get_unchecked(i);
+            for j in (i + 1)..count {
+                if validators.get_unchecked(j) == validator {
+                    return Err(RulesEngineError::InvalidValidatorSet);
+                }
+            }
+        }
+
+        env.storage().persistent().set(
+            &RulesEngineStorageKey::ValidatorConfig,
+            &RuleValidatorConfig { validators, quorum },
+        );
+        env.events().publish(
+            (Symbol::new(env, "suptech_rules"), Symbol::new(env, "validators")),
+            (caller.clone(), count, quorum),
+        );
+        Ok(())
+    }
+
+    /// Deterministically bind a proof payload to a rule-set version.
+    pub fn compute_rule_proof_hash(
+        env: &Env,
+        ruleset_id: &BytesN<32>,
+        ruleset_version: u32,
+        proof: &Bytes,
+    ) -> Result<BytesN<32>, RulesEngineError> {
+        if proof.len() > MAX_RULE_PROOF_LEN {
+            return Err(RulesEngineError::ProofTooLarge);
+        }
+        let mut input = Bytes::new(env);
+        input.append(&Bytes::from_slice(env, b"SUPTECH_RULE_PROOF_V1"));
+        input.append(&ruleset_id.to_bytes());
+        input.extend_from_array(&ruleset_version.to_be_bytes());
+        input.append(proof);
+        Ok(env.crypto().sha256(&input))
+    }
+
+    /// Record a validator's authenticated vote for a deterministic proof.
+    ///
+    /// Soroban serializes writes to persistent storage. Each transaction reads
+    /// the latest round, rejects duplicate/equivocating votes, and writes the
+    /// updated round atomically, so concurrent submissions cannot lose votes.
+    pub fn attest_rule_proof(
+        env: &Env,
+        validator: &Address,
+        ruleset_id: &BytesN<32>,
+        ruleset_version: u32,
+        proof: &Bytes,
+    ) -> Result<RuleAttestationOutcome, RulesEngineError> {
+        validator.require_auth();
+        if ruleset_version == 0 {
+            return Err(RulesEngineError::InvalidRulesetVersion);
+        }
+        let config: RuleValidatorConfig = env
+            .storage()
+            .persistent()
+            .get(&RulesEngineStorageKey::ValidatorConfig)
+            .ok_or(RulesEngineError::InvalidValidatorSet)?;
+        let proof_hash = Self::compute_rule_proof_hash(env, ruleset_id, ruleset_version, proof)?;
+        let key = RulesEngineStorageKey::AttestationRound(ruleset_id.clone(), ruleset_version);
+        let mut round = match env.storage().persistent().get(&key) {
+            Some(existing) => existing,
+            None => RuleProofAttestationRound {
+                ruleset_id: ruleset_id.clone(),
+                ruleset_version,
+                validators: config.validators,
+                quorum: config.quorum,
+                candidates: Vec::new(env),
+                finalized_proof_hash: None,
+            },
+        };
+
+        if !round.validators.contains(validator) {
+            return Err(RulesEngineError::NotValidator);
+        }
+
+        if let Some(ref finalized) = round.finalized_proof_hash {
+            return if *finalized == proof_hash {
+                Ok(RuleAttestationOutcome::AlreadyFinalized)
+            } else {
+                Err(RulesEngineError::ConflictingFinalization)
+            };
+        }
+
+        let mut candidate_index = None;
+        for i in 0..round.candidates.len() {
+            let candidate = round.candidates.get_unchecked(i);
+            if candidate.approvals.contains(validator) {
+                return if candidate.proof_hash == proof_hash {
+                    Ok(RuleAttestationOutcome::AlreadyRecorded(candidate.approvals.len()))
+                } else {
+                    Err(RulesEngineError::ValidatorEquivocation)
+                };
+            }
+            if candidate.proof_hash == proof_hash {
+                candidate_index = Some(i);
+            }
+        }
+
+        let mut candidate = match candidate_index {
+            Some(i) => round.candidates.get_unchecked(i),
+            None => RuleProofCandidate {
+                proof_hash: proof_hash.clone(),
+                approvals: Vec::new(env),
+            },
+        };
+        candidate.approvals.push_back(validator.clone());
+        let approvals = candidate.approvals.len();
+        let outcome = if approvals >= round.quorum {
+            round.finalized_proof_hash = Some(proof_hash.clone());
+            env.events().publish(
+                (Symbol::new(env, "suptech_rules"), Symbol::new(env, "proof_finalized")),
+                (round.ruleset_id.clone(), round.ruleset_version, proof_hash, approvals),
+            );
+            RuleAttestationOutcome::Finalized(approvals)
+        } else {
+            RuleAttestationOutcome::Pending(approvals)
+        };
+
+        match candidate_index {
+            Some(i) => round.candidates.set(i, candidate),
+            None => round.candidates.push_back(candidate),
+        }
+        env.storage().persistent().set(&key, &round);
+        Ok(outcome)
+    }
+
+    /// Read the persisted attestation round for a rule-set version.
+    pub fn get_attestation_round(
+        env: &Env,
+        ruleset_id: &BytesN<32>,
+        ruleset_version: u32,
+    ) -> Option<RuleProofAttestationRound> {
+        env.storage().persistent().get(&RulesEngineStorageKey::AttestationRound(
+            ruleset_id.clone(),
+            ruleset_version,
+        ))
+    }
+
     /// Create supervision rule
     pub fn create_rule(
         env: &Env,
@@ -309,12 +519,7 @@ impl RulesEngine {
     }
 
     /// Compute rule ID
-    pub fn compute_rule_id(
-        env: &Env,
-        framework: RegulatoryFramework,
-        name: &Bytes,
-    ) -> BytesN<32> {
-        
+    pub fn compute_rule_id(env: &Env, framework: RegulatoryFramework, name: &Bytes) -> BytesN<32> {
         let mut input = Bytes::new(env);
         input.append(&Bytes::from_slice(env, framework.code().as_bytes()));
         input.append(name);
@@ -323,11 +528,7 @@ impl RulesEngine {
     }
 
     /// Evaluate rule against context
-    pub fn evaluate_rule(
-        env: &Env,
-        rule: &SupervisionRule,
-        context: Bytes,
-    ) -> Result<RuleEvaluation, &'static str> {
+    pub fn evaluate_rule(env: &Env, rule: &SupervisionRule, context: Bytes) -> Result<RuleEvaluation, &'static str> {
         if !rule.is_active {
             return Err("Rule is not active");
         }
@@ -368,12 +569,7 @@ impl RulesEngine {
     }
 
     /// Compute alert ID
-    pub fn compute_alert_id(
-        env: &Env,
-        rule_id: &BytesN<32>,
-        institution: &Address,
-    ) -> BytesN<32> {
-        
+    pub fn compute_alert_id(env: &Env, rule_id: &BytesN<32>, institution: &Address) -> BytesN<32> {
         let mut input = Bytes::new(env);
         input.append(&rule_id.to_bytes());
         input.append(&institution.to_xdr(env));
@@ -412,10 +608,7 @@ impl RulesEngine {
     }
 
     /// Create rule set for framework
-    pub fn create_ruleset(
-        env: &Env,
-        framework: RegulatoryFramework,
-    ) -> Result<RuleSet, &'static str> {
+    pub fn create_ruleset(env: &Env, framework: RegulatoryFramework) -> Result<RuleSet, &'static str> {
         let ruleset_id = Self::compute_ruleset_id(env, framework);
 
         Ok(RuleSet {
@@ -431,7 +624,6 @@ impl RulesEngine {
 
     /// Compute rule set ID
     pub fn compute_ruleset_id(env: &Env, framework: RegulatoryFramework) -> BytesN<32> {
-        
         let mut input = Bytes::new(env);
         input.append(&Bytes::from_slice(env, framework.code().as_bytes()));
         input.append(&Bytes::from_slice(env, b"RULESET"));
@@ -440,10 +632,7 @@ impl RulesEngine {
     }
 
     /// Add rule to set
-    pub fn add_rule_to_set(
-        ruleset: &mut RuleSet,
-        rule_id: BytesN<32>,
-    ) -> Result<(), &'static str> {
+    pub fn add_rule_to_set(ruleset: &mut RuleSet, rule_id: BytesN<32>) -> Result<(), &'static str> {
         if (ruleset.rules.len() as u32) >= MAX_RULES_PER_SET {
             return Err("Rule set at maximum capacity");
         }
@@ -460,10 +649,7 @@ impl RulesEngine {
     }
 
     /// Remove rule from set
-    pub fn remove_rule_from_set(
-        ruleset: &mut RuleSet,
-        rule_id: &BytesN<32>,
-    ) -> Result<(), &'static str> {
+    pub fn remove_rule_from_set(ruleset: &mut RuleSet, rule_id: &BytesN<32>) -> Result<(), &'static str> {
         let mut found = false;
 
         for i in 0..ruleset.rules.len() {
@@ -689,10 +875,7 @@ impl RulesEngine {
     }
 
     /// Get rule statistics
-    pub fn compute_ruleset_stats(
-        ruleset: &RuleSet,
-        rules: &Vec<SupervisionRule>,
-    ) -> RuleSetStatistics {
+    pub fn compute_ruleset_stats(ruleset: &RuleSet, rules: &Vec<SupervisionRule>) -> RuleSetStatistics {
         let total_rules = ruleset.rules.len() as u32;
         let mut active_rules = 0u32;
         let mut avg_severity = 0u32;
@@ -799,15 +982,7 @@ mod tests {
         let condition = Bytes::from_slice(&env, b"amount > 1000000");
         let action = Bytes::from_slice(&env, b"alert");
 
-        let rule = RulesEngine::create_rule(
-            &env,
-            RegulatoryFramework::FSB,
-            name,
-            condition,
-            action,
-            7,
-        )
-        .unwrap();
+        let rule = RulesEngine::create_rule(&env, RegulatoryFramework::FSB, name, condition, action, 7).unwrap();
 
         assert!(rule.is_active);
         assert_eq!(rule.severity, 7);
@@ -820,15 +995,7 @@ mod tests {
         let condition = Bytes::from_slice(&env, b"test");
         let action = Bytes::from_slice(&env, b"alert");
 
-        let rule = RulesEngine::create_rule(
-            &env,
-            RegulatoryFramework::BIS,
-            name,
-            condition,
-            action,
-            5,
-        )
-        .unwrap();
+        let rule = RulesEngine::create_rule(&env, RegulatoryFramework::BIS, name, condition, action, 5).unwrap();
 
         let context = Bytes::from_slice(&env, b"transaction data");
         let eval = RulesEngine::evaluate_rule(&env, &rule, context).unwrap();
@@ -843,22 +1010,12 @@ mod tests {
         let condition = Bytes::from_slice(&env, b"test");
         let action = Bytes::from_slice(&env, b"alert");
 
-        let rule = RulesEngine::create_rule(
-            &env,
-            RegulatoryFramework::ECB,
-            name,
-            condition,
-            action,
-            8,
-        )
-        .unwrap();
+        let rule = RulesEngine::create_rule(&env, RegulatoryFramework::ECB, name, condition, action, 8).unwrap();
 
         let institution = soroban_sdk::Address::generate(&env);
         let supporting = Bytes::from_slice(&env, b"details");
 
-        let alert =
-            RulesEngine::generate_alert_from_rule(&env, &rule, institution, supporting)
-                .unwrap();
+        let alert = RulesEngine::generate_alert_from_rule(&env, &rule, institution, supporting).unwrap();
 
         assert_eq!(alert.severity, 8);
         assert_eq!(alert.status, AlertStatus::New as u32);
@@ -867,12 +1024,76 @@ mod tests {
     #[test]
     fn test_ruleset_creation() {
         let env = soroban_sdk::Env::default();
-        let ruleset =
-            RulesEngine::create_ruleset(&env, RegulatoryFramework::FSB).unwrap();
+        let ruleset = RulesEngine::create_ruleset(&env, RegulatoryFramework::FSB).unwrap();
 
         assert!(ruleset.is_active);
         assert_eq!(ruleset.version, 1);
         assert_eq!(ruleset.rules.len(), 0);
+    }
+
+    #[test]
+    fn validator_proof_attestations_are_race_safe_and_idempotent() {
+        use crate::rbac::RbacManager;
+        use soroban_sdk::testutils::Address as _;
+
+        let env = Env::default();
+        env.mock_all_auths_allowing_non_root_auth();
+        let contract = env.register(crate::AuditLedger, ());
+        let admin = Address::generate(&env);
+        let validators = [
+            Address::generate(&env),
+            Address::generate(&env),
+            Address::generate(&env),
+        ];
+        let mut validator_set = Vec::new(&env);
+        for validator in &validators {
+            validator_set.push_back(validator.clone());
+        }
+        let ruleset_id = BytesN::from_array(&env, &[7; 32]);
+        let proof = Bytes::from_slice(&env, b"canonical proof bytes");
+        let conflicting_proof = Bytes::from_slice(&env, b"different proof");
+
+        env.as_contract(&contract, || {
+            RbacManager::initialize_admin(&env, &admin);
+            RulesEngine::configure_validators(&env, &admin, validator_set, 2).unwrap();
+
+            assert_eq!(
+                RulesEngine::attest_rule_proof(&env, &validators[0], &ruleset_id, 1, &proof,),
+                Ok(RuleAttestationOutcome::Pending(1))
+            );
+            assert_eq!(
+                RulesEngine::attest_rule_proof(&env, &validators[0], &ruleset_id, 1, &proof,),
+                Ok(RuleAttestationOutcome::AlreadyRecorded(1))
+            );
+            assert_eq!(
+                RulesEngine::attest_rule_proof(&env, &validators[1], &ruleset_id, 1, &proof,),
+                Ok(RuleAttestationOutcome::Finalized(2))
+            );
+            assert_eq!(
+                RulesEngine::attest_rule_proof(&env, &validators[2], &ruleset_id, 1, &proof,),
+                Ok(RuleAttestationOutcome::AlreadyFinalized)
+            );
+            assert_eq!(
+                RulesEngine::attest_rule_proof(&env, &validators[2], &ruleset_id, 1, &conflicting_proof,),
+                Err(RulesEngineError::ConflictingFinalization)
+            );
+
+            let round = RulesEngine::get_attestation_round(&env, &ruleset_id, 1).unwrap();
+            assert_eq!(
+                round.finalized_proof_hash,
+                Some(RulesEngine::compute_rule_proof_hash(&env, &ruleset_id, 1, &proof).unwrap())
+            );
+            assert_eq!(round.candidates.get(0).unwrap().approvals.len(), 2);
+
+            assert_eq!(
+                RulesEngine::attest_rule_proof(&env, &validators[0], &ruleset_id, 2, &proof,),
+                Ok(RuleAttestationOutcome::Pending(1))
+            );
+            assert_eq!(
+                RulesEngine::attest_rule_proof(&env, &validators[0], &ruleset_id, 2, &conflicting_proof,),
+                Err(RulesEngineError::ValidatorEquivocation)
+            );
+        });
     }
 
     fn make_log(env: &Env, seed: u8, executed_at: u64) -> RuleExecutionLog {
@@ -905,13 +1126,7 @@ mod tests {
             submitter: None,
         };
         let logs: Vec<RuleExecutionLog> = Vec::new(&env);
-        let res = RulesEngine::query_execution_logs(
-            &env,
-            &logs,
-            &bad,
-            &None,
-            &PageLimit::new(10).unwrap(),
-        );
+        let res = RulesEngine::query_execution_logs(&env, &logs, &bad, &None, &PageLimit::new(10).unwrap());
         assert!(res.is_err());
     }
 
@@ -945,14 +1160,8 @@ mod tests {
         let mut last_seq = 0u32;
 
         loop {
-            let page = RulesEngine::query_execution_logs(
-                &env,
-                &logs,
-                &RuleQueryFilter::none(),
-                &cursor,
-                &limit,
-            )
-            .unwrap();
+            let page =
+                RulesEngine::query_execution_logs(&env, &logs, &RuleQueryFilter::none(), &cursor, &limit).unwrap();
             if page.items.len() == 0 {
                 break;
             }
@@ -1005,14 +1214,8 @@ mod tests {
             status: None,
             submitter: None,
         };
-        let page = RulesEngine::query_execution_logs(
-            &env,
-            &logs,
-            &filter,
-            &None,
-            &PageLimit::new(10).unwrap(),
-        )
-        .unwrap();
+        let page =
+            RulesEngine::query_execution_logs(&env, &logs, &filter, &None, &PageLimit::new(10).unwrap()).unwrap();
         assert_eq!(page.items.len(), 1);
         assert_eq!(page.items.get(0).unwrap().executed_at, 20);
     }
