@@ -1,7 +1,10 @@
 #![allow(dead_code)]
 
 use crate::rbac::{RbacManager, Role};
-use soroban_sdk::{contracterror, contracttype, vec, Address, Bytes, BytesN, Env, String, Symbol, Vec};
+use soroban_sdk::{
+    contracterror, contracttype, panic_with_error, vec, Address, Bytes, BytesN, Env, String, Symbol,
+    Vec,
+};
 
 /// Carbon credit tracking error types
 #[contracterror]
@@ -32,6 +35,8 @@ pub enum CarbonCreditError {
     InvalidTokenization = 3011,
     /// Transfer failed
     TransferFailed = 3012,
+    /// A derived identifier collided with an existing entry
+    IdentifierCollision = 3013,
 }
 
 /// Carbon credit status
@@ -78,6 +83,34 @@ fn emit_carbon_credit_event(env: &Env, event: CarbonCreditEvent) {
         (Symbol::new(env, "carbon"), Symbol::new(env, "credit")),
         event,
     );
+}
+
+/// Sentinel identifier used for "not tokenized" / "rejected" results.
+fn zero_id(env: &Env) -> BytesN<32> {
+    BytesN::from_array(env, &[0u8; 32])
+}
+
+/// Derive a unique, deterministic record identifier for a verification or
+/// audit record.
+///
+/// Binds a domain tag, the credit, the acting validator, the ledger sequence
+/// and timestamp, and the record's position in its log. Two validators
+/// attesting to the same credit in the same ledger therefore always receive
+/// distinct identifiers, and the same inputs always reproduce the same id.
+fn derive_record_id(
+    env: &Env,
+    domain: &[u8],
+    credit_id: &BytesN<32>,
+    actor: &Address,
+    position: u32,
+) -> BytesN<32> {
+    let mut preimage = Bytes::from_slice(env, domain);
+    preimage.append(&Bytes::from_array(env, &credit_id.to_array()));
+    preimage.append(&actor.to_string().to_bytes());
+    preimage.extend_from_slice(&env.ledger().sequence().to_le_bytes());
+    preimage.extend_from_slice(&env.ledger().timestamp().to_le_bytes());
+    preimage.extend_from_slice(&position.to_le_bytes());
+    env.crypto().sha256(&preimage).to_bytes()
 }
 
 /// Renewable energy source types
@@ -254,6 +287,9 @@ pub enum CarbonCreditKey {
     RetiredCount,
     /// Total CO2e retired
     TotalCo2eRetired,
+    /// Marker that `verifier` has already attested to `credit_id`
+    /// (one attestation per validator per credit).
+    Attestation(BytesN<32>, Address),
 }
 
 // ─────────────────────────────────────────────────────────────────────────────
@@ -272,15 +308,34 @@ pub fn issue_carbon_credit(
 ) -> BytesN<32> {
     issuer.require_auth();
     if RbacManager::require_role_min(env, &issuer, Role::Submitter).is_err() {
-        return BytesN::from_array(env, &[0u8; 32]);
+        return zero_id(env);
     }
+
+    // The global issuance counter acts as a monotonic nonce: two issuances by
+    // the same issuer, for the same tonnage, inside the same ledger would
+    // otherwise hash to the same id and silently overwrite each other.
+    let count: u32 = env
+        .storage()
+        .persistent()
+        .get(&CarbonCreditKey::CreditCounter)
+        .unwrap_or(0);
 
     // Deterministic binary preimage (strkey bytes + LE numerics): `format!` and
     // `Display for soroban_sdk::String` are unavailable in the wasm contract build.
     let mut credit_preimage = Bytes::from_slice(env, &carbon_tonnes.to_le_bytes());
     credit_preimage.append(&issuer.to_string().to_bytes());
     credit_preimage.extend_from_slice(&env.ledger().timestamp().to_le_bytes());
+    credit_preimage.extend_from_slice(&count.to_le_bytes());
     let credit_id = env.crypto().sha256(&credit_preimage).to_bytes();
+
+    // Defence in depth: never overwrite an existing credit.
+    if env
+        .storage()
+        .persistent()
+        .has(&CarbonCreditKey::CarbonCredit(credit_id.clone()))
+    {
+        panic_with_error!(env, CarbonCreditError::IdentifierCollision);
+    }
 
     let credit = CarbonCredit {
         credit_id: credit_id.clone(),
@@ -292,7 +347,7 @@ pub fn issue_carbon_credit(
         creation_date: env.ledger().timestamp(),
         retirement_date: None,
         tokenization: Tokenization {
-            token_id: BytesN::from_array(env, &[0u8; 32]),
+            token_id: zero_id(env),
             total_tokens: 0,
             tokens_retired: 0,
             token_owner: Address::from_string(&String::from_str(env, crate::NULL_ACCOUNT)),
@@ -332,11 +387,6 @@ pub fn issue_carbon_credit(
         .set(&CarbonCreditKey::HolderCredits(issuer.clone()), &holder_credits);
 
     // Increment counter
-    let count: u32 = env
-        .storage()
-        .persistent()
-        .get(&CarbonCreditKey::CreditCounter)
-        .unwrap_or(0);
     env.storage()
         .persistent()
         .set(&CarbonCreditKey::CreditCounter, &(count + 1));
@@ -367,14 +417,34 @@ pub fn verify_renewable_energy(
         .get(&CarbonCreditKey::CarbonCredit(credit_id.clone()))
         .unwrap_or_else(|| panic!("Credit not found"));
 
+    // Only freshly issued or already active credits accept attestations. A
+    // late attestation must never resurrect a retired, expired, or disputed
+    // credit back to `Active`.
+    if credit.status != CreditStatus::Issued && credit.status != CreditStatus::Active {
+        return false;
+    }
+
     // Verify energy generation matches
     if credit.renewable_source.energy_generated_mwh != energy_mwh {
         return false;
     }
 
+    // One attestation per validator per credit: a duplicate or replayed
+    // submission is rejected without touching state.
+    let attestation_key = CarbonCreditKey::Attestation(credit_id.clone(), verifier.clone());
+    if env.storage().persistent().has(&attestation_key) {
+        return false;
+    }
+
     // Create verification record
     let verification = VerificationRecord {
-        verification_id: env.crypto().sha256(&Bytes::from_slice(env, b"VERIFY")).to_bytes(),
+        verification_id: derive_record_id(
+            env,
+            b"VERIFY",
+            &credit_id,
+            &verifier,
+            credit.verification_records.len(),
+        ),
         auditor: verifier.clone(),
         audit_date: env.ledger().timestamp(),
         verified_amount: credit.carbon_tonnes,
@@ -385,10 +455,12 @@ pub fn verify_renewable_energy(
 
     credit.verification_records.push_back(verification);
     credit.status = CreditStatus::Active;
+    credit.version += 1;
 
     env.storage()
         .persistent()
         .set(&CarbonCreditKey::CarbonCredit(credit_id.clone()), &credit);
+    env.storage().persistent().set(&attestation_key, &true);
 
     emit_carbon_credit_event(
         env,
@@ -414,7 +486,7 @@ pub fn tokenize_credit(
 ) -> BytesN<32> {
     token_owner.require_auth();
     if RbacManager::require_role_min(env, &token_owner, Role::Submitter).is_err() {
-        return BytesN::from_array(env, &[0u8; 32]);
+        return zero_id(env);
     }
 
     let mut credit: CarbonCredit = env
@@ -423,10 +495,25 @@ pub fn tokenize_credit(
         .get(&CarbonCreditKey::CarbonCredit(credit_id.clone()))
         .unwrap_or_else(|| panic!("Credit not found"));
 
+    // A credit is tokenized at most once, and never after retirement.
+    if credit.tokenization.token_id != zero_id(env) || credit.status == CreditStatus::Retired {
+        return zero_id(env);
+    }
+
+    // Bind the credit id so one owner tokenizing several credits in the same
+    // ledger receives distinct token ids.
     let mut token_preimage = Bytes::from_slice(env, b"TOKEN");
+    token_preimage.append(&Bytes::from_array(env, &credit_id.to_array()));
     token_preimage.append(&token_owner.to_string().to_bytes());
     token_preimage.extend_from_slice(&env.ledger().timestamp().to_le_bytes());
     let token_id = env.crypto().sha256(&token_preimage).to_bytes();
+    if env
+        .storage()
+        .persistent()
+        .has(&CarbonCreditKey::TokenToCreditMapping(token_id.clone()))
+    {
+        panic_with_error!(env, CarbonCreditError::IdentifierCollision);
+    }
 
     let tokenization = Tokenization {
         token_id: token_id.clone(),
@@ -481,6 +568,7 @@ pub fn retire_credit(
     let carbon_tonnes = credit.carbon_tonnes;
     credit.status = CreditStatus::Retired;
     credit.retirement_date = Some(env.ledger().timestamp());
+    credit.version += 1;
 
     env.storage()
         .persistent()
@@ -551,9 +639,10 @@ pub fn transfer_credit(
     }
 
     // Update tokenization owner if applicable
-    if credit.tokenization.token_id != BytesN::from_array(env, &[0u8; 32]) {
+    if credit.tokenization.token_id != zero_id(env) {
         credit.tokenization.token_owner = to.clone();
     }
+    credit.version += 1;
 
     env.storage()
         .persistent()
@@ -610,7 +699,7 @@ pub fn audit_renewable_usage(
     if RbacManager::require_role_min(env, &auditor, Role::Auditor).is_err() {
         // Return a rejected record when the auditor lacks the required role.
         return VerificationRecord {
-            verification_id: BytesN::from_array(env, &[0u8; 32]),
+            verification_id: zero_id(env),
             auditor,
             audit_date: env.ledger().timestamp(),
             verified_amount: 0,
@@ -629,17 +718,26 @@ pub fn audit_renewable_usage(
     let mut issues = Vec::new(env);
     let mut approved = true;
 
-    // Check if measured energy matches recorded
-    if (credit.renewable_source.energy_generated_mwh as i32
-        - measured_energy as i32)
-        .abs() > 100
+    // Check if measured energy matches recorded (`abs_diff` cannot overflow,
+    // unlike the signed subtraction of two u32 values cast to i32).
+    if credit
+        .renewable_source
+        .energy_generated_mwh
+        .abs_diff(measured_energy)
+        > 100
     {
         issues.push_back(Bytes::from_slice(env, b"Energy mismatch"));
         approved = false;
     }
 
+    let mut records: Vec<VerificationRecord> = env
+        .storage()
+        .persistent()
+        .get(&CarbonCreditKey::VerificationRecords(credit_id.clone()))
+        .unwrap_or_else(|| Vec::new(env));
+
     let record = VerificationRecord {
-        verification_id: env.crypto().sha256(&Bytes::from_slice(env, b"AUDIT")).to_bytes(),
+        verification_id: derive_record_id(env, b"AUDIT", &credit_id, &auditor, records.len()),
         auditor: auditor.clone(),
         audit_date: env.ledger().timestamp(),
         verified_amount: credit.carbon_tonnes,
@@ -649,11 +747,6 @@ pub fn audit_renewable_usage(
     };
 
     // Store verification record
-    let mut records: Vec<VerificationRecord> = env
-        .storage()
-        .persistent()
-        .get(&CarbonCreditKey::VerificationRecords(credit_id.clone()))
-        .unwrap_or_else(|| Vec::new(env));
     records.push_back(record.clone());
     env.storage()
         .persistent()
@@ -715,6 +808,7 @@ pub fn register_credit(
     // Update registry registration date
     credit.registry.registry_id = registry_id.clone();
     credit.registry.issuance_date = env.ledger().timestamp();
+    credit.version += 1;
 
     env.storage()
         .persistent()
@@ -784,6 +878,7 @@ pub fn link_to_standard(
 
     let standard_code = standard.clone() as u32;
     credit.registry.compliance_standard = standard;
+    credit.version += 1;
 
     env.storage()
         .persistent()

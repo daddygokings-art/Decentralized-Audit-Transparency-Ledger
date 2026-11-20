@@ -65,6 +65,8 @@ pub mod carbon_credits;
 mod carbon_credits_harness;
 #[cfg(test)]
 mod carbon_credits_tests;
+#[cfg(test)]
+mod carbon_credits_race_tests;
 pub mod esg_reporting;
 pub mod reputation_system;
 pub mod rbac;
