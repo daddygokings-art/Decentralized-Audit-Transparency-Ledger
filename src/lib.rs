@@ -89,6 +89,9 @@ pub mod capacity_planning;
 mod digital_passport_invariant_tests;
 
 #[cfg(test)]
+mod digital_passport_concurrency_tests;
+
+#[cfg(test)]
 mod capacity_planning_tests;
 
 // Operational runbook automation, validation, and execution auditing.
