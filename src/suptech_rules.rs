@@ -42,7 +42,9 @@ pub enum RulesEngineError {
     ProofTooLarge = 7405,
     ValidatorEquivocation = 7406,
     ConflictingFinalization = 7407,
-    CounterExhausted = 7408,
+    ExecutionConflict = 7408,
+    TooManyRules = 7409,
+    RulesetInactive = 7410,
 }
 
 #[contracttype]
@@ -72,6 +74,13 @@ pub struct RuleProofAttestationRound {
 
 #[contracttype]
 #[derive(Clone, Debug, Eq, PartialEq)]
+pub struct RuleExecutionSnapshot {
+    pub request_hash: BytesN<32>,
+    pub evaluations: Vec<RuleEvaluation>,
+}
+
+#[contracttype]
+#[derive(Clone, Debug, Eq, PartialEq)]
 pub enum RuleAttestationOutcome {
     Pending(u32),
     Finalized(u32),
@@ -84,6 +93,7 @@ pub enum RuleAttestationOutcome {
 pub enum RulesEngineStorageKey {
     ValidatorConfig,
     AttestationRound(BytesN<32>, u32),
+    Execution(BytesN<32>),
 }
 
 /// Cursor token used for deterministic cursor-based pagination.
@@ -470,6 +480,92 @@ impl RulesEngine {
             ruleset_id.clone(),
             ruleset_version,
         ))
+    }
+
+    /// Execute a rule set once per request ID and persist its result.
+    ///
+    /// A retry after a client timeout or network partition receives the
+    /// original result without re-running rules. Reusing an ID for different
+    /// inputs is rejected, and storage writes remain atomic with execution.
+    pub fn execute_ruleset_idempotent(
+        env: &Env,
+        request_id: &BytesN<32>,
+        ruleset: &RuleSet,
+        rules: &Vec<SupervisionRule>,
+        context: Bytes,
+    ) -> Result<Vec<RuleEvaluation>, RulesEngineError> {
+        if ruleset.version == 0 {
+            return Err(RulesEngineError::InvalidRulesetVersion);
+        }
+        let request_hash = Self::compute_execution_request_hash(env, ruleset, rules, &context)?;
+        let key = RulesEngineStorageKey::Execution(request_id.clone());
+        if let Some(snapshot) = env.storage().persistent().get::<_, RuleExecutionSnapshot>(&key) {
+            return if snapshot.request_hash == request_hash {
+                Ok(snapshot.evaluations)
+            } else {
+                Err(RulesEngineError::ExecutionConflict)
+            };
+        }
+
+        let evaluations =
+            Self::execute_ruleset(env, ruleset, rules, context).map_err(|_| RulesEngineError::RulesetInactive)?;
+        env.storage().persistent().set(
+            &key,
+            &RuleExecutionSnapshot {
+                request_hash: request_hash.clone(),
+                evaluations: evaluations.clone(),
+            },
+        );
+        env.events().publish(
+            (
+                Symbol::new(env, "suptech_rules"),
+                Symbol::new(env, "execution_completed"),
+            ),
+            (request_id.clone(), request_hash, evaluations.len()),
+        );
+        Ok(evaluations)
+    }
+
+    fn compute_execution_request_hash(
+        env: &Env,
+        ruleset: &RuleSet,
+        rules: &Vec<SupervisionRule>,
+        context: &Bytes,
+    ) -> Result<BytesN<32>, RulesEngineError> {
+        if ruleset.rules.len() > MAX_RULES_PER_SET || rules.len() > MAX_RULES_PER_SET {
+            return Err(RulesEngineError::TooManyRules);
+        }
+
+        let mut input = Bytes::new(env);
+        input.append(&Bytes::from_slice(env, b"SUPTECH_RULE_EXECUTION_V1"));
+        input.append(&ruleset.ruleset_id.to_bytes());
+        input.extend_from_array(&ruleset.framework.to_be_bytes());
+        input.extend_from_array(&ruleset.version.to_be_bytes());
+        input.extend_from_array(&ruleset.created_at.to_be_bytes());
+        input.extend_from_array(&ruleset.updated_at.to_be_bytes());
+        input.extend_from_array(&[u8::from(ruleset.is_active)]);
+        input.extend_from_array(&ruleset.rules.len().to_be_bytes());
+        for rule_id in ruleset.rules.iter() {
+            input.append(&rule_id.to_bytes());
+        }
+        input.extend_from_array(&rules.len().to_be_bytes());
+        for rule in rules.iter() {
+            input.append(&rule.rule_id.to_bytes());
+            input.extend_from_array(&rule.framework.to_be_bytes());
+            input.extend_from_array(&rule.severity.to_be_bytes());
+            input.extend_from_array(&rule.created_at.to_be_bytes());
+            input.extend_from_array(&rule.updated_at.to_be_bytes());
+            input.extend_from_array(&[u8::from(rule.is_active)]);
+            input.extend_from_array(&rule.name.len().to_be_bytes());
+            input.append(&rule.name);
+            input.extend_from_array(&rule.condition.len().to_be_bytes());
+            input.append(&rule.condition);
+            input.extend_from_array(&rule.action.len().to_be_bytes());
+            input.append(&rule.action);
+        }
+        input.extend_from_array(&context.len().to_be_bytes());
+        input.append(context);
+        Ok(env.crypto().sha256(&input))
     }
 
     /// Create supervision rule
@@ -1092,6 +1188,44 @@ mod tests {
             assert_eq!(
                 RulesEngine::attest_rule_proof(&env, &validators[0], &ruleset_id, 2, &conflicting_proof,),
                 Err(RulesEngineError::ValidatorEquivocation)
+            );
+        });
+    }
+
+    #[test]
+    fn interrupted_rule_execution_resumes_from_persisted_result() {
+        let env = Env::default();
+        let contract = env.register(crate::AuditLedger, ());
+        let mut ruleset = RulesEngine::create_ruleset(&env, RegulatoryFramework::FSB).unwrap();
+        let rule = RulesEngine::create_rule(
+            &env,
+            RegulatoryFramework::FSB,
+            Bytes::from_slice(&env, b"Rule"),
+            Bytes::from_slice(&env, b"amount > 100"),
+            Bytes::from_slice(&env, b"alert"),
+            7,
+        )
+        .unwrap();
+        RulesEngine::add_rule_to_set(&mut ruleset, rule.rule_id.clone()).unwrap();
+        let mut rules = Vec::new(&env);
+        rules.push_back(rule);
+        let request_id = BytesN::from_array(&env, &[9; 32]);
+        let context = Bytes::from_slice(&env, b"transaction context");
+
+        env.as_contract(&contract, || {
+            let first =
+                RulesEngine::execute_ruleset_idempotent(&env, &request_id, &ruleset, &rules, context.clone()).unwrap();
+            let retry = RulesEngine::execute_ruleset_idempotent(&env, &request_id, &ruleset, &rules, context).unwrap();
+            assert_eq!(retry, first);
+            assert_eq!(
+                RulesEngine::execute_ruleset_idempotent(
+                    &env,
+                    &request_id,
+                    &ruleset,
+                    &rules,
+                    Bytes::from_slice(&env, b"different context"),
+                ),
+                Err(RulesEngineError::ExecutionConflict)
             );
         });
     }
