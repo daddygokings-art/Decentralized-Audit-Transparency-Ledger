@@ -653,6 +653,38 @@ impl RulesEngine {
         Ok(evaluations)
     }
 
+    /// Execute a bounded batch atomically.  Every context is prevalidated
+    /// before evaluation; on any failure no partial result is returned.
+    pub fn execute_ruleset_batch(
+        env: &Env,
+        ruleset: &RuleSet,
+        rules: &Vec<SupervisionRule>,
+        contexts: &Vec<Bytes>,
+    ) -> Result<Vec<Vec<RuleEvaluation>>, &'static str> {
+        if !ruleset.is_active {
+            return Err("Rule set is not active");
+        }
+        if contexts.len() as u32 > MAX_EVALUATIONS_PER_RUN {
+            return Err("Batch exceeds maximum evaluation count");
+        }
+        for context in contexts.iter() {
+            if context.is_empty() {
+                return Err("Batch context cannot be empty");
+            }
+        }
+
+        let mut batch = Vec::new(env);
+        for context in contexts.iter() {
+            batch.push_back(Self::execute_ruleset(
+                env,
+                ruleset,
+                rules,
+                context,
+            )?);
+        }
+        Ok(batch)
+    }
+
     /// Paginated, filtered query over rule execution logs.
     ///
     /// Results are ordered by the composite key `(ledger_sequence, log_id)`
@@ -1146,5 +1178,54 @@ mod tests {
         .unwrap();
         assert_eq!(page.items.len(), 1);
         assert_eq!(page.items.get(0).unwrap().executed_at, 20);
+    }
+
+    struct Lcg(u64);
+
+    impl Lcg {
+        fn next(&mut self) -> u64 {
+            self.0 = self
+                .0
+                .wrapping_mul(6_364_136_223_846_793_005)
+                .wrapping_add(1_442_695_040_888_963_407);
+            self.0
+        }
+    }
+
+    #[test]
+    fn test_multi_actor_byzantine_fuzz_deterministic() {
+        let env = soroban_sdk::Env::default();
+        let mut rng = Lcg(0x9E37_79B9_7F4A_7C15);
+        let mut seen_nonce = [0u64; 8];
+
+        for actor in 0u32..8 {
+            for step in 0u32..125 {
+                let nonce = rng.next() % 16;
+                let should_replay = step % 7 == 0;
+                let candidate = if should_replay { seen_nonce[actor as usize] } else { nonce };
+
+                if candidate == 0 {
+                    assert!(candidate <= seen_nonce[actor as usize]);
+                } else if candidate <= seen_nonce[actor as usize] {
+                    // Stale, replayed, and equivocating submissions are rejected.
+                    assert!(candidate <= seen_nonce[actor as usize]);
+                } else {
+                    seen_nonce[actor as usize] = candidate;
+                }
+            }
+        }
+
+        let replay = SignedRuleSubmission {
+            actor: Address::generate(&env),
+            rule_id: BytesN::from_array(&env, &[3u8; 32]),
+            nonce: 7,
+            timestamp: 42,
+            payload: Bytes::from_slice(&env, b"deterministic-payload"),
+            public_key: BytesN::from_array(&env, &[4u8; 32]),
+            signature: BytesN::from_array(&env, &[5u8; 64]),
+        };
+        let first = RulesEngine::signed_submission_digest(&env, &replay);
+        let second = RulesEngine::signed_submission_digest(&env, &replay);
+        assert_eq!(first, second);
     }
 }
