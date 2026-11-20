@@ -136,6 +136,47 @@ mod tests {
     }
 
     #[test]
+    fn test_simultaneous_validator_attestation_is_duplicate_safe() {
+        let env = Env::default();
+        let contract_id = env.register(ConfidentialEventLedger, ());
+        let client = ConfidentialEventLedgerClient::new(&env, &contract_id);
+
+        let admin = Address::generate(&env);
+        let submitter = Address::generate(&env);
+        bootstrap(&env, &admin, &submitter);
+        client.initialize(&admin);
+
+        let payload = Bytes::from_slice(&env, b"race-safe-payload");
+        let event_id = client
+            .log_confidential_event(
+                &submitter,
+                &Symbol::new(&env, "race"),
+                &payload,
+                &AccessControlPolicy::Public,
+                &Bytes::from_slice(&env, b"deterministic-zk-proof"),
+                &BytesN::from_array(&env, &[42u8; 32]),
+            )
+            .unwrap();
+        let payload_hash = env.crypto().sha256(&payload);
+
+        let attestation = client
+            .attest_confidential_event(&admin, &event_id, &payload_hash)
+            .unwrap();
+        assert_eq!(attestation.validator, admin);
+        assert_eq!(
+            client.get_confidential_attestation(&event_id, &admin),
+            Some(attestation)
+        );
+        assert!(client
+            .try_attest_confidential_event(
+                &admin,
+                &event_id,
+                &payload_hash,
+            )
+            .is_err());
+    }
+
+    #[test]
     fn test_confidential_analytics_aggregation() {
         let env = Env::default();
         let contract_id = env.register(ConfidentialEventLedger, ());
