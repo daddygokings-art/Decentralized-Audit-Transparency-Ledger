@@ -58,6 +58,7 @@ pub fn compute_entry_hash(
 /// (or `[0u8;32]` if the trail is empty), forming an unbroken hash chain.
 ///
 /// Returns the newly created entry.
+#[allow(clippy::too_many_arguments)]
 pub fn append_entry(
     env: &Env,
     trail: &mut Vec<ReportingAuditEntry>,
@@ -306,7 +307,7 @@ pub fn record_rejected(
     ctx.extend_from_slice(b"reason=");
     ctx.append(&reason);
     ctx.extend_from_slice(b"\nerror_count=");
-    ctx.extend_from_array(&(error_codes.len() as u32).to_le_bytes());
+    ctx.extend_from_array(&error_codes.len().to_le_bytes());
     ctx.extend_from_slice(b"\n");
 
     append_entry(
@@ -380,6 +381,7 @@ pub fn record_overdue(
 #[cfg(test)]
 mod tests {
     use super::*;
+    use soroban_sdk::testutils::Address as _;
     use soroban_sdk::{Address, Bytes, BytesN, Env, Vec};
 
     fn report_id(env: &Env) -> BytesN<32> {

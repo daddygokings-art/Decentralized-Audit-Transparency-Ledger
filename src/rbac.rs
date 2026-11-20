@@ -245,9 +245,11 @@ impl RbacManager {
         previous: i128,
         current: i128,
     ) -> soroban_sdk::BytesN<32> {
+        use soroban_sdk::xdr::ToXdr;
+
         let mut buf = soroban_sdk::Bytes::new(env);
-        buf.append(&caller.clone().to_string().into_bytes());
-        buf.append(&operation.clone().to_string().into_bytes());
+        buf.append(&caller.clone().to_xdr(env));
+        buf.append(&operation.clone().to_xdr(env));
         buf.extend_from_array(&previous.to_be_bytes());
         buf.extend_from_array(&current.to_be_bytes());
         env.crypto().sha256(&buf).into()
