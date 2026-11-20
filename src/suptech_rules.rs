@@ -25,6 +25,26 @@ pub enum SuptechRulesError {
     BatchRollback = 9,
 }
 
+/// Signed, nonce-bearing submission used for replay-safe rule evaluation.
+#[contracttype]
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct SignedRuleSubmission {
+    pub actor: Address,
+    pub rule_id: BytesN<32>,
+    pub nonce: u64,
+    pub timestamp: u64,
+    pub payload: Bytes,
+    pub public_key: BytesN<32>,
+    pub signature: BytesN<64>,
+}
+
+#[contracttype]
+#[derive(Clone, Debug, Eq, PartialEq)]
+enum ReplayKey {
+    Submission(BytesN<32>),
+    Nonce(Address),
+}
+
 /// Hard cap on the number of items returned in a single page.
 pub const MAX_PAGE_LIMIT: u32 = 100;
 
@@ -309,6 +329,73 @@ impl RulesEngine {
             operation,
             error as u32
         );
+    }
+
+    /// Deterministically derive the canonical bytes signed for a submission.
+    pub fn signed_submission_digest(
+        env: &Env,
+        submission: &SignedRuleSubmission,
+    ) -> BytesN<32> {
+        let mut input = Bytes::new(env);
+        input.append(&Bytes::from_slice(env, b"SUPTECH-RULES-V1"));
+        input.append(&submission.actor.to_xdr(env));
+        input.append(&submission.rule_id.to_bytes());
+        input.append(&Bytes::from_slice(env, &submission.nonce.to_le_bytes()));
+        input.append(&Bytes::from_slice(env, &submission.timestamp.to_le_bytes()));
+        input.append(&submission.payload);
+        env.crypto().sha256(&input)
+    }
+
+    /// Return the highest nonce accepted for `actor`.
+    pub fn get_actor_nonce(env: &Env, actor: &Address) -> u64 {
+        env.storage()
+            .instance()
+            .get(&ReplayKey::Nonce(actor.clone()))
+            .unwrap_or(0)
+    }
+
+    /// Verify an Ed25519 signature and atomically consume its nonce/digest.
+    /// Replays, stale nonces, and decreasing nonces leave state unchanged.
+    pub fn verify_signed_submission(
+        env: &Env,
+        submission: &SignedRuleSubmission,
+    ) -> Result<BytesN<32>, SuptechRulesError> {
+        if submission.nonce == 0 || submission.payload.is_empty() {
+            Self::emit_error_event(env, "signed_submission", SuptechRulesError::InvalidInput);
+            return Err(SuptechRulesError::InvalidInput);
+        }
+
+        let digest = Self::signed_submission_digest(env, submission);
+        if env
+            .storage()
+            .instance()
+            .has(&ReplayKey::Submission(digest.clone()))
+        {
+            Self::emit_error_event(env, "signed_submission", SuptechRulesError::ReplayDetected);
+            return Err(SuptechRulesError::ReplayDetected);
+        }
+
+        let last_nonce = Self::get_actor_nonce(env, &submission.actor);
+        if submission.nonce <= last_nonce {
+            Self::emit_error_event(env, "signed_submission", SuptechRulesError::ReplayDetected);
+            return Err(SuptechRulesError::ReplayDetected);
+        }
+
+        env.crypto().ed25519_verify(
+            &submission.public_key,
+            &digest.clone().into(),
+            &submission.signature,
+        );
+
+        env.storage()
+            .instance()
+            .set(&ReplayKey::Submission(digest.clone()), &true);
+        env.storage()
+            .instance()
+            .set(&ReplayKey::Nonce(submission.actor.clone()), &submission.nonce);
+
+        Self::emit_audit_event(env, "signed_submission", "accepted", &digest);
+        Ok(digest)
     }
 
     /// Create supervision rule
