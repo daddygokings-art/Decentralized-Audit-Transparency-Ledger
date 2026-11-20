@@ -1,5 +1,3 @@
-cargo-features = ["trim-paths"]
-
 [package]
 name = "audit-ledger"
 version = "0.1.0"
@@ -125,9 +123,6 @@ lto = "fat"
 
 # [source.vendored-sources]
 # directory = "vendor"
-
-[net]
-offline = true
 
 # [patch.crates-io]
 # soroban-sdk = { version = "27.0.6" }
