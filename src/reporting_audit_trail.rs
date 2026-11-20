@@ -8,8 +8,8 @@
 //! Hash chain:
 //!
 //! ```text
-//! entry[0].entry_hash = sha256(report_id || action || actor || timestamp || context || [0;32])
-//! entry[n].entry_hash = sha256(report_id || action || actor || timestamp || context || entry[n-1].entry_hash)
+//! entry[0].entry_hash = env.crypto().sha256(report_id || action || actor || timestamp || context || [0;32])
+//! entry[n].entry_hash = env.crypto().sha256(report_id || action || actor || timestamp || context || entry[n-1].entry_hash)
 //! ```
 //!
 //! Verifying the chain requires only the sequence of entries — no trusted

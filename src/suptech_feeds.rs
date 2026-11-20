@@ -128,7 +128,7 @@ impl FeedManager {
         input.append(&Bytes::from_slice(env, feed_type.as_str().as_bytes()));
         input.append(&Bytes::from_slice(env, &env.ledger().timestamp().to_le_bytes()));
 
-        env.crypto().sha256(&input).to_bytes()
+        env.crypto().sha256(&input)
     }
 
     /// Publish data point to feed
@@ -167,7 +167,7 @@ impl FeedManager {
         input.append(data);
         input.append(&Bytes::from_slice(env, &timestamp.to_le_bytes()));
 
-        env.crypto().sha256(&input).to_bytes()
+        env.crypto().sha256(&input)
     }
 
     /// Verify data freshness
@@ -212,7 +212,7 @@ impl FeedManager {
         input.append(&feed_id.to_bytes());
         input.append(&subscriber.to_xdr(env));
 
-        env.crypto().sha256(&input).to_bytes()
+        env.crypto().sha256(&input)
     }
 
     /// Record data point receipt
@@ -308,7 +308,23 @@ impl FeedManager {
     ) -> BytesN<32> {
         
         let mut input = Bytes::new(env);
-        input.append(&address.to_xdr(env));
-        input.append(&Bytes::from_slice(env, b"PUBLISH
+        input.append(&Bytes::from_slice(env, address.to_xdr().as_ref()));
+        input.append(&Bytes::from_slice(env, b"PUBLISHER"));
+
+        env.crypto().sha256(&input)
+    }
+
+    /// Deactivate feed
+    pub fn deactivate_feed(feed: &mut DataFeed) {
+        feed.is_active = false;
+    }
+
+    /// Reactivate feed
+    pub fn reactivate_feed(feed: &mut DataFeed, current_time: u64) -> Result<(), &'static str> {
+        feed.is_active = true;
+        feed.last_updated = current_time;
+        Ok(())
+    }
+}
 
 /* … truncated 3093 chars — edit only what you need near the top … */
