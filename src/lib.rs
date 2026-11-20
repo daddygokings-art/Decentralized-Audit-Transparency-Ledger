@@ -61,6 +61,12 @@ pub mod supply_chain;
 pub mod rbac;
 pub mod digital_passport;
 pub mod carbon_credits;
+#[cfg(test)]
+mod carbon_credits_harness;
+#[cfg(test)]
+mod carbon_credits_tests;
+#[cfg(test)]
+mod carbon_credits_race_tests;
 pub mod esg_reporting;
 pub mod reputation_system;
 pub mod rbac;

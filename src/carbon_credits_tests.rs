@@ -1,22 +1,16 @@
 #[cfg(test)]
 mod tests {
-    use crate::carbon_credits::*;
-    use crate::rbac::{RbacManager, Role};
-    use soroban_sdk::{bytes, vec, Address, Bytes, BytesN, Env, Symbol};
-
-    /// Bootstrap an admin role and grant `target` the given `role`.
-    fn setup_rbac(env: &Env, admin: &Address, target: &Address, role: Role) {
-        env.mock_all_auths();
-        RbacManager::initialize_admin(env, admin);
-        RbacManager::set_role(env, admin, target, role).unwrap();
-    }
+    use crate::carbon_credits_harness::*;
+    use crate::rbac::Role;
+    use soroban_sdk::testutils::Address as _;
+    use soroban_sdk::{vec, Address, Bytes, BytesN, Env, Symbol};
 
     /// Helper to create renewable energy source
     fn create_test_renewable(env: &Env, energy_mwh: u32) -> RenewableEnergySource {
         RenewableEnergySource {
             source_type: RenewableEnergyType::Solar,
-            facility_id: bytes!(env, b"SOL-001"),
-            location: bytes!(env, b"California"),
+            facility_id: Bytes::from_slice(env, b"SOL-001"),
+            location: Bytes::from_slice(env, b"California"),
             capacity_mw: 50,
             energy_generated_mwh: energy_mwh,
             verification_date: env.ledger().timestamp(),
@@ -29,10 +23,10 @@ mod tests {
         let now = env.ledger().timestamp();
         Offset {
             offset_type: Symbol::new(env, "reforestation"),
-            project_id: bytes!(env, b"REFOR-001"),
+            project_id: Bytes::from_slice(env, b"REFOR-001"),
             tonnes_co2e: 100,
-            project_location: bytes!(env, b"Brazil"),
-            verification_body: Address::random(env),
+            project_location: Bytes::from_slice(env, b"Brazil"),
+            verification_body: Address::generate(env),
             verification_date: now,
             expiration_date: now + (10 * 365 * 86400),
         }
@@ -41,9 +35,9 @@ mod tests {
     /// Helper to create registry entry
     fn create_test_registry(env: &Env, verifier: Address) -> RegistryEntry {
         RegistryEntry {
-            registry_id: bytes!(env, b"REG-001"),
-            registry_name: bytes!(env, b"Verified Carbon Standard"),
-            registry_url: bytes!(env, b"https://vcs.org"),
+            registry_id: Bytes::from_slice(env, b"REG-001"),
+            registry_name: Bytes::from_slice(env, b"Verified Carbon Standard"),
+            registry_url: Bytes::from_slice(env, b"https://vcs.org"),
             issuance_date: env.ledger().timestamp(),
             verified_by: verifier,
             compliance_standard: ComplianceStandard::Vcs,
@@ -53,12 +47,12 @@ mod tests {
     /// Test 1: Issue carbon credit
     #[test]
     fn test_issue_carbon_credit() {
-        let env = Env::default();
-        let issuer = Address::random(&env);
-        let admin = Address::random(&env);
-        let verifier = Address::random(&env);
+        let env = setup_env();
+        let issuer = Address::generate(&env);
+        let admin = Address::generate(&env);
+        let verifier = Address::generate(&env);
 
-        setup_rbac(&env, &admin, &issuer, &Role::Submitter);
+        setup_rbac(&env, &admin, &issuer, Role::Submitter);
 
         let credit_id = issue_carbon_credit(
             &env,
@@ -70,7 +64,7 @@ mod tests {
             ComplianceStandard::Vcs,
         );
 
-        assert!(!credit_id.to_vec().is_empty());
+        assert!(!credit_id.to_array().iter().all(|b| *b == 0));
 
         let credit = get_credit_details(&env, credit_id);
         assert_eq!(credit.carbon_tonnes, 100);
@@ -80,13 +74,13 @@ mod tests {
     /// Test 2: Verify renewable energy
     #[test]
     fn test_verify_renewable_energy() {
-        let env = Env::default();
-        let issuer = Address::random(&env);
-        let verifier = Address::random(&env);
-        let admin = Address::random(&env);
+        let env = setup_env();
+        let issuer = Address::generate(&env);
+        let verifier = Address::generate(&env);
+        let admin = Address::generate(&env);
 
-        setup_rbac(&env, &admin, &issuer, &Role::Submitter);
-        setup_rbac(&env, &admin, &verifier, &Role::Auditor);
+        setup_rbac(&env, &admin, &issuer, Role::Submitter);
+        setup_rbac(&env, &admin, &verifier, Role::Auditor);
 
         let credit_id = issue_carbon_credit(
             &env,
@@ -108,7 +102,7 @@ mod tests {
     /// Test 3: Calculate offset
     #[test]
     fn test_calculate_offset() {
-        let env = Env::default();
+        let env = setup_env();
 
         let offset = calculate_offset(&env, 1000);
         assert_eq!(offset, 500); // 1000 MWh * 0.5 = 500 tonnes
@@ -117,14 +111,14 @@ mod tests {
     /// Test 4: Tokenize credit
     #[test]
     fn test_tokenize_credit() {
-        let env = Env::default();
-        let issuer = Address::random(&env);
-        let owner = Address::random(&env);
-        let verifier = Address::random(&env);
-        let admin = Address::random(&env);
+        let env = setup_env();
+        let issuer = Address::generate(&env);
+        let owner = Address::generate(&env);
+        let verifier = Address::generate(&env);
+        let admin = Address::generate(&env);
 
-        setup_rbac(&env, &admin, &issuer, &Role::Submitter);
-        setup_rbac(&env, &admin, &owner, &Role::Submitter);
+        setup_rbac(&env, &admin, &issuer, Role::Submitter);
+        setup_rbac(&env, &admin, &owner, Role::Submitter);
 
         let credit_id = issue_carbon_credit(
             &env,
@@ -137,21 +131,21 @@ mod tests {
         );
 
         let token_id = tokenize_credit(&env, credit_id.clone(), owner, 1000, 15);
-        assert!(!token_id.to_vec().is_empty());
+        assert_ne!(token_id, BytesN::from_array(&env, &[0u8; 32]));
 
         let credit = get_credit_details(&env, credit_id);
-        assert_ne!(credit.tokenization.token_id, BytesN::from_array(&env, [0u8; 32]));
+        assert_ne!(credit.tokenization.token_id, BytesN::from_array(&env, &[0u8; 32]));
     }
 
     /// Test 5: Retire credit
     #[test]
     fn test_retire_credit() {
-        let env = Env::default();
-        let issuer = Address::random(&env);
-        let verifier = Address::random(&env);
-        let admin = Address::random(&env);
+        let env = setup_env();
+        let issuer = Address::generate(&env);
+        let verifier = Address::generate(&env);
+        let admin = Address::generate(&env);
 
-        setup_rbac(&env, &admin, &issuer, &Role::Submitter);
+        setup_rbac(&env, &admin, &issuer, Role::Submitter);
 
         let credit_id = issue_carbon_credit(
             &env,
@@ -163,7 +157,7 @@ mod tests {
             ComplianceStandard::Vcs,
         );
 
-        let retired = retire_credit(&env, issuer.clone(), credit_id.clone(), bytes!(env, b"Used for sustainability"));
+        let retired = retire_credit(&env, issuer.clone(), credit_id.clone(), Bytes::from_slice(&env, b"Used for sustainability"));
         assert!(retired);
 
         let status = get_credit_status(&env, credit_id);
@@ -173,16 +167,16 @@ mod tests {
     /// Test 6: Check retirement status
     #[test]
     fn test_check_retirement_status() {
-        let env = Env::default();
-        let issuer = Address::random(&env);
-        let verifier = Address::random(&env);
-        let admin = Address::random(&env);
+        let env = setup_env();
+        let issuer = Address::generate(&env);
+        let verifier = Address::generate(&env);
+        let admin = Address::generate(&env);
 
-        setup_rbac(&env, &admin, &issuer, &Role::Submitter);
+        setup_rbac(&env, &admin, &issuer, Role::Submitter);
 
         let credit_id = issue_carbon_credit(
             &env,
-            issuer,
+            issuer.clone(),
             100,
             create_test_renewable(&env, 200),
             create_test_offset(&env),
@@ -190,7 +184,7 @@ mod tests {
             ComplianceStandard::Vcs,
         );
 
-        retire_credit(&env, issuer.clone(), credit_id.clone(), bytes!(env, b"Retirement"));
+        retire_credit(&env, issuer.clone(), credit_id.clone(), Bytes::from_slice(&env, b"Retirement"));
 
         let is_retired = check_retirement_status(&env, credit_id);
         assert!(is_retired);
@@ -199,13 +193,13 @@ mod tests {
     /// Test 7: Transfer credit
     #[test]
     fn test_transfer_credit() {
-        let env = Env::default();
-        let issuer = Address::random(&env);
-        let new_holder = Address::random(&env);
-        let verifier = Address::random(&env);
-        let admin = Address::random(&env);
+        let env = setup_env();
+        let issuer = Address::generate(&env);
+        let new_holder = Address::generate(&env);
+        let verifier = Address::generate(&env);
+        let admin = Address::generate(&env);
 
-        setup_rbac(&env, &admin, &issuer, &Role::Submitter);
+        setup_rbac(&env, &admin, &issuer, Role::Submitter);
 
         let credit_id = issue_carbon_credit(
             &env,
@@ -227,19 +221,18 @@ mod tests {
     /// Test 8: Verify sustainability claim
     #[test]
     fn test_verify_sustainability_claim() {
-        let env = Env::default();
-        env.mock_all_auths();
+        let env = setup_env();
 
-        let verifier = Address::random(&env);
+        let verifier = Address::generate(&env);
 
         let mut evidence = vec![&env];
-        evidence.push_back(bytes!(env, b"https://evidence.org/report1"));
+        evidence.push_back(Bytes::from_slice(&env, b"https://evidence.org/report1"));
 
         let claim = SustainabilityClaim {
-            claim_id: bytes!(env, b"CLAIM-001"),
-            claimant: Address::random(&env),
+            claim_id: Bytes::from_slice(&env, b"CLAIM-001"),
+            claimant: Address::generate(&env),
             claim_type: Symbol::new(&env, "carbon_neutral"),
-            claim_description: bytes!(env, b"Achieved carbon neutrality through offsets"),
+            claim_description: Bytes::from_slice(&env, b"Achieved carbon neutrality through offsets"),
             claimed_reduction: 5000,
             supporting_evidence: evidence,
             claim_date: env.ledger().timestamp(),
@@ -252,14 +245,14 @@ mod tests {
     /// Test 9: Audit renewable usage
     #[test]
     fn test_audit_renewable_usage() {
-        let env = Env::default();
-        let issuer = Address::random(&env);
-        let auditor = Address::random(&env);
-        let verifier = Address::random(&env);
-        let admin = Address::random(&env);
+        let env = setup_env();
+        let issuer = Address::generate(&env);
+        let auditor = Address::generate(&env);
+        let verifier = Address::generate(&env);
+        let admin = Address::generate(&env);
 
-        setup_rbac(&env, &admin, &issuer, &Role::Submitter);
-        setup_rbac(&env, &admin, &auditor, &Role::Auditor);
+        setup_rbac(&env, &admin, &issuer, Role::Submitter);
+        setup_rbac(&env, &admin, &auditor, Role::Auditor);
 
         let credit_id = issue_carbon_credit(
             &env,
@@ -278,11 +271,11 @@ mod tests {
     /// Test 10: Verify offset authenticity
     #[test]
     fn test_verify_offset_authenticity() {
-        let env = Env::default();
-        env.mock_all_auths();
-
-        let issuer = Address::random(&env);
-        let verifier_addr = Address::random(&env);
+        let env = setup_env();
+        let issuer = Address::generate(&env);
+        let verifier_addr = Address::generate(&env);
+        let admin = Address::generate(&env);
+        setup_rbac(&env, &admin, &issuer, Role::Submitter);
 
         let mut offset = create_test_offset(&env);
         offset.verification_body = verifier_addr.clone();
@@ -304,12 +297,12 @@ mod tests {
     /// Test 11: Register credit
     #[test]
     fn test_register_credit() {
-        let env = Env::default();
-        let issuer = Address::random(&env);
-        let verifier = Address::random(&env);
-        let admin = Address::random(&env);
+        let env = setup_env();
+        let issuer = Address::generate(&env);
+        let verifier = Address::generate(&env);
+        let admin = Address::generate(&env);
 
-        setup_rbac(&env, &admin, &issuer, &Role::Submitter);
+        setup_rbac(&env, &admin, &issuer, Role::Submitter);
 
         let credit_id = issue_carbon_credit(
             &env,
@@ -321,21 +314,21 @@ mod tests {
             ComplianceStandard::Vcs,
         );
 
-        let registered = register_credit(&env, issuer.clone(), credit_id, bytes!(env, b"REG-001"));
+        let registered = register_credit(&env, issuer.clone(), credit_id, Bytes::from_slice(&env, b"REG-001"));
         assert!(registered);
     }
 
     /// Test 12: Update registry
     #[test]
     fn test_update_registry() {
-        let env = Env::default();
-        let issuer = Address::random(&env);
-        let verifier1 = Address::random(&env);
-        let verifier2 = Address::random(&env);
-        let admin = Address::random(&env);
+        let env = setup_env();
+        let issuer = Address::generate(&env);
+        let verifier1 = Address::generate(&env);
+        let verifier2 = Address::generate(&env);
+        let admin = Address::generate(&env);
 
-        setup_rbac(&env, &admin, &issuer, &Role::Submitter);
-        setup_rbac(&env, &admin, &verifier2, &Role::Admin);
+        setup_rbac(&env, &admin, &issuer, Role::Submitter);
+        setup_rbac(&env, &admin, &verifier2, Role::Admin);
 
         let credit_id = issue_carbon_credit(
             &env,
@@ -347,20 +340,20 @@ mod tests {
             ComplianceStandard::Vcs,
         );
 
-        register_credit(&env, issuer.clone(), credit_id, bytes!(env, b"REG-001"));
-        let updated = update_registry(&env, bytes!(env, b"REG-001"), verifier2);
+        register_credit(&env, issuer.clone(), credit_id, Bytes::from_slice(&env, b"REG-001"));
+        let updated = update_registry(&env, Bytes::from_slice(&env, b"REG-001"), verifier2);
         assert!(updated);
     }
 
     /// Test 13: Link to standard
     #[test]
     fn test_link_to_standard() {
-        let env = Env::default();
-        let issuer = Address::random(&env);
-        let verifier = Address::random(&env);
-        let admin = Address::random(&env);
+        let env = setup_env();
+        let issuer = Address::generate(&env);
+        let verifier = Address::generate(&env);
+        let admin = Address::generate(&env);
 
-        setup_rbac(&env, &admin, &issuer, &Role::Submitter);
+        setup_rbac(&env, &admin, &issuer, Role::Submitter);
 
         let credit_id = issue_carbon_credit(
             &env,
@@ -379,13 +372,13 @@ mod tests {
     /// Test 14: Verify registry compliance
     #[test]
     fn test_verify_registry_compliance() {
-        let env = Env::default();
-        let issuer = Address::random(&env);
-        let verifier = Address::random(&env);
-        let admin = Address::random(&env);
+        let env = setup_env();
+        let issuer = Address::generate(&env);
+        let verifier = Address::generate(&env);
+        let admin = Address::generate(&env);
 
-        setup_rbac(&env, &admin, &issuer, &Role::Submitter);
-        setup_rbac(&env, &admin, &verifier, &Role::Auditor);
+        setup_rbac(&env, &admin, &issuer, Role::Submitter);
+        setup_rbac(&env, &admin, &verifier, Role::Auditor);
 
         let credit_id = issue_carbon_credit(
             &env,
@@ -398,7 +391,7 @@ mod tests {
         );
 
         verify_renewable_energy(&env, credit_id.clone(), verifier, 200);
-        register_credit(&env, issuer.clone(), credit_id.clone(), bytes!(env, b"REG-001"));
+        register_credit(&env, issuer.clone(), credit_id.clone(), Bytes::from_slice(&env, b"REG-001"));
 
         let compliant = verify_registry_compliance(&env, credit_id);
         assert!(compliant);
@@ -407,11 +400,11 @@ mod tests {
     /// Test 15: Calculate carbon reduction
     #[test]
     fn test_calculate_carbon_reduction() {
-        let env = Env::default();
-        env.mock_all_auths();
-
-        let issuer = Address::random(&env);
-        let verifier = Address::random(&env);
+        let env = setup_env();
+        let issuer = Address::generate(&env);
+        let verifier = Address::generate(&env);
+        let admin = Address::generate(&env);
+        setup_rbac(&env, &admin, &issuer, Role::Submitter);
 
         let credit_id = issue_carbon_credit(
             &env,
@@ -430,7 +423,7 @@ mod tests {
     /// Test 16: Generate offset report
     #[test]
     fn test_generate_offset_report() {
-        let env = Env::default();
+        let env = setup_env();
 
         let now = env.ledger().timestamp();
         let report = generate_offset_report(&env, now - 86400, now);
@@ -441,12 +434,12 @@ mod tests {
     /// Test 17: Get portfolio status
     #[test]
     fn test_get_portfolio_status() {
-        let env = Env::default();
-        let issuer = Address::random(&env);
-        let verifier = Address::random(&env);
-        let admin = Address::random(&env);
+        let env = setup_env();
+        let issuer = Address::generate(&env);
+        let verifier = Address::generate(&env);
+        let admin = Address::generate(&env);
 
-        setup_rbac(&env, &admin, &issuer, &Role::Submitter);
+        setup_rbac(&env, &admin, &issuer, Role::Submitter);
 
         issue_carbon_credit(
             &env,
@@ -475,16 +468,16 @@ mod tests {
     /// Test 18: Validate claim
     #[test]
     fn test_validate_claim() {
-        let env = Env::default();
+        let env = setup_env();
 
         let mut evidence = vec![&env];
-        evidence.push_back(bytes!(env, b"https://evidence.org"));
+        evidence.push_back(Bytes::from_slice(&env, b"https://evidence.org"));
 
         let valid_claim = SustainabilityClaim {
-            claim_id: bytes!(env, b"CLAIM-001"),
-            claimant: Address::random(&env),
+            claim_id: Bytes::from_slice(&env, b"CLAIM-001"),
+            claimant: Address::generate(&env),
             claim_type: Symbol::new(&env, "carbon_neutral"),
-            claim_description: bytes!(env, b"Carbon neutral operations"),
+            claim_description: Bytes::from_slice(&env, b"Carbon neutral operations"),
             claimed_reduction: 5000,
             supporting_evidence: evidence,
             claim_date: env.ledger().timestamp(),
@@ -497,12 +490,12 @@ mod tests {
     /// Test 19: Verify standard compliance
     #[test]
     fn test_verify_standard_compliance() {
-        let env = Env::default();
-        let issuer = Address::random(&env);
-        let verifier = Address::random(&env);
-        let admin = Address::random(&env);
+        let env = setup_env();
+        let issuer = Address::generate(&env);
+        let verifier = Address::generate(&env);
+        let admin = Address::generate(&env);
 
-        setup_rbac(&env, &admin, &issuer, &Role::Submitter);
+        setup_rbac(&env, &admin, &issuer, Role::Submitter);
 
         let credit_id = issue_carbon_credit(
             &env,
@@ -521,12 +514,12 @@ mod tests {
     /// Test 20: Check data integrity
     #[test]
     fn test_check_data_integrity() {
-        let env = Env::default();
-        let issuer = Address::random(&env);
-        let verifier = Address::random(&env);
-        let admin = Address::random(&env);
+        let env = setup_env();
+        let issuer = Address::generate(&env);
+        let verifier = Address::generate(&env);
+        let admin = Address::generate(&env);
 
-        setup_rbac(&env, &admin, &issuer, &Role::Submitter);
+        setup_rbac(&env, &admin, &issuer, Role::Submitter);
 
         let credit_id = issue_carbon_credit(
             &env,
@@ -545,12 +538,12 @@ mod tests {
     /// Test 21: Get total retired CO2e
     #[test]
     fn test_get_total_retired_co2e() {
-        let env = Env::default();
-        let issuer = Address::random(&env);
-        let verifier = Address::random(&env);
-        let admin = Address::random(&env);
+        let env = setup_env();
+        let issuer = Address::generate(&env);
+        let verifier = Address::generate(&env);
+        let admin = Address::generate(&env);
 
-        setup_rbac(&env, &admin, &issuer, &Role::Submitter);
+        setup_rbac(&env, &admin, &issuer, Role::Submitter);
 
         let credit_id = issue_carbon_credit(
             &env,
@@ -562,7 +555,7 @@ mod tests {
             ComplianceStandard::Vcs,
         );
 
-        retire_credit(&env, issuer.clone(), credit_id, bytes!(env, b"Retirement"));
+        retire_credit(&env, issuer.clone(), credit_id, Bytes::from_slice(&env, b"Retirement"));
 
         let total = get_total_retired_co2e(&env);
         assert_eq!(total, 100);
@@ -571,12 +564,12 @@ mod tests {
     /// Test 22: Get credit status
     #[test]
     fn test_get_credit_status() {
-        let env = Env::default();
-        let issuer = Address::random(&env);
-        let verifier = Address::random(&env);
-        let admin = Address::random(&env);
+        let env = setup_env();
+        let issuer = Address::generate(&env);
+        let verifier = Address::generate(&env);
+        let admin = Address::generate(&env);
 
-        setup_rbac(&env, &admin, &issuer, &Role::Submitter);
+        setup_rbac(&env, &admin, &issuer, Role::Submitter);
 
         let credit_id = issue_carbon_credit(
             &env,
@@ -595,12 +588,12 @@ mod tests {
     /// Test 23: Get issuer credits
     #[test]
     fn test_get_issuer_credits() {
-        let env = Env::default();
-        let issuer = Address::random(&env);
-        let verifier = Address::random(&env);
-        let admin = Address::random(&env);
+        let env = setup_env();
+        let issuer = Address::generate(&env);
+        let verifier = Address::generate(&env);
+        let admin = Address::generate(&env);
 
-        setup_rbac(&env, &admin, &issuer, &Role::Submitter);
+        setup_rbac(&env, &admin, &issuer, Role::Submitter);
 
         issue_carbon_credit(
             &env,
@@ -629,12 +622,12 @@ mod tests {
     /// Test 24: Get total credits issued
     #[test]
     fn test_get_total_credits_issued() {
-        let env = Env::default();
-        let issuer = Address::random(&env);
-        let verifier = Address::random(&env);
-        let admin = Address::random(&env);
+        let env = setup_env();
+        let issuer = Address::generate(&env);
+        let verifier = Address::generate(&env);
+        let admin = Address::generate(&env);
 
-        setup_rbac(&env, &admin, &issuer, &Role::Submitter);
+        setup_rbac(&env, &admin, &issuer, Role::Submitter);
 
         for _ in 0..3 {
             issue_carbon_credit(
@@ -655,14 +648,14 @@ mod tests {
     /// Test 25: Full carbon credit lifecycle
     #[test]
     fn test_full_carbon_credit_lifecycle() {
-        let env = Env::default();
-        let issuer = Address::random(&env);
-        let new_holder = Address::random(&env);
-        let verifier = Address::random(&env);
-        let admin = Address::random(&env);
+        let env = setup_env();
+        let issuer = Address::generate(&env);
+        let new_holder = Address::generate(&env);
+        let verifier = Address::generate(&env);
+        let admin = Address::generate(&env);
 
-        setup_rbac(&env, &admin, &issuer, &Role::Submitter);
-        setup_rbac(&env, &admin, &verifier, &Role::Auditor);
+        setup_rbac(&env, &admin, &issuer, Role::Submitter);
+        setup_rbac(&env, &admin, &verifier, Role::Auditor);
 
         // 1. Issue credit
         let credit_id = issue_carbon_credit(
@@ -683,26 +676,27 @@ mod tests {
             &env,
             issuer.clone(),
             credit_id.clone(),
-            bytes!(env, b"REG-VCS-001"),
+            Bytes::from_slice(&env, b"REG-VCS-001"),
         );
 
         // 4. Tokenize
         let token_id = tokenize_credit(&env, credit_id.clone(), issuer.clone(), 5000, 15);
-        assert!(!token_id.to_vec().is_empty());
+        assert_ne!(token_id, BytesN::from_array(&env, &[0u8; 32]));
 
         // 5. Transfer to new holder
         transfer_credit(&env, credit_id.clone(), issuer.clone(), new_holder.clone());
 
         // 6. Get portfolio
-        let portfolio = get_portfolio_status(&env, new_holder);
+        let portfolio = get_portfolio_status(&env, new_holder.clone());
         assert_eq!(portfolio.total_credits, 1);
 
-        // 7. Retire
+        // 7. Retire (only the current holder may retire)
+        setup_rbac(&env, &admin, &new_holder, Role::Submitter);
         retire_credit(
             &env,
-            issuer.clone(),
+            new_holder.clone(),
             credit_id.clone(),
-            bytes!(env, b"Used for offset"),
+            Bytes::from_slice(&env, b"Used for offset"),
         );
 
         // 8. Verify retired
@@ -717,22 +711,22 @@ mod tests {
     /// Test 26: Multiple renewable types
     #[test]
     fn test_multiple_renewable_types() {
-        let env = Env::default();
-        let issuer = Address::random(&env);
-        let verifier = Address::random(&env);
-        let admin = Address::random(&env);
+        let env = setup_env();
+        let issuer = Address::generate(&env);
+        let verifier = Address::generate(&env);
+        let admin = Address::generate(&env);
 
-        setup_rbac(&env, &admin, &issuer, &Role::Submitter);
+        setup_rbac(&env, &admin, &issuer, Role::Submitter);
 
         // Solar credit
         let solar_source = RenewableEnergySource {
             source_type: RenewableEnergyType::Solar,
-            facility_id: bytes!(env, b"SOL-001"),
-            location: bytes!(env, b"California"),
+            facility_id: Bytes::from_slice(&env, b"SOL-001"),
+            location: Bytes::from_slice(&env, b"California"),
             capacity_mw: 50,
             energy_generated_mwh: 1000,
             verification_date: env.ledger().timestamp(),
-            certifications: vec![env],
+            certifications: vec![&env],
         };
 
         issue_carbon_credit(
@@ -748,12 +742,12 @@ mod tests {
         // Wind credit
         let wind_source = RenewableEnergySource {
             source_type: RenewableEnergyType::Wind,
-            facility_id: bytes!(env, b"WIND-001"),
-            location: bytes!(env, b"Texas"),
+            facility_id: Bytes::from_slice(&env, b"WIND-001"),
+            location: Bytes::from_slice(&env, b"Texas"),
             capacity_mw: 100,
             energy_generated_mwh: 2000,
             verification_date: env.ledger().timestamp(),
-            certifications: vec![env],
+            certifications: vec![&env],
         };
 
         issue_carbon_credit(
@@ -773,15 +767,15 @@ mod tests {
     /// Test 27: Invalid claim validation
     #[test]
     fn test_invalid_claim_validation() {
-        let env = Env::default();
+        let env = setup_env();
 
         let claim = SustainabilityClaim {
-            claim_id: bytes!(env, b"INVALID-CLAIM"),
-            claimant: Address::random(&env),
+            claim_id: Bytes::from_slice(&env, b"INVALID-CLAIM"),
+            claimant: Address::generate(&env),
             claim_type: Symbol::new(&env, "carbon_neutral"),
-            claim_description: bytes!(env, b""),  // Empty description
+            claim_description: Bytes::from_slice(&env, b""),  // Empty description
             claimed_reduction: 5000,
-            supporting_evidence: vec![env],  // No evidence
+            supporting_evidence: vec![&env],  // No evidence
             claim_date: env.ledger().timestamp(),
         };
 
@@ -792,12 +786,12 @@ mod tests {
     /// Test 28: Large-scale credit issuance
     #[test]
     fn test_large_scale_credit_issuance() {
-        let env = Env::default();
-        let issuer = Address::random(&env);
-        let verifier = Address::random(&env);
-        let admin = Address::random(&env);
+        let env = setup_env();
+        let issuer = Address::generate(&env);
+        let verifier = Address::generate(&env);
+        let admin = Address::generate(&env);
 
-        setup_rbac(&env, &admin, &issuer, &Role::Submitter);
+        setup_rbac(&env, &admin, &issuer, Role::Submitter);
 
         // Issue 10 credits
         for i in 0..10 {
@@ -822,14 +816,15 @@ mod tests {
     /// Test 29: Credit transfer and retirement
     #[test]
     fn test_credit_transfer_and_retirement() {
-        let env = Env::default();
-        let issuer = Address::random(&env);
-        let holder1 = Address::random(&env);
-        let holder2 = Address::random(&env);
-        let verifier = Address::random(&env);
-        let admin = Address::random(&env);
+        let env = setup_env();
+        let issuer = Address::generate(&env);
+        let holder1 = Address::generate(&env);
+        let _holder2 = Address::generate(&env);
+        let verifier = Address::generate(&env);
+        let admin = Address::generate(&env);
 
-        setup_rbac(&env, &admin, &issuer, &Role::Submitter);
+        setup_rbac(&env, &admin, &issuer, Role::Submitter);
+        setup_rbac(&env, &admin, &holder1, Role::Submitter);
 
         let credit_id = issue_carbon_credit(
             &env,
@@ -847,7 +842,7 @@ mod tests {
         assert_eq!(h1_credits.len(), 1);
 
         // Try to retire from holder1
-        retire_credit(&env, holder1.clone(), credit_id, bytes!(env, b"Retirement"));
+        retire_credit(&env, holder1.clone(), credit_id, Bytes::from_slice(&env, b"Retirement"));
 
         let portfolio = get_portfolio_status(&env, holder1);
         assert_eq!(portfolio.retired_credits, 1);
@@ -856,12 +851,12 @@ mod tests {
     /// Test 30: Multi-standard compliance
     #[test]
     fn test_multi_standard_compliance() {
-        let env = Env::default();
-        let issuer = Address::random(&env);
-        let verifier = Address::random(&env);
-        let admin = Address::random(&env);
+        let env = setup_env();
+        let issuer = Address::generate(&env);
+        let verifier = Address::generate(&env);
+        let admin = Address::generate(&env);
 
-        setup_rbac(&env, &admin, &issuer, &Role::Submitter);
+        setup_rbac(&env, &admin, &issuer, Role::Submitter);
 
         let credit_id = issue_carbon_credit(
             &env,
