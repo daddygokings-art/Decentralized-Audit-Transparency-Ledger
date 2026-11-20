@@ -12,10 +12,6 @@ publish = false
 [lib]
 crate-type = ["cdylib", "lib"]
 
-[[bin]]
-name = "drip"
-path = "src/bin/drip.rs"
-
 [features]
 # `AuditLedger` is the deployed contract; a Soroban WASM exposes a single contract
 # interface, so the other standalone contracts in this crate are opt-in and are

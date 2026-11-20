@@ -623,7 +623,7 @@ pub fn list_submissions(
 
     let mut items = Vec::new(env);
     let mut i = start;
-    while i < end && items.len() as u32 < limit {
+    while i < end && (items.len() as u32) < limit {
         let id: BytesN<32> = env
             .storage()
             .persistent()
