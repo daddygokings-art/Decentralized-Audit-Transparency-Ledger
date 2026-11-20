@@ -13,6 +13,8 @@ mod tests {
 
     struct Ctx<'a> {
         env: Env,
+        /// Distinguishes proofs across events: ZK proofs are single-use.
+        proof_nonce: core::cell::Cell<u8>,
         contract_id: Address,
         client: ConfidentialEventLedgerClient<'a>,
         admin: Address,
@@ -35,7 +37,7 @@ mod tests {
         });
         client.initialize(&admin);
 
-        Ctx { env, contract_id, client, admin, submitter }
+        Ctx { env, proof_nonce: core::cell::Cell::new(0), contract_id, client, admin, submitter }
     }
 
     fn grant(ctx: &Ctx, who: &Address, role: Role) {
@@ -48,6 +50,14 @@ mod tests {
         Bytes::from_slice(env, b"valid_zk_snark_proof_commitment_bytes_32")
     }
 
+    fn fresh_proof(ctx: &Ctx) -> Bytes {
+        let n = ctx.proof_nonce.get();
+        ctx.proof_nonce.set(n + 1);
+        let mut p = proof(&ctx.env);
+        p.push_back(n);
+        p
+    }
+
     fn key_id(env: &Env) -> BytesN<32> {
         BytesN::from_array(env, &[7u8; 32])
     }
@@ -58,7 +68,7 @@ mod tests {
             &Symbol::new(&ctx.env, "audit_priv"),
             &Bytes::from_slice(&ctx.env, payload),
             policy,
-            &proof(&ctx.env),
+            &fresh_proof(ctx),
             &key_id(&ctx.env),
         )
     }
@@ -317,5 +327,124 @@ mod tests {
             ctx.client.try_aggregate_confidential_events(&too_many),
             Err(Ok(ConfidentialError::BatchTooLarge))
         );
+    }
+
+    // ── Replay protection ───────────────────────────────────────────────
+
+    #[test]
+    fn test_zk_proof_cannot_be_replayed() {
+        let ctx = setup();
+        let env = &ctx.env;
+        let p = proof(env);
+
+        try_log(&ctx, &Bytes::from_slice(env, b"ciphertext_a"), &AccessControlPolicy::Public, &p)
+            .unwrap();
+
+        // Same proof re-attached to a different ciphertext.
+        assert_eq!(
+            try_log(&ctx, &Bytes::from_slice(env, b"ciphertext_b"), &AccessControlPolicy::Public, &p),
+            Err(ConfidentialError::ProofReplay)
+        );
+
+        // Same proof replayed by a different submitter.
+        let other = Address::generate(env);
+        grant(&ctx, &other, Role::Submitter);
+        assert_eq!(
+            ctx.client.try_log_confidential_event(
+                &other,
+                &Symbol::new(env, "audit_priv"),
+                &Bytes::from_slice(env, b"ciphertext_a"),
+                &AccessControlPolicy::Public,
+                &p,
+                &key_id(env),
+            ),
+            Err(Ok(ConfidentialError::ProofReplay))
+        );
+    }
+
+    #[test]
+    fn test_rejected_replay_does_not_advance_state() {
+        let ctx = setup();
+        let env = &ctx.env;
+        let p = proof(env);
+        let payload = Bytes::from_slice(env, b"ciphertext");
+
+        let first = try_log(&ctx, &payload, &AccessControlPolicy::Public, &p).unwrap();
+        assert!(try_log(&ctx, &payload, &AccessControlPolicy::Public, &p).is_err());
+
+        // The rejected replay leaves the original event intact, and a fresh
+        // proof is still accepted as a distinct event.
+        let second = log(&ctx, b"ciphertext", &AccessControlPolicy::Public);
+        assert_ne!(first, second);
+        assert_eq!(ctx.client.get_confidential_event(&first).encrypted_payload, payload);
+        ctx.client.extend_event_ttl(&first);
+    }
+
+    #[test]
+    fn test_active_key_cannot_be_silently_overwritten() {
+        let ctx = setup();
+        let env = &ctx.env;
+        let user = &ctx.submitter;
+
+        ctx.client.register_encryption_key(user, &Bytes::from_slice(env, b"pk_v1"));
+        assert_eq!(
+            ctx.client
+                .try_register_encryption_key(user, &Bytes::from_slice(env, b"pk_other")),
+            Err(Ok(ConfidentialError::KeyAlreadyRegistered))
+        );
+    }
+
+    #[test]
+    fn test_retired_keys_cannot_be_replayed() {
+        let ctx = setup();
+        let env = &ctx.env;
+        let user = &ctx.submitter;
+        let v1 = Bytes::from_slice(env, b"pk_v1");
+        let v2 = Bytes::from_slice(env, b"pk_v2");
+        let v3 = Bytes::from_slice(env, b"pk_v3");
+
+        ctx.client.register_encryption_key(user, &v1);
+
+        // Rotating to the current key is a no-op replay.
+        assert_eq!(
+            ctx.client.try_rotate_encryption_key(user, &v1),
+            Err(Ok(ConfidentialError::KeyReplay))
+        );
+
+        // v1 is retired by rotation; rotating back to it is rejected.
+        ctx.client.rotate_encryption_key(user, &v2);
+        assert_eq!(
+            ctx.client.try_rotate_encryption_key(user, &v1),
+            Err(Ok(ConfidentialError::KeyReplay))
+        );
+
+        // v2 is retired by revocation; re-registering it is rejected.
+        ctx.client.revoke_encryption_key(user);
+        assert_eq!(
+            ctx.client.try_register_encryption_key(user, &v2),
+            Err(Ok(ConfidentialError::KeyReplay))
+        );
+        assert_eq!(
+            ctx.client.try_register_encryption_key(user, &v1),
+            Err(Ok(ConfidentialError::KeyReplay))
+        );
+
+        // A genuinely new key can be registered after revocation.
+        ctx.client.register_encryption_key(user, &v3);
+    }
+
+    #[test]
+    fn test_retired_keys_are_scoped_per_owner() {
+        let ctx = setup();
+        let env = &ctx.env;
+        let other = Address::generate(env);
+        grant(&ctx, &other, Role::Submitter);
+        let shared = Bytes::from_slice(env, b"pk_shared");
+
+        ctx.client.register_encryption_key(&ctx.submitter, &shared);
+        ctx.client.revoke_encryption_key(&ctx.submitter);
+
+        // Another owner's history does not block this key.
+        ctx.client.register_encryption_key(&other, &shared);
     }
 }

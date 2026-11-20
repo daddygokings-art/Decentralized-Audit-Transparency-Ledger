@@ -12,6 +12,27 @@
 //! events from a failed invocation, so denied events are observable through
 //! simulation / diagnostic event streams rather than in ledger meta.
 //!
+//! # Replay protection
+//!
+//! Transaction-level signatures are already replay-protected by the Soroban
+//! host (`require_auth` consumes a per-address nonce bound to the network,
+//! contract and an expiration ledger). This module adds the replay checks the
+//! host cannot provide for its own cryptographic material:
+//!
+//! * **ZK proofs are single-use.** The SHA-256 commitment of every accepted
+//!   proof is recorded under [`ConfidentialStorageKey::ConsumedProof`]; a proof
+//!   observed on-chain cannot be re-attached to a new event, by the same or any
+//!   other submitter ([`ConfidentialError::ProofReplay`]).
+//! * **Retired keys stay retired.** When a key is rotated out or revoked its
+//!   digest is recorded under [`ConfidentialStorageKey::RetiredKey`]; the owner
+//!   cannot re-register or rotate back to it ([`ConfidentialError::KeyReplay`]).
+//! * **No silent key overwrite.** `register_encryption_key` refuses to replace
+//!   an active key ([`ConfidentialError::KeyAlreadyRegistered`]); use
+//!   `rotate_encryption_key`, which retires the previous key.
+//!
+//! Replay markers live in persistent storage, so an archived marker makes the
+//! transaction fail (until restored) rather than being treated as absent.
+//!
 //! # Structured audit events
 //!
 //! Exactly one [`ConfidentialAuditEvent`] is published per audited operation:
@@ -165,6 +186,11 @@ pub enum ConfidentialStorageKey {
     KeyRecord(Address),
     NextSeq,
     TotalEvents,
+    /// Replay marker: `sha256(zk_proof)` of an accepted proof -> event id.
+    ConsumedProof(BytesN<32>),
+    /// Replay marker: `(owner, sha256(public_key))` of a rotated-out or
+    /// revoked encryption key.
+    RetiredKey(Address, BytesN<32>),
 }
 
 #[contracterror]
@@ -191,6 +217,12 @@ pub enum ConfidentialError {
     BatchTooLarge = 13,
     /// A monotonic counter (sequence / total events) would overflow.
     CounterOverflow = 14,
+    /// The ZK proof has already been consumed by a previous event.
+    ProofReplay = 15,
+    /// The public key was previously rotated out or revoked by this owner.
+    KeyReplay = 16,
+    /// An active key is already registered; use `rotate_encryption_key`.
+    KeyAlreadyRegistered = 17,
 }
 
 #[contract]
@@ -229,6 +261,21 @@ impl ConfidentialEventLedger {
         let operation = "register_encryption_key";
         let subject = Self::key_digest(&env, &public_key);
         Self::require_submitter(&env, &owner, operation, &subject)?;
+        let existing: Option<EncryptionKeyRecord> = env
+            .storage()
+            .persistent()
+            .get(&ConfidentialStorageKey::KeyRecord(owner.clone()));
+        if existing.is_some_and(|record| record.active) {
+            return Err(Self::deny(
+                &env,
+                &owner,
+                operation,
+                &subject,
+                ConfidentialError::KeyAlreadyRegistered,
+            ));
+        }
+        Self::reject_retired_key(&env, &owner, operation, &subject)?;
+
         let now = env.ledger().timestamp();
         let record = EncryptionKeyRecord {
             owner: owner.clone(),
@@ -267,7 +314,19 @@ impl ConfidentialEventLedger {
                 ConfidentialError::KeyRevoked,
             ));
         }
+        if record.public_key == new_public_key {
+            return Err(Self::deny(
+                &env,
+                &owner,
+                operation,
+                &subject,
+                ConfidentialError::KeyReplay,
+            ));
+        }
+        Self::reject_retired_key(&env, &owner, operation, &subject)?;
 
+        let retired = Self::key_digest(&env, &record.public_key);
+        Self::retire_key(&env, &owner, &retired);
         record.public_key = new_public_key;
         record.rotated_at = env.ledger().timestamp();
         env.storage().persistent().set(&key, &record);
@@ -289,6 +348,7 @@ impl ConfidentialEventLedger {
         env.storage().persistent().set(&key, &record);
 
         let subject = Self::key_digest(&env, &record.public_key);
+        Self::retire_key(&env, &owner, &subject);
         Self::emit_success(&env, &owner, operation, &subject);
         Ok(())
     }
@@ -338,6 +398,19 @@ impl ConfidentialEventLedger {
             return Err(Self::deny(&env, &submitter, operation, &empty, err));
         }
 
+        // Single-use proofs: reject any proof already bound to an event.
+        let zk_proof_hash: BytesN<32> = env.crypto().sha256(&zk_proof).to_bytes();
+        let proof_key = ConfidentialStorageKey::ConsumedProof(zk_proof_hash.clone());
+        if env.storage().persistent().has(&proof_key) {
+            return Err(Self::deny(
+                &env,
+                &submitter,
+                operation,
+                &zk_proof_hash,
+                ConfidentialError::ProofReplay,
+            ));
+        }
+
         let seq = Self::next_counter_u64(&env, &ConfidentialStorageKey::NextSeq, 1)
             .map_err(|err| Self::deny(&env, &submitter, operation, &empty, err))?;
         let total = Self::next_counter_u32(&env, &ConfidentialStorageKey::TotalEvents)
@@ -347,8 +420,6 @@ impl ConfidentialEventLedger {
         let event_id = Self::derive_event_id(&env, &submitter, seq, now);
 
         // Only the proof commitment is archived; verification happened above.
-        let zk_proof_hash: BytesN<32> = env.crypto().sha256(&zk_proof).to_bytes();
-
         let metadata_record = ConfidentialMetadata {
             submitter: submitter.clone(),
             event_type,
@@ -365,6 +436,12 @@ impl ConfidentialEventLedger {
             .persistent()
             .extend_ttl(&event_key, TTL_BUMP_THRESHOLD_LEDGERS, ARCHIVE_TTL_EXTEND_LEDGERS);
 
+        // The replay marker lives at least as long as the event it guards.
+        env.storage().persistent().set(&proof_key, &event_id);
+        env.storage()
+            .persistent()
+            .extend_ttl(&proof_key, TTL_BUMP_THRESHOLD_LEDGERS, ARCHIVE_TTL_EXTEND_LEDGERS);
+
         env.storage()
             .instance()
             .set(&ConfidentialStorageKey::NextSeq, &(seq + 1));
@@ -380,14 +457,20 @@ impl ConfidentialEventLedger {
     /// Permissionless TTL extension for an archived confidential event.
     /// Bumps the event envelope's TTL so evidence-grade records are never
     /// unexpectedly collected by archival rent. Safe to call by anyone.
+    /// The event's proof replay marker is bumped alongside it.
     pub fn extend_event_ttl(env: Env, event_id: BytesN<32>) -> Result<(), ConfidentialError> {
         let key = ConfidentialStorageKey::Event(event_id);
-        if !env.storage().persistent().has(&key) {
-            return Err(ConfidentialError::EventNotFound);
-        }
-        env.storage()
+        let event: ConfidentialMetadata = env
+            .storage()
             .persistent()
-            .extend_ttl(&key, TTL_BUMP_THRESHOLD_LEDGERS, ARCHIVE_TTL_EXTEND_LEDGERS);
+            .get(&key)
+            .ok_or(ConfidentialError::EventNotFound)?;
+        let storage = env.storage().persistent();
+        storage.extend_ttl(&key, TTL_BUMP_THRESHOLD_LEDGERS, ARCHIVE_TTL_EXTEND_LEDGERS);
+        let proof_key = ConfidentialStorageKey::ConsumedProof(event.zk_proof_hash);
+        if storage.has(&proof_key) {
+            storage.extend_ttl(&proof_key, TTL_BUMP_THRESHOLD_LEDGERS, ARCHIVE_TTL_EXTEND_LEDGERS);
+        }
         Ok(())
     }
 
@@ -537,6 +620,29 @@ impl ConfidentialEventLedger {
             .ok_or_else(|| {
                 Self::deny(env, caller, operation, event_id, ConfidentialError::EventNotFound)
             })
+    }
+
+    /// Reject `subject` (a key digest) if `owner` previously retired it.
+    fn reject_retired_key(
+        env: &Env,
+        owner: &Address,
+        operation: &str,
+        subject: &BytesN<32>,
+    ) -> Result<(), ConfidentialError> {
+        let key = ConfidentialStorageKey::RetiredKey(owner.clone(), subject.clone());
+        if env.storage().persistent().has(&key) {
+            return Err(Self::deny(env, owner, operation, subject, ConfidentialError::KeyReplay));
+        }
+        Ok(())
+    }
+
+    /// Record `digest` as a retired key for `owner`.
+    fn retire_key(env: &Env, owner: &Address, digest: &BytesN<32>) {
+        let key = ConfidentialStorageKey::RetiredKey(owner.clone(), digest.clone());
+        env.storage().persistent().set(&key, &env.ledger().timestamp());
+        env.storage()
+            .persistent()
+            .extend_ttl(&key, TTL_BUMP_THRESHOLD_LEDGERS, ARCHIVE_TTL_EXTEND_LEDGERS);
     }
 
     /// Emit a denied audit event and hand back `err` for propagation.
