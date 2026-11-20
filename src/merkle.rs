@@ -139,6 +139,26 @@ pub fn verify_merkle_proof(
     used == proof.len() && hash == *root
 }
 
+/// Audit and verify Merkle proof with anti-replay protection (epoch & nonce binding).
+pub fn verify_merkle_proof_anti_replay(
+    env: &Env,
+    leaf: &BytesN<32>,
+    index: u32,
+    leaf_count: u32,
+    proof: &Vec<BytesN<32>>,
+    root: &BytesN<32>,
+    epoch: u64,
+    nonce: u32,
+) -> bool {
+    let mut bound_buf = Bytes::new(env);
+    bound_buf.append(&leaf.clone().into());
+    bound_buf.append(&Bytes::from_slice(env, &epoch.to_be_bytes()));
+    bound_buf.append(&Bytes::from_slice(env, &nonce.to_be_bytes()));
+    let bound_leaf = env.crypto().sha256(&bound_buf).to_bytes();
+
+    verify_merkle_proof(env, &bound_leaf, index, leaf_count, proof, root)
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
