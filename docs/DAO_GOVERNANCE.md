@@ -104,6 +104,10 @@ pub fn get_fund_balance(fund_name) -> u128
 
 ### 3. Dispute Resolution Contract (`src/dao_dispute_resolution.rs` - 677 lines)
 
+> [!NOTE]
+> For in-depth economic parameters, bond requirements, challenge windows, and slashing schedules, refer to the [Oracle & Dispute Resolution Bonds Guide](ORACLE_AND_DISPUTE_RESOLUTION_BONDS.md).
+
+
 **Key Features:**
 - Decentralized dispute resolution
 - Juror assignment and voting

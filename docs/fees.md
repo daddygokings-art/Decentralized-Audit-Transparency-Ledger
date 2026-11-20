@@ -141,26 +141,221 @@ The `--simulate-only` flag returns the simulated fee without submitting. Typical
 
 ---
 
-## TTL Storage (#121)
+## Soroban Ledger Entry Fee Model
 
-By default all contract data is stored in **instance storage**, which has no expiry and grows indefinitely with the contract's `extend_instance_ttl` calls.
+Every read or write on Stellar Soroban incurs two cost components:
 
-The `set_event_ttl(ttl_ledgers)` governance function enables an optional **persistent storage** path for each logged event:
+### 1. Base inclusion fee
 
-| Mode | Storage type | Expiry | Cost model |
-|------|-------------|--------|-----------|
-| `ttl_ledgers == 0` (default) | Instance storage | No expiry | Rent bundled with contract instance; one ledger entry for all data |
-| `ttl_ledgers > 0` | Instance + Persistent | Expires after N ledgers | One additional ledger entry per event; cheaper long-term but adds per-event rent |
+A flat **per-transaction** fee charged by the network for processing a transaction regardless of
+its complexity. On mainnet this is roughly **100–500 stroops** (0.00001–0.00005 XLM) at normal
+load, rising with surge pricing.
 
-### Cost tradeoffs
+### 2. Resource fees (CPU + memory + ledger I/O)
 
-**Persistent storage advantages:**
-- Events older than `ttl_ledgers` become eligible for automatic expiry by the network, reducing the rent you must pay to keep the contract live.
-- Compliance-driven retention: set TTL to the minimum required by your audit policy (e.g., 7 years ≈ 42,048,000 ledgers at 5-second ledger times) to avoid paying for older records.
+Soroban charges separately for the computational resources each transaction consumes:
 
-**Persistent storage disadvantages:**
-- Each `log_event` call writes an additional persistent ledger entry (~200 bytes), incurring an extra rent fee of roughly **0.00001–0.0001 XLM per event per year** depending on network prices.
-- High-frequency logging (e.g., 1,000 events/day) accumulates a meaningful rent liability over time. Evaluate whether the storage savings outweigh the per-event write overhead.
-- On-chain reads may need to check both instance and persistent storage if mixing modes over time.
+| Resource | Unit | Approximate cost |
+|----------|------|-----------------|
+| CPU instructions | per 10,000 | ~1 stroop |
+| Memory bytes | per KB | ~0.01 stroop |
+| Ledger read | per entry | ~6,250 stroops |
+| Ledger write | per entry | ~10,000 stroops |
+| Ledger entry rent | per byte-ledger | ~1 stroop per 1 KB per ledger |
 
-**Recommendation:** Enable TTL (`set_event_ttl`) only when your regulatory or cost requirements make event expiry desirable. For short-lived audit trails (< 6 months), TTL = 2,592,000 ledgers (~150 days) is a reasonable starting point.
+> Exact stroop-per-unit values are network-level constants that can change with protocol
+> upgrades. Always simulate transactions with `--simulate-only` to obtain current figures.
+
+### 3. Ledger entry rent
+
+When you write data to Soroban storage, you pre-pay **rent** for the number of ledgers the
+entry lives. Rent is proportional to both the **size** of the entry (bytes) and the
+**duration** it must remain live (ledgers):
+
+```
+rent_fee = ceil(entry_size_bytes / 1024) × rent_rate_stroops_per_kb_per_ledger × ttl_ledgers
+```
+
+The key insight is that larger entries and longer lifetimes cost proportionally more.
+
+---
+
+## Temporary vs Persistent Storage: Cost Comparison
+
+AuditLedger uses two Soroban storage tiers for event data. Understanding the difference
+is critical to managing on-chain fees.
+
+### Instance storage (default)
+
+All contract state lives in a single **instance storage** entry. The contract pays rent
+on this one entry by calling `extend_instance_ttl` periodically.
+
+| Property | Value |
+|----------|-------|
+| Storage key | One entry for the entire contract |
+| Expiry | Controlled by `extend_instance_ttl`; never expires while the contract is live |
+| Per-event overhead | None — new events share the same instance entry |
+| Rent model | Flat rent on the single large entry; cost scales with total data size |
+| Deletion | Not possible — events live as long as the contract does |
+
+### Persistent storage (TTL mode)
+
+When `set_event_ttl(ttl_ledgers > 0)` is enabled, each `log_event` call **additionally**
+writes the event to a dedicated **persistent storage** entry with its own TTL.
+
+| Property | Value |
+|----------|-------|
+| Storage key | One entry per event (`EventData(BytesN<32>)`) |
+| Expiry | Expires after `ttl_ledgers` ledgers from the time it was written |
+| Per-event overhead | ~1 extra ledger write (~10,000 stroops) + rent for `ttl_ledgers` |
+| Rent model | Per-event rent; each entry pays for its own lifetime |
+| Deletion | Network removes expired entries automatically (archiving) |
+
+### Side-by-side comparison
+
+| Factor | Instance storage | Persistent (TTL) storage |
+|--------|-----------------|--------------------------|
+| Up-front cost per event | Low | Higher (~0.001–0.01 XLM/event) |
+| Long-term rent burden | Grows unboundedly | Capped at `ttl_ledgers` duration |
+| Event expiry support | ❌ No | ✅ Yes |
+| Compliance retention | Manual off-chain | Configurable on-chain |
+| Read cost | Same (cheap) | Same (cheap) |
+| Best for | Short audit trails, low volume | Long retention policies, high volume over time |
+
+---
+
+## TTL Storage — Practical Guidance {#ttl-storage}
+
+### When to enable TTL
+
+Enable `set_event_ttl` when **any** of the following apply:
+
+- You have a regulatory retention window (e.g., keep records for exactly 7 years, then allow
+  them to expire).
+- You log more than ~10,000 events/month and want to cap long-term storage rent by letting
+  old events expire.
+- Your audit trail is inherently time-bounded (e.g., session logs, ephemeral transaction
+  confirmations).
+
+Keep TTL **disabled** (default) when:
+
+- You need events to be available indefinitely with no expiry risk.
+- You log fewer than ~1,000 events/month (the per-event overhead outweighs the savings).
+- You rely on on-chain lookups of arbitrarily old events without an off-chain mirror.
+
+### Recommended ttl_ledgers ranges
+
+Stellar produces roughly one ledger every 5 seconds, so:
+
+```
+ttl_ledgers = desired_days × 86400 / 5
+```
+
+| Retention goal | Ledgers | Approximate duration |
+|---------------|---------|---------------------|
+| 30 days | 518,400 | Short-term trail |
+| 90 days | 1,555,200 | Quarter retention |
+| 180 days (6 months) | 3,110,400 | Bi-annual rollover |
+| 1 year | 6,307,200 | Annual compliance |
+| 5 years | 31,536,000 | Medium-term compliance |
+| 7 years | 44,150,400 | Common regulatory minimum |
+| Indefinite | 0 (disabled) | No expiry |
+
+**Rule of thumb:** set `ttl_ledgers` to your minimum required retention period plus a 20%
+buffer to avoid expiry races between ledger production and your `extend_ttl` calls.
+
+```bash
+# Set TTL to 1 year (6,307,200 ledgers at 5 s/ledger)
+soroban contract invoke \
+  --id $CONTRACT_ID --source $OWNER_KEY --network mainnet \
+  -- set_event_ttl \
+  --caller $OWNER_ADDRESS \
+  --ttl_ledgers 6307200
+```
+
+### Extending TTL before expiry
+
+Persistent entries that approach their TTL deadline can be renewed with:
+
+```bash
+soroban contract invoke \
+  --id $CONTRACT_ID --source $OWNER_KEY --network mainnet \
+  -- extend_event_ttl \
+  --event_id "<hex_id>" \
+  --new_ttl_ledgers 6307200
+```
+
+Build an off-chain monitoring job that polls `get_event_ttl` and re-extends entries
+before they expire if you need indefinite retention with the per-event cost model.
+
+---
+
+## Fee Estimation Example: 1,000 Events
+
+The table below estimates on-chain fees for logging 1,000 events at three common metadata
+sizes, comparing instance storage (default) against persistent storage (TTL enabled).
+
+### Assumptions
+
+- Network base fee: 100 stroops per transaction (no surge).
+- Ledger write cost: 10,000 stroops per new entry.
+- Rent rate: 1 stroop per KB per ledger.
+- `log_event` CPU cost: ~3M instructions ≈ 300 stroops/event.
+- Event overhead (fields excluding metadata): ~250 bytes.
+- All 1,000 events logged individually (not batched — for illustration).
+- XLM price: 0.10 USD (adjust to current price for dollar estimates).
+- TTL scenario: 1 year = 6,307,200 ledgers.
+
+### Cost breakdown per event
+
+| Metadata size | Total entry size | CPU fee | Write fee | Rent/year (TTL) | **Total per event (TTL)** | **Total per event (no TTL)** |
+|--------------|-----------------|---------|-----------|-----------------|--------------------------|------------------------------|
+| 10 bytes | ~260 bytes | ~300 | 10,000 | ~6,300 (1 KB × 6.3M) | **~16,600 stroops** | **~10,300 stroops** |
+| 100 bytes | ~350 bytes | ~320 | 10,000 | ~6,300 | **~16,620 stroops** | **~10,320 stroops** |
+| 1 KB | ~1,274 bytes | ~500 | 10,000 | ~12,600 (2 KB × 6.3M) | **~23,100 stroops** | **~10,500 stroops** |
+
+### Total cost for 1,000 events
+
+| Metadata size | Instance storage (no TTL) | Persistent (1-year TTL) |
+|--------------|--------------------------|------------------------|
+| 10 bytes | ~10,300,000 stroops ≈ **1.03 XLM** ≈ $0.10 | ~16,600,000 stroops ≈ **1.66 XLM** ≈ $0.17 |
+| 100 bytes | ~10,320,000 stroops ≈ **1.03 XLM** ≈ $0.10 | ~16,620,000 stroops ≈ **1.66 XLM** ≈ $0.17 |
+| 1 KB | ~10,500,000 stroops ≈ **1.05 XLM** ≈ $0.11 | ~23,100,000 stroops ≈ **2.31 XLM** ≈ $0.23 |
+
+> **Key takeaway:** For a one-year retention window, persistent TTL storage costs roughly
+> **1.6× more up-front** than instance storage — but that cost is bounded. Instance storage
+> keeps accumulating rent indefinitely, meaning the break-even point depends on how long your
+> contract runs after the retention window closes.
+
+### Using log_events (batch) to reduce costs
+
+Batching 1,000 events into groups of 50 reduces the per-event cost by ~78% due to amortised
+auth, state reads, and base fees. See the [Batch vs Single Logging Cost](#batch-vs-single-logging-cost)
+section above for full numbers.
+
+| Batch size | Total fee for 1,000 events (est.) |
+|------------|----------------------------------|
+| 1 (individual) | ~1.0–1.7 XLM |
+| 10 | ~0.36–0.59 XLM |
+| 50 (recommended) | ~0.11–0.18 XLM |
+| 100 | ~0.10–0.16 XLM |
+
+### Reproducing estimates
+
+```bash
+# Simulate a single log_event and inspect the fee breakdown
+soroban contract invoke \
+  --id $CONTRACT_ID --source $SUBMITTER_KEY --network testnet \
+  --fee 100000 \
+  -- log_event \
+  --submitter $SUBMITTER \
+  --event_type payment \
+  --metadata "$(python3 -c 'import base64; print(base64.b64encode(b"x"*100).decode())')" \
+  --category null \
+  --sub_event_type null \
+  --force false \
+  --simulate-only
+```
+
+The simulation output includes `classicFeeCharged`, `resourceFeeCharged`, and the
+resource usage breakdown so you can verify against the estimates above.
