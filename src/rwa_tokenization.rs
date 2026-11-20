@@ -665,7 +665,16 @@ pub enum TokenizationError {
     UnauthorizedRole = 2410,
     /// Token count or holder count would exceed global configuration bounds.
     CapacityLimitReached = 2411,
+    /// Asset class mismatch or unsupported class.
+    UnsupportedAssetClass = 2412,
+    /// Degenerate parameter: zero address or empty symbol.
+    DegenerateParameter = 2413,
+    /// Account is currently frozen or blacklisted.
+    AccountFrozen = 2414,
+    /// Kyc verification status expired or invalid.
+    KycVerificationRequired = 2415,
 }
+
 
 /// Granular RBAC roles for RWA tokenization lifecycle and supply operations (#825).
 #[contracttype]
@@ -773,8 +782,12 @@ impl TokenDefinition {
         if self.decimals > MAX_TOKEN_DECIMALS {
             return Err(TokenizationError::InvalidDecimals);
         }
+        if self.max_supply == 0 {
+            return Err(TokenizationError::DegenerateParameter);
+        }
         Ok(())
     }
+
 
     /// Checked supply cap validation returning a typed [`TokenizationError`].
     pub fn checked_can_mint(
@@ -1566,5 +1579,28 @@ mod tests {
         assert!(TokenizationRole::Admin.can_govern_lifecycle());
         assert!(TokenizationRole::TransferAgent.can_manage_holders());
     }
+
+    #[test]
+    fn test_reject_degenerate_token_definition() {
+        let env = soroban_sdk::Env::default();
+        let mut def = make_token_def(&env, AssetClass::RealEstate);
+        assert!(def.validate_bounds().is_ok());
+
+        // Zero max_supply rejected as degenerate parameter
+        def.max_supply = 0;
+        assert_eq!(
+            def.validate_bounds(),
+            Err(TokenizationError::DegenerateParameter)
+        );
+
+        // Invalid decimals rejected
+        def.max_supply = 1_000_000;
+        def.decimals = 19;
+        assert_eq!(
+            def.validate_bounds(),
+            Err(TokenizationError::InvalidDecimals)
+        );
+    }
 }
+
 
