@@ -600,3 +600,14 @@ path_prefix = "src/regulatory_consensus.rs"
 line = 90.0
 branch = 85.0
 description = "Validator-quorum regulatory state transitions with rogue detection and quarantine"
+
+# ─ CQRS read/write projection engine ──────────────────────────────────────────
+# Every mutator is RBAC-gated via CqrsAuthorization; the positive/negative role
+# matrix in src/rbac_gating_tests.rs (cqrs_rbac_matrix) and src/cqrs_tests.rs
+# exercise the allow, deny, suspend and revoke branches.
+[[module]]
+name = "cqrs"
+path_prefix = "src/cqrs.rs"
+line = 85.0
+branch = 75.0
+description = "CQRS event store and projections — RBAC-gated mutations with tamper-evident audit events"

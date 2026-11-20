@@ -3,7 +3,7 @@
 //! Replaces legacy single-owner authorization checks with explicit,
 //! granular roles, precedence hierarchies, and persistent contract storage.
 
-use soroban_sdk::{contracterror, contracttype, Address, Env};
+use soroban_sdk::{contracterror, contracttype, Address, Env, Vec};
 
 #[contracterror]
 #[derive(Copy, Clone, Debug, Eq, PartialEq, PartialOrd, Ord)]
@@ -34,6 +34,19 @@ pub enum Role {
     Auditor = 3,
     /// Full governance permissions: assign roles, configure retention, upgrade policies
     Admin = 4,
+}
+
+impl Role {
+    /// Decodes a role from its stable numeric level (`1 = Viewer` … `4 = Admin`).
+    pub fn from_u32(level: u32) -> Option<Role> {
+        match level {
+            1 => Some(Role::Viewer),
+            2 => Some(Role::Submitter),
+            3 => Some(Role::Auditor),
+            4 => Some(Role::Admin),
+            _ => None,
+        }
+    }
 }
 
 #[contracttype]
@@ -135,6 +148,27 @@ impl RbacManager {
         env.storage()
             .persistent()
             .set(&RbacStorageKey::AdminCount, &1u32);
+    }
+
+    /// Seeds every address in `admins` as an Admin, but only if RBAC has never
+    /// been initialized in this contract (no `AdminCount` stored yet).
+    ///
+    /// Lets an existing multi-owner deployment adopt RBAC-gated modules
+    /// without locking out its current authorities. Returns `true` when
+    /// seeding happened.
+    pub fn bootstrap_admins_if_unset(env: &Env, admins: &Vec<Address>) -> bool {
+        if admins.is_empty() || env.storage().persistent().has(&RbacStorageKey::AdminCount) {
+            return false;
+        }
+        for admin in admins.iter() {
+            env.storage()
+                .persistent()
+                .set(&RbacStorageKey::Role(admin), &Role::Admin);
+        }
+        env.storage()
+            .persistent()
+            .set(&RbacStorageKey::AdminCount, &admins.len());
+        true
     }
 
     /// Alias for initialize_admin

@@ -13,7 +13,49 @@
 //!   or fast-forwarding from the latest snapshot.
 //! - **Snapshotting**: Point-in-time state capture for performant projection reconstruction.
 //! - **Materialized Views**: Per-type and per-submitter indexes for low-gas query operations.
+//!
+//! ## Access control and audit events (RBAC)
+//!
+//! Every state-mutating function in [`CqrsEngine`] takes a [`CqrsAuthorization`].
+//! Only [`CqrsEngine::authorize`] can create one, after it has
+//!
+//! 1. authenticated the caller (`Address::require_auth`),
+//! 2. rejected suspended submitter DIDs ([`RbacError::SubmitterSuspended`], `423`),
+//! 3. rejected callers holding no role ([`RbacError::UnauthorizedSubmitter`], `424`),
+//! 4. checked role precedence `Viewer < Submitter < Auditor < Admin` against the
+//!    operation's minimum role ([`RbacError::InsufficientRole`], `403`).
+//!
+//! A mutation therefore cannot be reached without passing [`crate::rbac`].
+//!
+//! | Operation | Entry point(s) | Minimum role |
+//! |-----------|----------------|--------------|
+//! | [`CqrsOperation::LogEvent`] | `record_log_event` | `Submitter` (caller must be the submitter unless `Admin`) |
+//! | [`CqrsOperation::UpdateEvent`] | `record_update_event` | `Auditor` |
+//! | [`CqrsOperation::Governance`] | `record_governance_command` | `Admin` |
+//! | [`CqrsOperation::Snapshot`] | `create_snapshot` | `Admin` |
+//! | [`CqrsOperation::RebuildProjection`] | `rebuild_projection` | `Admin` |
+//!
+//! Each successful mutation emits a tamper-evident audit event, and so does
+//! each rejected access attempt:
+//!
+//! | Topics | Data |
+//! |--------|------|
+//! | `("cqrs_audit", op)` | `(caller, timestamp, "ok" \| "denied", state_diff_digest)` |
+//! | `("cqrs_denied", op)` | `(caller, timestamp, rbac_error_code)` — diagnostic, rejections only |
+//!
+//! `state_diff_digest = sha256(xdr(caller) ‖ xdr(op) ‖ prev_seq ‖ next_seq ‖ timestamp ‖ subject?)`,
+//! where `prev_seq`/`next_seq` are the event-store sequence (or snapshot id)
+//! before and after the mutation and `subject` is the affected event id. An
+//! off-chain verifier can recompute it from the event store. Denied attempts
+//! use `prev_seq == next_seq`.
+//!
+//! An entrypoint that panics on denial (snapshot, rebuild) rolls back its
+//! events with the rest of the invocation. Command entrypoints instead return a
+//! failed [`CommandResult`] carrying the RBAC error code, so their denial
+//! events persist on-ledger.
 
+use crate::rbac::{RbacError, RbacManager, Role as RbacRole};
+use soroban_sdk::xdr::ToXdr;
 use soroban_sdk::{
     contracterror, contracttype, Address, Bytes, BytesN, Env, Symbol, Vec,
 };
@@ -181,21 +223,218 @@ pub enum CqrsStorageKey {
     Idempotency(BytesN<32>),
 }
 
+// ── RBAC Authorization ──────────────────────────────────────────────────────
+
+/// Topic for the tamper-evident audit event emitted on every mutation attempt.
+pub const AUDIT_TOPIC: &str = "cqrs_audit";
+/// Topic for the diagnostic event emitted on rejected access attempts.
+pub const DENIED_TOPIC: &str = "cqrs_denied";
+/// Audit outcome for an applied mutation.
+pub const OUTCOME_OK: &str = "ok";
+/// Audit outcome for a rejected access attempt.
+pub const OUTCOME_DENIED: &str = "denied";
+
+/// State-mutating CQRS operations and their minimum RBAC role.
+#[derive(Copy, Clone, Debug, Eq, PartialEq)]
+pub enum CqrsOperation {
+    LogEvent,
+    UpdateEvent,
+    Governance,
+    Snapshot,
+    RebuildProjection,
+}
+
+impl CqrsOperation {
+    /// Minimum role in the `Viewer < Submitter < Auditor < Admin` hierarchy.
+    pub fn required_role(self) -> RbacRole {
+        match self {
+            CqrsOperation::LogEvent => RbacRole::Submitter,
+            CqrsOperation::UpdateEvent => RbacRole::Auditor,
+            CqrsOperation::Governance
+            | CqrsOperation::Snapshot
+            | CqrsOperation::RebuildProjection => RbacRole::Admin,
+        }
+    }
+
+    /// Stable symbol used as the second audit-event topic.
+    pub fn symbol(self, env: &Env) -> Symbol {
+        Symbol::new(
+            env,
+            match self {
+                CqrsOperation::LogEvent => "log",
+                CqrsOperation::UpdateEvent => "update",
+                CqrsOperation::Governance => "governance",
+                CqrsOperation::Snapshot => "snapshot",
+                CqrsOperation::RebuildProjection => "rebuild",
+            },
+        )
+    }
+}
+
+/// Proof that a caller passed RBAC checks for an operation.
+///
+/// Fields are private, so [`CqrsEngine::authorize`] is the only constructor;
+/// this makes RBAC enforcement on every mutator a compile-time guarantee.
+#[derive(Clone, Debug)]
+pub struct CqrsAuthorization {
+    caller: Address,
+    role: RbacRole,
+    operation: CqrsOperation,
+}
+
+impl CqrsAuthorization {
+    pub fn caller(&self) -> &Address {
+        &self.caller
+    }
+    pub fn role(&self) -> RbacRole {
+        self.role
+    }
+    pub fn operation(&self) -> CqrsOperation {
+        self.operation
+    }
+}
+
 // ── CQRS Engine Implementation ──────────────────────────────────────────────
 
 pub struct CqrsEngine;
 
 impl CqrsEngine {
+    // ── RBAC Gate & Audit Events ────────────────────────────────────────────
+
+    /// Authenticates `caller` and checks its RBAC role for `operation`.
+    ///
+    /// On success returns the [`CqrsAuthorization`] that every mutator needs.
+    /// On failure emits `cqrs_audit`/`denied` and `cqrs_denied` events and
+    /// returns a stable [`RbacError`]:
+    /// - `SubmitterSuspended` (423) — the DID is suspended (checked first,
+    ///   so suspension overrides any role);
+    /// - `UnauthorizedSubmitter` (424) — the caller holds no role (never
+    ///   granted, or revoked);
+    /// - `InsufficientRole` (403) — the role ranks below the operation's minimum.
+    pub fn authorize(
+        env: &Env,
+        caller: &Address,
+        operation: CqrsOperation,
+    ) -> Result<CqrsAuthorization, RbacError> {
+        caller.require_auth();
+
+        let checked = if RbacManager::is_suspended(env, caller) {
+            Err(RbacError::SubmitterSuspended)
+        } else {
+            match RbacManager::get_role(env, caller) {
+                None => Err(RbacError::UnauthorizedSubmitter),
+                Some(role) if role >= operation.required_role() => Ok(role),
+                Some(_) => Err(RbacError::InsufficientRole),
+            }
+        };
+
+        match checked {
+            Ok(role) => Ok(CqrsAuthorization {
+                caller: caller.clone(),
+                role,
+                operation,
+            }),
+            Err(err) => {
+                Self::emit_denied(env, caller, operation, err);
+                Err(err)
+            }
+        }
+    }
+
+    /// Failed [`CommandResult`] carrying the stable RBAC error code.
+    pub fn denied_result(env: &Env, err: RbacError) -> CommandResult {
+        CommandResult {
+            success: false,
+            event_id: None,
+            sequence_number: Self::current_sequence(env),
+            error_code: Some(err as u32),
+            message: Some(Symbol::new(env, "rbac_denied")),
+        }
+    }
+
+    /// Tamper-evident digest binding caller, operation, the before/after
+    /// sequence (or snapshot id), the ledger timestamp and the affected event.
+    pub fn state_diff_digest(
+        env: &Env,
+        caller: &Address,
+        operation: CqrsOperation,
+        prev: u32,
+        next: u32,
+        subject: Option<&BytesN<32>>,
+    ) -> BytesN<32> {
+        let mut buf = Bytes::new(env);
+        buf.append(&caller.clone().to_xdr(env));
+        buf.append(&operation.symbol(env).to_xdr(env));
+        buf.extend_from_array(&prev.to_be_bytes());
+        buf.extend_from_array(&next.to_be_bytes());
+        buf.extend_from_array(&env.ledger().timestamp().to_be_bytes());
+        if let Some(id) = subject {
+            buf.extend_from_array(&id.to_array());
+        }
+        env.crypto().sha256(&buf).to_bytes()
+    }
+
+    /// Re-checks that `auth` covers `operation`, so an authorization obtained
+    /// for a lower-privilege operation cannot be reused for a higher one.
+    fn ensure(env: &Env, auth: &CqrsAuthorization, operation: CqrsOperation) -> Result<(), RbacError> {
+        if auth.role >= operation.required_role() {
+            Ok(())
+        } else {
+            Self::emit_denied(env, &auth.caller, operation, RbacError::InsufficientRole);
+            Err(RbacError::InsufficientRole)
+        }
+    }
+
+    fn emit_audit(env: &Env, caller: &Address, operation: CqrsOperation, outcome: &str, digest: BytesN<32>) {
+        env.events().publish(
+            (Symbol::new(env, AUDIT_TOPIC), operation.symbol(env)),
+            (
+                caller.clone(),
+                env.ledger().timestamp(),
+                Symbol::new(env, outcome),
+                digest,
+            ),
+        );
+    }
+
+    fn emit_denied(env: &Env, caller: &Address, operation: CqrsOperation, err: RbacError) {
+        let seq = Self::current_sequence(env);
+        let digest = Self::state_diff_digest(env, caller, operation, seq, seq, None);
+        Self::emit_audit(env, caller, operation, OUTCOME_DENIED, digest);
+        env.events().publish(
+            (Symbol::new(env, DENIED_TOPIC), operation.symbol(env)),
+            (caller.clone(), env.ledger().timestamp(), err as u32),
+        );
+    }
+
+    fn current_sequence(env: &Env) -> u32 {
+        env.storage()
+            .instance()
+            .get(&CqrsStorageKey::EventSequence)
+            .unwrap_or(0)
+    }
+
     // ── Command Side (Write Path) ───────────────────────────────────────────
 
     /// Record a successfully executed event in the append-only event store,
     /// allocate sequence number, update projections and materialized views.
+    ///
+    /// Requires [`CqrsOperation::LogEvent`] (`Submitter`). The authorized
+    /// caller must be `cmd.submitter`, unless it is an `Admin` replaying
+    /// historical events (e.g. during [`Self::rebuild_projection`] backfill).
     pub fn record_log_event(
         env: &Env,
+        auth: &CqrsAuthorization,
         event_id: BytesN<32>,
         cmd: &LogEventCommand,
         timestamp: u64,
-    ) -> CommandResult {
+    ) -> Result<CommandResult, RbacError> {
+        Self::ensure(env, auth, CqrsOperation::LogEvent)?;
+        if auth.caller != cmd.submitter && auth.role < RbacRole::Admin {
+            Self::emit_denied(env, &auth.caller, CqrsOperation::LogEvent, RbacError::UnauthorizedSubmitter);
+            return Err(RbacError::UnauthorizedSubmitter);
+        }
+
         let current_seq: u32 = env
             .storage()
             .instance()
@@ -265,23 +504,38 @@ impl CqrsEngine {
         // Publish CQRS event notification
         env.events().publish(
             (Symbol::new(env, "cqrs"), Symbol::new(env, "ev_log")),
-            (event_id, next_seq),
+            (event_id.clone(), next_seq),
         );
 
-        result
+        let digest = Self::state_diff_digest(
+            env,
+            &auth.caller,
+            CqrsOperation::LogEvent,
+            current_seq,
+            next_seq,
+            Some(&event_id),
+        );
+        Self::emit_audit(env, &auth.caller, CqrsOperation::LogEvent, OUTCOME_OK, digest);
+
+        Ok(result)
     }
 
     /// Record an event update in the append-only log and advance projection.
+    ///
+    /// Requires [`CqrsOperation::UpdateEvent`] (`Auditor`). The authorized
+    /// caller is recorded as the author of the new version.
     pub fn record_update_event(
         env: &Env,
+        auth: &CqrsAuthorization,
         new_event_id: BytesN<32>,
-        caller: Address,
         original_event_id: BytesN<32>,
         event_type: Symbol,
         new_metadata: Bytes,
         new_version: u32,
         timestamp: u64,
-    ) -> CommandResult {
+    ) -> Result<CommandResult, RbacError> {
+        Self::ensure(env, auth, CqrsOperation::UpdateEvent)?;
+
         let current_seq: u32 = env
             .storage()
             .instance()
@@ -294,7 +548,7 @@ impl CqrsEngine {
             event_id: new_event_id.clone(),
             timestamp,
             event_type: event_type.clone(),
-            submitter: caller,
+            submitter: auth.caller.clone(),
             metadata: new_metadata,
             category: Some(Symbol::new(env, "update")),
             sub_event_type: None,
@@ -314,7 +568,7 @@ impl CqrsEngine {
             &next_seq,
         );
         env.storage().instance().set(
-            &CqrsStorageKey::EventIdToSequence(original_event_id),
+            &CqrsStorageKey::EventIdToSequence(original_event_id.clone()),
             &next_seq,
         );
 
@@ -340,16 +594,30 @@ impl CqrsEngine {
             (new_event_id, next_seq),
         );
 
-        result
+        let digest = Self::state_diff_digest(
+            env,
+            &auth.caller,
+            CqrsOperation::UpdateEvent,
+            current_seq,
+            next_seq,
+            Some(&original_event_id),
+        );
+        Self::emit_audit(env, &auth.caller, CqrsOperation::UpdateEvent, OUTCOME_OK, digest);
+
+        Ok(result)
     }
 
     /// Record a governance command execution in the event store.
+    ///
+    /// Requires [`CqrsOperation::Governance`] (`Admin`).
     pub fn record_governance_command(
         env: &Env,
-        caller: Address,
+        auth: &CqrsAuthorization,
         action: Symbol,
         timestamp: u64,
-    ) -> CommandResult {
+    ) -> Result<CommandResult, RbacError> {
+        Self::ensure(env, auth, CqrsOperation::Governance)?;
+
         let current_seq: u32 = env
             .storage()
             .instance()
@@ -362,7 +630,7 @@ impl CqrsEngine {
             event_id: BytesN::from_array(env, &[0u8; 32]),
             timestamp,
             event_type: action.clone(),
-            submitter: caller,
+            submitter: auth.caller.clone(),
             metadata: Bytes::new(env),
             category: Some(Symbol::new(env, "governance")),
             sub_event_type: None,
@@ -398,7 +666,17 @@ impl CqrsEngine {
             (action, next_seq),
         );
 
-        result
+        let digest = Self::state_diff_digest(
+            env,
+            &auth.caller,
+            CqrsOperation::Governance,
+            current_seq,
+            next_seq,
+            None,
+        );
+        Self::emit_audit(env, &auth.caller, CqrsOperation::Governance, OUTCOME_OK, digest);
+
+        Ok(result)
     }
 
     // ── Query Side (Read Path) ──────────────────────────────────────────────
@@ -553,7 +831,16 @@ impl CqrsEngine {
     // ── Projection Rebuilding & Snapshotting ────────────────────────────────
 
     /// Rebuild projection state by replaying events from genesis (or from the latest snapshot).
-    pub fn rebuild_projection(env: &Env, from_snapshot: bool) -> EventProjection {
+    ///
+    /// Requires [`CqrsOperation::RebuildProjection`] (`Admin`).
+    pub fn rebuild_projection(
+        env: &Env,
+        auth: &CqrsAuthorization,
+        from_snapshot: bool,
+    ) -> Result<EventProjection, RbacError> {
+        Self::ensure(env, auth, CqrsOperation::RebuildProjection)?;
+        let previous_last_sequence = Self::get_projection(env).last_sequence;
+
         let total_seq: u32 = env
             .storage()
             .instance()
@@ -621,11 +908,26 @@ impl CqrsEngine {
             (proj.last_sequence, proj.total_events),
         );
 
-        proj
+        let digest = Self::state_diff_digest(
+            env,
+            &auth.caller,
+            CqrsOperation::RebuildProjection,
+            previous_last_sequence,
+            proj.last_sequence,
+            None,
+        );
+        Self::emit_audit(env, &auth.caller, CqrsOperation::RebuildProjection, OUTCOME_OK, digest);
+
+        Ok(proj)
     }
 
     /// Capture a snapshot of the current projection state.
-    pub fn create_snapshot(env: &Env) -> u32 {
+    ///
+    /// Requires [`CqrsOperation::Snapshot`] (`Admin`). The audit digest binds
+    /// the previous and new snapshot ids.
+    pub fn create_snapshot(env: &Env, auth: &CqrsAuthorization) -> Result<u32, RbacError> {
+        Self::ensure(env, auth, CqrsOperation::Snapshot)?;
+
         let count: u32 = env
             .storage()
             .instance()
@@ -656,7 +958,10 @@ impl CqrsEngine {
             (next_id, snapshot.sequence),
         );
 
-        next_id
+        let digest = Self::state_diff_digest(env, &auth.caller, CqrsOperation::Snapshot, count, next_id, None);
+        Self::emit_audit(env, &auth.caller, CqrsOperation::Snapshot, OUTCOME_OK, digest);
+
+        Ok(next_id)
     }
 
     /// Retrieve a saved snapshot by ID.

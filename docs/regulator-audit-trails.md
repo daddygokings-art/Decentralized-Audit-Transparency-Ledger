@@ -333,6 +333,37 @@ console.log(`Integrity Score: ${verificationDetails.chainIntegrityScore}`);
 - **Confidentiality (C)**: Data classification, encryption verification
 - **Privacy (P)**: GDPR compliance, data handling procedures
 
+### CQRS Projection Engine RBAC (`src/cqrs.rs`)
+
+Every state-mutating CQRS entrypoint needs a `CqrsAuthorization`, and only
+`CqrsEngine::authorize` can issue one, after it has checked `src/rbac.rs`.
+Owners of an existing deployment are seeded as RBAC Admins on their first CQRS
+mutation, provided RBAC has never been initialized in the contract.
+
+| Entrypoint | Operation | Minimum role | ISA 3000 / SOC2 control | Evidence emitted |
+|------------|-----------|--------------|-------------------------|------------------|
+| `cqrs_log_event` | `log` | Submitter (self only) | A1 Authorization · PI Processing Integrity | `cqrs_audit/log` |
+| `cqrs_update_event` | `update` | Auditor (+ owner/multisig) | CC7 Change Management | `cqrs_audit/update` |
+| `cqrs_governance` | `governance` | Admin (+ owner/multisig) | CC6 Segregation of Duties · CC7 | `cqrs_audit/governance` |
+| `cqrs_create_snapshot` | `snapshot` | Admin | CC9 Monitoring | `cqrs_audit/snapshot` |
+| `cqrs_rebuild_projection` | `rebuild` | Admin | PI Processing Integrity · CC9 | `cqrs_audit/rebuild` |
+| `cqrs_set_role` / `cqrs_suspend_submitter` / `cqrs_reinstate_submitter` | role admin | Admin | CC6 Segregation of Duties · A1 | `cqrs_audit/set_role`, `/suspend`, `/reinstate` |
+
+Audit event data is `(caller, timestamp, outcome, state_diff_digest)`, where
+`outcome` is `ok` or `denied`. A rejected attempt also emits
+`cqrs_denied/<op>` with `(caller, timestamp, code)`. The digest is
+`sha256(xdr(caller) ‖ xdr(op) ‖ prev_seq ‖ next_seq ‖ timestamp ‖ event_id?)`,
+so an examiner can recompute it from the CQRS event store.
+
+| Stable code | `RbacError` | Meaning |
+|-------------|-------------|---------|
+| 403 | `InsufficientRole` | Caller's role ranks below the operation's minimum (includes revoked/downgraded roles) |
+| 423 | `SubmitterSuspended` | Submitter DID is suspended; overrides any assigned role |
+| 424 | `UnauthorizedSubmitter` | Caller holds no RBAC role, or tried to log on behalf of another DID |
+
+Positive/negative RBAC matrix, hierarchy precedence, revocation and
+suspension tests: `src/rbac_gating_tests.rs` (`cqrs_rbac_matrix`).
+
 ## Testing
 
 Comprehensive test coverage in `src/regulator_tests.rs`:
