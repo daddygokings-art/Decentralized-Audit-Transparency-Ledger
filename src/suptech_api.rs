@@ -97,7 +97,7 @@ impl SupervisorAPI {
         input.append(&address.to_xdr(env));
         input.append(&Bytes::from_slice(env, b"SUPERVISOR"));
 
-        env.crypto().sha256(&input).to_bytes()
+        env.crypto().sha256(&input)
     }
 
     /// Check if supervisor has permission for operation
@@ -180,7 +180,7 @@ impl SupervisorAPI {
         input.append(query_type);
         input.append(&Bytes::from_slice(env, &env.ledger().timestamp().to_le_bytes()));
 
-        env.crypto().sha256(&input).to_bytes()
+        env.crypto().sha256(&input)
     }
 
     /// Create dashboard view
@@ -219,7 +219,7 @@ impl SupervisorAPI {
         input.append(&owner.to_xdr(env));
         input.append(name);
 
-        env.crypto().sha256(&input).to_bytes()
+        env.crypto().sha256(&input)
     }
 
     /// Subscribe to alerts
@@ -252,7 +252,7 @@ impl SupervisorAPI {
         input.append(&subscriber.to_xdr(env));
         input.append(&Bytes::from_slice(env, b"ALERT_SUB"));
 
-        env.crypto().sha256(&input).to_bytes()
+        env.crypto().sha256(&input)
     }
 
     /// Deliver alert to subscriber

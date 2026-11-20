@@ -45,16 +45,39 @@ pub enum DigitalPassportError {
     RbacInsufficientRole = 2013,
     /// RBAC role gating rejected the caller (suspended submitter DID) (#885)
     RbacSuspended = 2014,
+    /// Optimistic-concurrency check failed: the passport changed after the
+    /// caller read it (a concurrent attestation or update won the race).
+    StaleVersion = 2015,
+    /// The validator already attested this exact passport version.
+    DuplicateAttestation = 2016,
 }
 
 /// Deterministic bounds to prevent unbounded storage growth and arithmetic overflow.
-const MAX_MATERIALS: usize = 64;
-const MAX_SUBSTANCES: usize = 64;
-const MAX_BYTES_LEN: usize = 1024;
+/// (`u32` to match the Soroban `Vec::len`/`Bytes::len` return type.)
+const MAX_MATERIALS: u32 = 64;
+const MAX_SUBSTANCES: u32 = 64;
+const MAX_BYTES_LEN: u32 = 1024;
 const PERCENTAGE_MAX: u32 = 100;
 const REPAIRABILITY_SCORE_MAX: u32 = 10;
 const END_OF_LIFE_SCORE_MAX: u32 = 100;
 const TEN_YEARS_SECONDS: u64 = 10 * 365 * 86400;
+
+/// TTL threshold (in ledgers) below which persistent passport entries are
+/// re-extended (#886).
+pub const PASSPORT_TTL_BUMP_THRESHOLD_LEDGERS: u32 = 10_000;
+
+/// TTL (in ledgers) extended to for live (archival-critical) passport state.
+pub const PASSPORT_TTL_EXTEND_LEDGERS: u32 = 100_000;
+
+/// TTL (in ledgers) extended to for long-tail history/archival records.
+/// History keys are bumped only on write with a larger window so archival
+/// copies are not evicted while still keeping rent payments amortized.
+pub const PASSPORT_ARCHIVAL_TTL_EXTEND_LEDGERS: u32 = 300_000;
+
+/// Maximum audit trail entries retained per passport (rent footprint bound,
+/// #886). Older entries are trimmed from the front; the hash chain survives
+/// because each entry commits to its predecessor's hash.
+pub const MAX_AUDIT_TRAIL_LEN: u32 = 128;
 
 /// ESPR Compliance Status
 #[contracttype]
@@ -263,7 +286,7 @@ pub struct PassportExport {
 }
 
 /// Validate a material's bounded fields; panics deterministically on malformed input.
-fn validate_material(env: &Env, material: &Material) {
+fn validate_material(_env: &Env, material: &Material) {
     if material.percentage_by_weight > PERCENTAGE_MAX {
         panic!("material percentage exceeds 100%");
     }
@@ -276,7 +299,7 @@ fn validate_material(env: &Env, material: &Material) {
 }
 
 /// Validate durability bounded fields; panics deterministically on malformed input.
-fn validate_durability(env: &Env, durability: &Durability) {
+fn validate_durability(_env: &Env, durability: &Durability) {
     if durability.expected_lifetime_years == 0 {
         panic!("expected lifetime must be non-zero");
     }
@@ -295,7 +318,7 @@ fn validate_durability(env: &Env, durability: &Durability) {
 }
 
 /// Validate circularity bounded fields; panics deterministically on malformed input.
-fn validate_circularity(env: &Env, circularity: &Circularity) {
+fn validate_circularity(_env: &Env, circularity: &Circularity) {
     if circularity.recycled_content_percent > PERCENTAGE_MAX {
         panic!("recycled content percent exceeds 100%");
     }
@@ -314,14 +337,14 @@ fn validate_circularity(env: &Env, circularity: &Circularity) {
 }
 
 /// Validate carbon footprint bounded fields; panics deterministically on malformed input.
-fn validate_carbon_footprint(env: &Env, carbon: &CarbonFootprint) {
+fn validate_carbon_footprint(_env: &Env, carbon: &CarbonFootprint) {
     if carbon.carbon_offset_program.len() > MAX_BYTES_LEN {
         panic!("carbon offset program too long");
     }
 }
 
 /// Validate product identity bounded fields; panics deterministically on malformed input.
-fn validate_identity(env: &Env, identity: &ProductIdentity) {
+fn validate_identity(_env: &Env, identity: &ProductIdentity) {
     if identity.product_id.is_empty() {
         panic!("product id must not be empty");
     }
@@ -371,6 +394,9 @@ pub enum PassportDataKey {
     PassportAuditTrail(BytesN<32>),
     /// Sequence number -> passport ID (ordered index for pagination, #887)
     PassportIndex(u32),
+    /// (Passport, validator) -> passport version last attested by that
+    /// validator. Guards against duplicate/replayed concurrent attestations.
+    Attestation(BytesN<32>, Address),
 }
 
 // ─────────────────────────────────────────────────────────────────────────────
@@ -479,16 +505,19 @@ fn record_audit_event(
         .get(&key)
         .unwrap_or_else(|| Vec::new(&env));
 
-    let seq: u64 = trail.len() as u64;
-    let prev_hash: BytesN<32> = match trail.last() {
-        Some(prev) => prev.event_hash.clone(),
-        None => BytesN::from_array(env, &[0u8; 32]),
+    // Sequence numbers are derived from the previous entry, not from the
+    // trail length: once the trail is trimmed to `MAX_AUDIT_TRAIL_LEN`, a
+    // length-derived seq would repeat for every subsequent write, letting two
+    // concurrent attestations share a seq and making ordering ambiguous.
+    let (seq, prev_hash): (u64, BytesN<32>) = match trail.last() {
+        Some(prev) => (prev.seq.saturating_add(1), prev.event_hash.clone()),
+        None => (0, BytesN::from_array(env, &[0u8; 32])),
     };
 
     let mut payload_input = Bytes::new(env);
     payload_input.append(&Bytes::from_slice(env, kind.tag().as_bytes()));
     payload_input.append(&passport_id.to_bytes());
-    payload_input.append(&actor.to_bytes());
+    payload_input.append(&actor.to_string().to_bytes());
     payload_input.append(&Bytes::from_slice(
         env,
         &env.ledger().timestamp().to_be_bytes(),
@@ -677,7 +706,7 @@ pub fn create_passport(
             annual_energy_kwh: 0,
             standby_power_watts: 0,
             estimated_lifetime_energy: 0,
-            energy_label: Symbol::new(&env, "N/A"),
+            energy_label: Symbol::new(&env, "NA"),
         },
         substances: Vec::new(&env),
         compliance_records: Vec::new(&env),
@@ -715,7 +744,6 @@ pub fn create_passport(
         .persistent()
         .get(&PassportDataKey::PassportCount)
         .unwrap_or(0);
-    let index = count + 1;
     env.storage()
         .persistent()
         .set(&PassportDataKey::PassportIndex(count), &passport_id.clone());
@@ -803,9 +831,18 @@ pub fn transition_lifecycle_stage(
     // #885: submitters (or higher) may advance the lifecycle state machine.
     ensure_role(env, &actor, Role::Submitter);
 
+    let mut passport: DigitalPassport = env
+        .storage()
+        .persistent()
+        .get(&PassportDataKey::Passport(passport_id.clone()))
+        .unwrap_or_else(|| panic_with_error!(env, DigitalPassportError::PassportNotFound));
+
     let old_stage = passport.lifecycle_stage.clone();
     passport.lifecycle_stage = new_stage.clone();
     passport.last_updated = env.ledger().timestamp();
+    // A stage change mutates attested state, so it must invalidate any
+    // in-flight attestation pinned to the previous version.
+    passport.version = passport.version.saturating_add(1);
 
     // Record event
     let event = PassportLifecycleEvent {
@@ -1044,6 +1081,77 @@ pub fn verify_espr_compliance(
         .persistent()
         .get(&PassportDataKey::Passport(passport_id.clone()))
         .unwrap_or_else(|| panic!("Passport not found"));
+    record_compliance_verification(env, &passport_id, &passport, &verifier)
+}
+
+/// Race-safe validator attestation with optimistic concurrency control.
+///
+/// Several validators may attest the same passport inside one ledger. Each
+/// validator pins the passport `version` it inspected off-chain:
+///
+/// * if a concurrent `update_passport` / lifecycle transition landed first,
+///   the version no longer matches and the attestation is rejected with
+///   [`DigitalPassportError::StaleVersion`] instead of silently certifying
+///   data the validator never saw;
+/// * a validator can attest a given version at most once, so a duplicated or
+///   replayed submission is rejected with
+///   [`DigitalPassportError::DuplicateAttestation`] rather than inflating the
+///   compliance history.
+///
+/// Distinct validators attesting the same version never conflict: an
+/// attestation does not bump the passport version, so quorum-style
+/// multi-validator attestation keeps working. All checks run before any
+/// state is written, so a rejected call leaves storage untouched.
+pub fn attest_espr_compliance(
+    env: &Env,
+    passport_id: BytesN<32>,
+    verifier: Address,
+    expected_version: u32,
+) -> Result<ComplianceStatus, DigitalPassportError> {
+    verifier.require_auth();
+    ensure_role(env, &verifier, Role::Auditor);
+
+    let passport: DigitalPassport = env
+        .storage()
+        .persistent()
+        .get(&PassportDataKey::Passport(passport_id.clone()))
+        .ok_or(DigitalPassportError::PassportNotFound)?;
+
+    if passport.version != expected_version {
+        return Err(DigitalPassportError::StaleVersion);
+    }
+
+    let attestation_key = PassportDataKey::Attestation(passport_id.clone(), verifier.clone());
+    if let Some(attested) = env.storage().persistent().get::<_, u32>(&attestation_key) {
+        if attested == expected_version {
+            return Err(DigitalPassportError::DuplicateAttestation);
+        }
+    }
+
+    let status = record_compliance_verification(env, &passport_id, &passport, &verifier);
+
+    env.storage().persistent().set(&attestation_key, &expected_version);
+    bump_history_ttl(env, &attestation_key);
+
+    Ok(status)
+}
+
+/// Returns the passport version a validator last attested, if any.
+pub fn get_attested_version(env: &Env, passport_id: BytesN<32>, verifier: Address) -> Option<u32> {
+    env.storage()
+        .persistent()
+        .get(&PassportDataKey::Attestation(passport_id, verifier))
+}
+
+/// Shared, deterministic compliance evaluation + persistence used by both the
+/// legacy and the race-safe attestation entrypoints.
+fn record_compliance_verification(
+    env: &Env,
+    passport_id: &BytesN<32>,
+    passport: &DigitalPassport,
+    verifier: &Address,
+) -> ComplianceStatus {
+    let passport_id = passport_id.clone();
     let mut status = ComplianceStatus::Compliant;
     let mut checked_fields: Vec<Bytes> = Vec::new(&env);
     let mut issues: Vec<Bytes> = Vec::new(&env);
@@ -1088,8 +1196,8 @@ pub fn verify_espr_compliance(
         verifier: verifier.clone(),
         status: status.clone(),
         checked_fields,
-        issues_found: issues,
-        next_review_date: env.ledger().timestamp() + (365 * 86400), // 1 year
+        issues_found: issues.clone(),
+        next_review_date: env.ledger().timestamp().saturating_add(365 * 86400), // 1 year
     };
 
     let mut records: Vec<ComplianceRecord> = env
@@ -1113,7 +1221,7 @@ pub fn verify_espr_compliance(
         env,
         &passport_id,
         AuditEventKind::ComplianceVerified,
-        &verifier,
+        verifier,
         &audit_payload,
     );
 
@@ -1261,7 +1369,7 @@ pub fn import_passport_data(
 pub fn export_to_standard_format(
     env: &Env,
     passport_id: BytesN<32>,
-    standard: Symbol,
+    _standard: Symbol,
 ) -> Bytes {
     let passport: DigitalPassport = env
         .storage()
@@ -1454,7 +1562,10 @@ pub const PASSPORT_PAGE_MAX_SCAN: u32 = 500;
 
 /// Multi-predicate filter applied during batch queries. `None` fields are
 /// non-restricting pass-throughs.
-#[contracttype]
+///
+/// Host-side query type only (never persisted or passed across a contract
+/// boundary), so it is a plain Rust struct: `#[contracttype]` cannot derive
+/// the testutils `ScVal` conversion for `Option<PassportLifecycleStage>`.
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub struct PassportFilter {
     /// Restrict to a single lifecycle stage.
@@ -1471,7 +1582,7 @@ pub struct PassportFilter {
 
 impl PassportFilter {
     /// A permissive filter that matches every passport.
-    pub fn new(env: &Env) -> Self {
+    pub fn new(_env: &Env) -> Self {
         PassportFilter {
             stage: None,
             manufacturer: None,
@@ -1520,8 +1631,8 @@ pub struct PassportPageCursor {
     pub offset: u64,
 }
 
-/// One deterministic page of query results.
-#[contracttype]
+/// One deterministic page of query results (host-side query type, see
+/// [`PassportFilter`]).
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub struct PassportPage {
     /// Passport IDs matching the filter on this page.

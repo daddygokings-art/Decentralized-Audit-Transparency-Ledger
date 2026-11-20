@@ -224,91 +224,104 @@ mod data_sharing_agreement_tests {
 
 #[cfg(test)]
 mod tamper_evidence_tests {
-    use soroban_sdk::{Env, Vec};
-    use crate::tamper_evidence::{TamperEvidenceHelper, TamperEvidenceConfig, ImmutabilityProof};
+    use crate::tamper_evidence::{
+        TamperEvidenceConfig, TamperEvidenceError, TamperEvidenceHelper, HASH_ALGORITHM_SHA256,
+    };
+    use soroban_sdk::{contract, BytesN, Env, Vec};
+
+    #[contract]
+    struct TamperProbe;
+
+    fn h(env: &Env, b: u8) -> BytesN<32> {
+        BytesN::from_array(env, &[b; 32])
+    }
+
+    fn config(threshold: u32) -> TamperEvidenceConfig {
+        TamperEvidenceConfig {
+            immutability_threshold: threshold,
+            verify_all: true,
+            hash_algorithm: HASH_ALGORITHM_SHA256,
+            verify_archives: true,
+        }
+    }
 
     #[test]
     fn test_verify_event_hash_match() {
-        let hash = soroban_sdk::BytesN::from_array([1u8; 32]);
-        let expected = soroban_sdk::BytesN::from_array([1u8; 32]);
-        assert!(TamperEvidenceHelper::verify_event_hash(&hash, &expected));
+        let env = Env::default();
+        assert!(TamperEvidenceHelper::verify_event_hash(&h(&env, 1), &h(&env, 1)));
     }
 
     #[test]
     fn test_verify_event_hash_mismatch() {
-        let hash = soroban_sdk::BytesN::from_array([1u8; 32]);
-        let expected = soroban_sdk::BytesN::from_array([2u8; 32]);
-        assert!(!TamperEvidenceHelper::verify_event_hash(&hash, &expected));
+        let env = Env::default();
+        assert!(!TamperEvidenceHelper::verify_event_hash(&h(&env, 1), &h(&env, 2)));
     }
 
     #[test]
     fn test_integrity_score_perfect() {
-        let score = TamperEvidenceHelper::calculate_integrity_score(100, 0);
-        assert_eq!(score, 100);
+        assert_eq!(TamperEvidenceHelper::calculate_integrity_score(100, 0), 100);
     }
 
     #[test]
     fn test_integrity_score_50_percent() {
-        let score = TamperEvidenceHelper::calculate_integrity_score(100, 50);
-        assert_eq!(score, 50);
+        assert_eq!(TamperEvidenceHelper::calculate_integrity_score(100, 50), 50);
     }
 
     #[test]
     fn test_integrity_score_all_compromised() {
-        let score = TamperEvidenceHelper::calculate_integrity_score(100, 100);
-        assert_eq!(score, 0);
+        assert_eq!(TamperEvidenceHelper::calculate_integrity_score(100, 100), 0);
     }
 
     #[test]
     fn test_immutability_threshold_met() {
         let env = Env::default();
-        let config = TamperEvidenceConfig {
-            immutability_threshold: 10,
-            verify_all: true,
-            hash_algorithm: 0,
-            verify_archives: true,
-        };
-
-        let proof = TamperEvidenceHelper::verify_immutability(0, 100, &config);
-        assert!(proof.immutable);
-        assert_eq!(proof.chain_length, 100);
+        let id = env.register(TamperProbe, ());
+        env.as_contract(&id, || {
+            let proof =
+                TamperEvidenceHelper::verify_immutability(&env, &h(&env, 1), 0, 100, &config(10))
+                    .unwrap();
+            assert!(proof.immutable);
+            assert_eq!(proof.chain_length, 100);
+        });
     }
 
     #[test]
     fn test_immutability_threshold_not_met() {
         let env = Env::default();
-        let config = TamperEvidenceConfig {
-            immutability_threshold: 50,
-            verify_all: true,
-            hash_algorithm: 0,
-            verify_archives: true,
-        };
+        let id = env.register(TamperProbe, ());
+        env.as_contract(&id, || {
+            let proof =
+                TamperEvidenceHelper::verify_immutability(&env, &h(&env, 1), 95, 100, &config(50))
+                    .unwrap();
+            assert!(!proof.immutable);
+            assert_eq!(proof.chain_length, 5);
+        });
+    }
 
-        let proof = TamperEvidenceHelper::verify_immutability(95, 100, &config);
-        assert!(!proof.immutable);
-        assert_eq!(proof.chain_length, 5);
+    #[test]
+    fn test_immutability_invalid_config_rejected() {
+        let env = Env::default();
+        let id = env.register(TamperProbe, ());
+        env.as_contract(&id, || {
+            assert_eq!(
+                TamperEvidenceHelper::verify_immutability(&env, &h(&env, 1), 0, 10, &config(0)),
+                Err(TamperEvidenceError::InvalidThreshold)
+            );
+        });
     }
 
     #[test]
     fn test_no_retroactive_modification() {
         let env = Env::default();
-        let hash = soroban_sdk::BytesN::from_array([1u8; 32]);
-        let mut references = Vec::new(&env);
-        references.push_back(soroban_sdk::BytesN::from_array([1u8; 32]));
-        references.push_back(soroban_sdk::BytesN::from_array([1u8; 32]));
-
-        assert!(TamperEvidenceHelper::verify_no_retroactive_modification(&hash, &references));
+        let references = Vec::from_array(&env, [h(&env, 1), h(&env, 1)]);
+        assert!(TamperEvidenceHelper::verify_no_retroactive_modification(&h(&env, 1), &references));
     }
 
     #[test]
     fn test_retroactive_modification_detected() {
         let env = Env::default();
-        let hash = soroban_sdk::BytesN::from_array([1u8; 32]);
-        let mut references = Vec::new(&env);
-        references.push_back(soroban_sdk::BytesN::from_array([1u8; 32]));
-        references.push_back(soroban_sdk::BytesN::from_array([2u8; 32])); // Mismatch!
-
-        assert!(!TamperEvidenceHelper::verify_no_retroactive_modification(&hash, &references));
+        let references = Vec::from_array(&env, [h(&env, 1), h(&env, 2)]); // Mismatch!
+        assert!(!TamperEvidenceHelper::verify_no_retroactive_modification(&h(&env, 1), &references));
     }
 }
 

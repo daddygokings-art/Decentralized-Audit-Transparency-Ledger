@@ -93,7 +93,7 @@ impl ReportingManager {
         input.append(&Bytes::from_slice(env, &period_start.to_le_bytes()));
         input.append(&Bytes::from_slice(env, &period_end.to_le_bytes()));
 
-        env.crypto().sha256(&input).to_bytes()
+        env.crypto().sha256(&input)
     }
 
     /// Validate report format against standard

@@ -1,4 +1,6 @@
-#![no_std]
+// `CBDCPilot::eCNY` is a stable public variant name matching the e-CNY brand;
+// `#[contracttype]` expands it outside the enum, so the lint is allowed here.
+#![allow(non_camel_case_types)]
 
 use soroban_sdk::{Address, Bytes, BytesN, Env, Symbol, contracttype};
 
@@ -210,24 +212,24 @@ impl CBDCTransaction {
 
         // Append serializable fields for hashing
         input.append(&self.tx_id.to_bytes());
-        input.append(&Bytes::from_slice(&self.tx_id.env(), &self.source_pilot.to_le_bytes()));
-        input.append(&Bytes::from_slice(&self.tx_id.env(), &self.dest_pilot.to_le_bytes()));
+        input.append(&Bytes::from_slice(self.tx_id.env(), &self.source_pilot.to_le_bytes()));
+        input.append(&Bytes::from_slice(self.tx_id.env(), &self.dest_pilot.to_le_bytes()));
         input.append(&Bytes::from_slice(
-            &self.tx_id.env(),
+            self.tx_id.env(),
             &self.amount_source.to_le_bytes(),
         ));
         input.append(&Bytes::from_slice(
-            &self.tx_id.env(),
+            self.tx_id.env(),
             &self.amount_dest.to_le_bytes(),
         ));
         input.append(&Bytes::from_slice(
-            &self.tx_id.env(),
+            self.tx_id.env(),
             &self.exchange_rate.to_le_bytes(),
         ));
-        input.append(&Bytes::from_slice(&self.tx_id.env(), &self.timestamp.to_le_bytes()));
+        input.append(&Bytes::from_slice(self.tx_id.env(), &self.timestamp.to_le_bytes()));
         input.append(&self.metadata);
 
-        self.tx_id.env().crypto().sha256(&input).to_bytes()
+        env.crypto().sha256(&input)
     }
 }
 
@@ -347,10 +349,11 @@ pub struct CBDCConfig {
 }
 
 impl CBDCConfig {
+    #[allow(clippy::should_implement_trait)] // Kept as an inherent fn for API stability.
     pub fn default() -> Self {
         CBDCConfig {
-            max_tx_amount: 1_000_000_00, // 1M units
-            min_tx_amount: 1_00, // 1 unit
+            max_tx_amount: 100_000_000, // 1M units
+            min_tx_amount: 100, // 1 unit
             exchange_rate_update_interval: 3600, // 1 hour
             max_batch_size: 1000,
             offline_mode_enabled: true,
@@ -420,7 +423,7 @@ mod tests {
         let config = CBDCConfig::default();
         assert!(config.is_valid_amount(100));
         assert!(!config.is_valid_amount(0));
-        assert!(!config.is_valid_amount(2_000_000_00));
+        assert!(!config.is_valid_amount(200_000_000));
     }
 
     #[test]
@@ -467,9 +470,9 @@ mod tests {
 
     #[test]
     fn test_limits_are_bounded() {
-        assert!(limits::MAX_BATCH_TRANSACTIONS > 0);
-        assert!(limits::MAX_METADATA_BYTES > 0);
-        assert!(limits::MAX_ISO20022_PAYLOAD_BYTES > 0);
-        assert!(limits::MAX_SETTLEMENT_LEGS > 0);
+        const _: () = assert!(limits::MAX_BATCH_TRANSACTIONS > 0);
+        const _: () = assert!(limits::MAX_METADATA_BYTES > 0);
+        const _: () = assert!(limits::MAX_ISO20022_PAYLOAD_BYTES > 0);
+        const _: () = assert!(limits::MAX_SETTLEMENT_LEGS > 0);
     }
 }
