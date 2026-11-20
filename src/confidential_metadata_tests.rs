@@ -177,6 +177,37 @@ mod tests {
     }
 
     #[test]
+    fn test_network_partition_fails_closed_and_recovers_by_epoch() {
+        let env = Env::default();
+        let contract_id = env.register(ConfidentialEventLedger, ());
+        let client = ConfidentialEventLedgerClient::new(&env, &contract_id);
+
+        let admin = Address::generate(&env);
+        let submitter = Address::generate(&env);
+        bootstrap(&env, &admin, &submitter);
+        client.initialize(&admin);
+
+        client.set_confidential_partition(&admin, &true).unwrap();
+        assert!(client.confidential_partitioned());
+        assert_eq!(client.confidential_partition_epoch(), 1);
+
+        assert!(client
+            .try_log_confidential_event(
+                &submitter,
+                &Symbol::new(&env, "partition"),
+                &Bytes::from_slice(&env, b"payload"),
+                &AccessControlPolicy::Public,
+                &Bytes::from_slice(&env, b"deterministic-zk-proof"),
+                &BytesN::from_array(&env, &[43u8; 32]),
+            )
+            .is_err());
+
+        client.set_confidential_partition(&admin, &false).unwrap();
+        assert!(!client.confidential_partitioned());
+        assert_eq!(client.confidential_partition_epoch(), 1);
+    }
+
+    #[test]
     fn test_confidential_analytics_aggregation() {
         let env = Env::default();
         let contract_id = env.register(ConfidentialEventLedger, ());
