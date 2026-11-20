@@ -123,6 +123,13 @@ pub mod cqrs;
 #[cfg(test)]
 mod cqrs_tests;
 
+// Canonical Groth16 / BN254 proof serialization: rejects non-canonical point
+// encodings, identity points, and aliased public inputs.
+pub mod proof_encoding;
+
+#[cfg(test)]
+mod proof_encoding_tests;
+
 #[cfg(test)]
 mod pause_granular_tests;
 

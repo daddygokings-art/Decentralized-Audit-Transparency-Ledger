@@ -74,6 +74,7 @@ files = [
     "src/export_controls/tests.rs",
     "src/responsible_sourcing/tests.rs",
     "src/trade_compliance/tests.rs",
+    "src/proof_encoding_tests.rs",
 
     # Integration tests live outside src/
     "tests/",
@@ -569,3 +570,13 @@ name = "ssi_integration"
 path_prefix = "src/ssi_integration.rs"
 line = 50.0
 description = "Self-sovereign identity integration"
+
+# ─ Canonical proof serialization ──────────────────────────────────────────────
+# Pure, allocation-free byte validation with exhaustive slot/boundary tests in
+# src/proof_encoding_tests.rs, so every branch is reachable.
+[[module]]
+name = "proof_encoding"
+path_prefix = "src/proof_encoding.rs"
+line = 95.0
+branch = 90.0
+description = "Groth16/BN254 proof (de)serialization — rejects non-canonical point encodings"
