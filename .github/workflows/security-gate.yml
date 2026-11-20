@@ -9,8 +9,9 @@ name: Security Policy Gate & Reporting
 #   2. Generates a unified security report (JSON + Markdown)
 #   3. Enforces pass/fail policy before a PR can be merged
 #   4. Publishes the security posture summary as a PR comment
-#   5. On schedule: generates a weekly security status report and
-#      opens/updates a GitHub issue if the overall posture degrades
+#   5. On schedule: generates a weekly security status report (live
+#      code-scanning alert counts + SLA breaches) and opens one GitHub issue
+#      per ISO week, commenting on it if the report is re-run that week
 
 concurrency:
   group: security-gate-${{ github.ref }}
@@ -288,18 +289,107 @@ jobs:
         with:
           persist-credentials: false
 
+      - name: Verify referenced security docs exist
+        run: |
+          set -euo pipefail
+          missing=0
+          for doc in \
+            docs/security/vulnerability-management.md \
+            docs/security/audit-checklist-contracts.md \
+            docs/security/audit-checklist-apis-services.md \
+            docs/security/audit-checklist-infrastructure.md \
+            docs/security/incident-response-plan.md; do
+            if [ ! -f "$doc" ]; then
+              echo "::error file=.github/workflows/security-gate.yml::Posture report links to missing doc $doc"
+              missing=1
+            fi
+          done
+          exit "$missing"
+
       - name: Generate weekly posture report
         uses: actions/github-script@v7
         with:
           script: |
-            const date = new Date().toISOString().split('T')[0];
-            const title = `Security Posture Report — ${date}`;
+            const now = new Date();
+            const date = now.toISOString().split('T')[0];
+
+            // ISO-8601 week label (e.g. 2026-W40). Reports are de-duplicated per
+            // ISO week; the previous implementation keyed on YYYY-MM, so every
+            // report in a month was folded into a single issue.
+            const isoWeek = (d) => {
+              const t = new Date(Date.UTC(d.getUTCFullYear(), d.getUTCMonth(), d.getUTCDate()));
+              const day = t.getUTCDay() || 7;
+              t.setUTCDate(t.getUTCDate() + 4 - day);
+              const yearStart = new Date(Date.UTC(t.getUTCFullYear(), 0, 1));
+              const week = Math.ceil(((t - yearStart) / 86400000 + 1) / 7);
+              return `${t.getUTCFullYear()}-W${String(week).padStart(2, '0')}`;
+            };
+            const week = isoWeek(now);
+            const title = `Security Posture Report — ${week} (${date})`;
+
+            const docLink = (path) =>
+              `[\`${path}\`](${context.serverUrl}/${context.repo.owner}/${context.repo.repo}/blob/${context.sha}/${path})`;
+
+            // ── Live code-scanning alert summary ─────────────────────────────
+            // SLA in days per severity (docs/security/vulnerability-management.md).
+            const SLA_DAYS = { critical: 1, high: 7, medium: 30, low: 90 };
+            const normalizeSeverity = (alert) => {
+              const sec = alert.rule?.security_severity_level;
+              if (sec) return sec.toLowerCase();
+              const sev = (alert.rule?.severity || '').toLowerCase();
+              if (sev === 'error') return 'high';
+              if (sev === 'warning') return 'medium';
+              return 'low';
+            };
+
+            let alertSection;
+            let slaBreaches = 0;
+            try {
+              const alerts = await github.paginate(
+                github.rest.codeScanning.listAlertsForRepo,
+                { owner: context.repo.owner, repo: context.repo.repo, state: 'open', per_page: 100 },
+              );
+              const counts = { critical: 0, high: 0, medium: 0, low: 0 };
+              const breaches = { critical: 0, high: 0, medium: 0, low: 0 };
+              for (const alert of alerts) {
+                const sev = normalizeSeverity(alert);
+                if (!(sev in counts)) continue;
+                counts[sev] += 1;
+                const ageDays = (now - new Date(alert.created_at)) / 86400000;
+                if (ageDays > SLA_DAYS[sev]) breaches[sev] += 1;
+              }
+              slaBreaches = Object.values(breaches).reduce((a, b) => a + b, 0);
+              alertSection = [
+                `### Open Code-Scanning Alerts`,
+                ``,
+                `| Severity | Open | Past SLA |`,
+                `|----------|------|----------|`,
+                ...Object.keys(counts).map(
+                  (s) => `| ${s[0].toUpperCase()}${s.slice(1)} | ${counts[s]} | ${breaches[s]} |`,
+                ),
+                ``,
+                slaBreaches > 0
+                  ? `> :warning: **${slaBreaches} alert(s) are past their remediation SLA.**`
+                  : `> :white_check_mark: No open alerts are past their remediation SLA.`,
+              ];
+            } catch (err) {
+              core.warning(`Could not list code-scanning alerts: ${err.message}`);
+              alertSection = [
+                `### Open Code-Scanning Alerts`,
+                ``,
+                `_Unavailable: ${err.status ?? ''} ${err.message}. Enable code scanning or grant \`security-events: read\` to include live alert counts._`,
+              ];
+            }
 
             const body = [
               `## Weekly Security Posture Report`,
               ``,
               `**Date:** ${date}`,
-              `**Repository:** ${{ github.repository }}`,
+              `**Week:** ${week}`,
+              `**Repository:** ${context.repo.owner}/${context.repo.repo}`,
+              `**Commit:** \`${context.sha.substring(0, 12)}\``,
+              ``,
+              ...alertSection,
               ``,
               `### Scan Coverage`,
               ``,
@@ -327,24 +417,25 @@ jobs:
               `| Medium | 30 days |`,
               `| Low | 90 days |`,
               ``,
-              `_See \`docs/security/vulnerability-management.md\` for the full SLA policy._`,
+              `_See ${docLink('docs/security/vulnerability-management.md')} for the full SLA policy._`,
               ``,
-              `_See \`docs/security/audit-checklists.md\` and \`docs/security/incident-response.md\` for audit and IR procedures._`,
+              `_Audit checklists: ${docLink('docs/security/audit-checklist-contracts.md')}, ${docLink('docs/security/audit-checklist-apis-services.md')}, ${docLink('docs/security/audit-checklist-infrastructure.md')}._`,
+              ``,
+              `_Incident response: ${docLink('docs/security/incident-response-plan.md')}._`,
               ``,
               `_Auto-generated by the Security Policy Gate & Reporting workflow._`,
             ].join('\n');
 
-            // Check for existing open report issue
-            const { data: issues } = await github.rest.issues.listForRepo({
+            // Find this week's open report issue (paginate: the label may hold
+            // more than one page of historical reports).
+            const issues = await github.paginate(github.rest.issues.listForRepo, {
               owner: context.repo.owner,
               repo: context.repo.repo,
               state: 'open',
               labels: 'security-report',
-              per_page: 5,
+              per_page: 100,
             });
-
-            const week = new Date().toISOString().substring(0, 7); // YYYY-MM
-            const existing = issues.find(i => i.title.includes(week));
+            const existing = issues.find((i) => !i.pull_request && i.title.includes(week));
 
             if (existing) {
               await github.rest.issues.createComment({
@@ -361,4 +452,8 @@ jobs:
                 body,
                 labels: ['security-report', 'security'],
               });
+            }
+
+            if (slaBreaches > 0) {
+              core.warning(`${slaBreaches} code-scanning alert(s) are past their remediation SLA.`);
             }

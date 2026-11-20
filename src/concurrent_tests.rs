@@ -1,4 +1,5 @@
 use super::*;
+use crate::cross_chain_bridge::{BalanceAttestation, BridgeKey, BridgeRelay, CrossChainBridge};
 use soroban_sdk::testutils::Address as _;
 use soroban_sdk::{symbol_short, Bytes, Env, Vec};
 
@@ -832,3 +833,188 @@ fn concurrent_cap_removal_and_logging_same_type() {
         assert_eq!(event.metadata, metadata_for(&env, submitter_index, index));
     }
 }
+
+// ── Cross-chain Bridge Multi-Actor Concurrent Access Scenarios (issues #905, #904, #902, #877) ──
+
+fn bridge_actors(env: &Env, count: u32) -> Vec<Address> {
+    let mut addrs = Vec::new(env);
+    for _ in 0..count {
+        addrs.push_back(Address::generate(env));
+    }
+    addrs
+}
+
+fn bridge_eth_addr(env: &Env, salt: u8) -> Bytes {
+    let mut arr = [0u8; 42];
+    arr[0] = b'0';
+    arr[1] = b'x';
+    for i in 2..42 {
+        arr[i] = b'a' + (salt % 6);
+    }
+    Bytes::from_slice(env, &arr)
+}
+
+fn make_relay_attestation(
+    env: &Env,
+    relay: &Address,
+    user_salt: u8,
+    token_salt: u8,
+    token_id: u128,
+    balance: u128,
+    seq: u64,
+) -> BalanceAttestation {
+    BalanceAttestation {
+        relay: relay.clone(),
+        user_address: bridge_eth_addr(env, user_salt),
+        token_address: bridge_eth_addr(env, token_salt),
+        token_id,
+        balance,
+        block_height: 100 + seq,
+        timestamp: 1_700_000_000 + seq,
+        signature: Bytes::from_slice(env, &[1u8; 65]),
+        accepted: false,
+    }
+}
+
+#[test]
+fn concurrent_bridge_attestation_multi_relay_interleaved() {
+    let env = Env::default();
+    env.mock_all_auths();
+    let owner = Address::generate(&env);
+    let relays = bridge_actors(&env, 4);
+
+    CrossChainBridge::initialize_bridge(env.clone(), owner, 2, 100, 1);
+    for i in 0..4u32 {
+        let r = relays.get(i).unwrap();
+        CrossChainBridge::register_relay(env.clone(), r, Bytes::from_slice(&env, &[0x04u8; 65]));
+    }
+
+    // Interleave attestation submissions across 4 relays for 10 rounds
+    for seq in 0..10u64 {
+        for relay_idx in 0..4u32 {
+            let r = relays.get(relay_idx).unwrap();
+            let att = make_relay_attestation(&env, &r, relay_idx as u8, 1, seq as u128, (seq + 1) * 1000, seq * 4 + relay_idx as u64 + 1);
+            CrossChainBridge::submit_attestation(env.clone(), att);
+        }
+    }
+
+    // Assert sequence counter monotonicity under concurrent multi-relay execution
+    let next_seq: u64 = env
+        .storage()
+        .instance()
+        .get(&BridgeKey::AttestationNextSeq)
+        .unwrap();
+    assert_eq!(next_seq, 41);
+}
+
+#[test]
+fn concurrent_bridge_multi_actor_replay_detection() {
+    let env = Env::default();
+    env.mock_all_auths();
+    let owner = Address::generate(&env);
+    let relays = bridge_actors(&env, 4);
+
+    CrossChainBridge::initialize_bridge(env.clone(), owner, 2, 100, 1);
+    for i in 0..4u32 {
+        let r = relays.get(i).unwrap();
+        CrossChainBridge::register_relay(env.clone(), r, Bytes::from_slice(&env, &[0x04u8; 65]));
+    }
+
+    let mut successful_submits = 0u64;
+
+    for seq in 0..6u64 {
+        for relay_idx in 0..4u32 {
+            let r = relays.get(relay_idx).unwrap();
+            let att = make_relay_attestation(&env, &r, relay_idx as u8, 2, seq as u128, (seq + 1) * 2000, seq * 4 + relay_idx as u64 + 10);
+            CrossChainBridge::submit_attestation(env.clone(), att.clone());
+            successful_submits += 1;
+
+            // Concurrently simulate duplicate replay attempt (must panic or be rejected)
+            let duplicate_attempt = std::panic::catch_unwind(|| {
+                CrossChainBridge::submit_attestation(env.clone(), att);
+            });
+            assert!(duplicate_attempt.is_err(), "Duplicate attestation replay must fail");
+        }
+    }
+
+    let next_seq: u64 = env
+        .storage()
+        .instance()
+        .get(&BridgeKey::AttestationNextSeq)
+        .unwrap();
+    assert_eq!(next_seq, successful_submits + 1);
+}
+
+#[test]
+fn concurrent_bridge_batch_and_single_attestations_interleaved() {
+    let env = Env::default();
+    env.mock_all_auths();
+    let owner = Address::generate(&env);
+    let relays = bridge_actors(&env, 3);
+
+    CrossChainBridge::initialize_bridge(env.clone(), owner, 2, 100, 1);
+    for i in 0..3u32 {
+        let r = relays.get(i).unwrap();
+        CrossChainBridge::register_relay(env.clone(), r, Bytes::from_slice(&env, &[0x04u8; 65]));
+    }
+
+    // Relay 0 submits single attestations, Relay 1 & 2 submit batches
+    for round in 0..5u64 {
+        let r0 = relays.get(0).unwrap();
+        let att0 = make_relay_attestation(&env, &r0, 0, 3, round as u128, 500, round * 10 + 1);
+        CrossChainBridge::submit_attestation(env.clone(), att0);
+
+        let r1 = relays.get(1).unwrap();
+        let mut b1 = Vec::new(&env);
+        b1.push_back(make_relay_attestation(&env, &r1, 1, 3, round as u128, 600, round * 10 + 2));
+        b1.push_back(make_relay_attestation(&env, &r1, 1, 3, (round + 100) as u128, 700, round * 10 + 3));
+        let res = CrossChainBridge::submit_attestation_batch(env.clone(), b1);
+        assert_eq!(res, Ok(2));
+    }
+
+    let next_seq: u64 = env
+        .storage()
+        .instance()
+        .get(&BridgeKey::AttestationNextSeq)
+        .unwrap();
+    assert_eq!(next_seq, 1 + 5 * 3);
+}
+
+#[test]
+fn concurrent_bridge_attestation_acceptance_and_cache_lookups() {
+    let env = Env::default();
+    env.mock_all_auths();
+    let owner = Address::generate(&env);
+    let relays = bridge_actors(&env, 2);
+
+    CrossChainBridge::initialize_bridge(env.clone(), owner.clone(), 1, 50, 1);
+    for i in 0..2u32 {
+        let r = relays.get(i).unwrap();
+        CrossChainBridge::register_relay(env.clone(), r, Bytes::from_slice(&env, &[0x04u8; 65]));
+    }
+
+    // Interleave submissions, acceptance, and cache queries
+    for i in 0..4u64 {
+        let relay_idx = (i % 2) as u32;
+        let r = relays.get(relay_idx).unwrap();
+        let att = make_relay_attestation(&env, &r, relay_idx as u8, 4, i as u128, (i + 1) * 10_000, i + 50);
+        
+        CrossChainBridge::submit_attestation(env.clone(), att.clone());
+        CrossChainBridge::accept_attestation(
+            env.clone(),
+            r.clone(),
+            att.user_address.clone(),
+            att.token_address.clone(),
+            att.token_id,
+        );
+
+        let bal = CrossChainBridge::get_verified_balance(
+            env.clone(),
+            att.user_address,
+            att.token_address,
+            att.token_id,
+        );
+        assert_eq!(bal, (i + 1) * 10_000);
+    }
+}
+

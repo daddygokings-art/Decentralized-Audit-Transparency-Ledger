@@ -44,3 +44,4 @@ audit-migrate zero-downtime-plan --table contract_events --old-column metadata -
 2. `002_event_partitions_and_verification`: Verification status table and event topics.
 3. `003_event_aggregates_and_dead_letter`: Daily stats aggregates and ingestion dead letter queue.
 4. `004_zero_downtime_payload_expansion`: Safe backward-compatible schema expansion example.
+5. `005_dispute_votes_relational_table`: Dedicated relational table and aggregate view for fast querying and aggregation of dispute votes (`dispute_votes`, `dispute_votes_aggregation`).

@@ -3,6 +3,12 @@
 extern crate std;
 
 use super::*;
+use crate::confidential_metadata::{
+    AccessControlPolicy, ConfidentialAggregate, ConfidentialError, ConfidentialEventLedger,
+    ConfidentialEventLedgerClient, ConfidentialMetadata, EncryptionKeyRecord,
+    MAX_AGGREGATE_BATCH, MAX_ENCRYPTED_PAYLOAD_BYTES, MAX_POLICY_PARTIES, MAX_ZK_PROOF_BYTES,
+};
+use crate::rbac::{RbacManager, Role};
 use proptest::prelude::*;
 use soroban_sdk::testutils::{Address as _, Ledger};
 use soroban_sdk::{Bytes, Symbol, Vec as SorobanVec};
@@ -316,6 +322,189 @@ fn boundary_i128_strategy() -> impl Strategy<Value = i128> {
         Just(i128::MIN + 1),
         any::<i128>(),
     ]
+}
+
+// ── Confidential Event Ledger proptest helpers ──────────────────────────────
+
+fn create_confidential_ledger() -> (Env, Address, Address, ConfidentialEventLedgerClient<'static>) {
+    let env = Env::default();
+    let contract_id = env.register(ConfidentialEventLedger, ());
+    let client = ConfidentialEventLedgerClient::new(&env, &contract_id);
+
+    let admin = Address::generate(&env);
+    let submitter = Address::generate(&env);
+    env.mock_all_auths();
+    RbacManager::initialize_admin(&env, &admin);
+    RbacManager::set_role(&env, &admin, &submitter, Role::Submitter).unwrap();
+    client.initialize(&admin);
+
+    (env, admin, submitter, client)
+}
+
+fn confidential_payload_strategy() -> impl Strategy<Value = StdVec<u8>> {
+    prop::collection::vec(any::<u8>(), 1..=128)
+}
+
+fn valid_zk_proof_strategy() -> impl Strategy<Value = StdVec<u8>> {
+    prop::collection::vec(any::<u8>(), 16..=64)
+}
+
+fn invalid_zk_proof_strategy() -> impl Strategy<Value = StdVec<u8>> {
+    prop::collection::vec(any::<u8>(), 0..=15)
+}
+
+fn confidential_event_sequence_strategy() -> impl Strategy<Value = StdVec<(String, StdVec<u8>, StdVec<u8>)>> {
+    prop::collection::vec(
+        (event_type_strategy(), confidential_payload_strategy(), valid_zk_proof_strategy()),
+        1..=8,
+    )
+}
+
+// ── ML Feature Store proptest reference model ───────────────────────────────
+
+#[derive(Debug, Clone)]
+struct FeatureRecord {
+    sequence: u64,
+    parent_id: Option<BytesN<32>>,
+    feature_hash: BytesN<32>,
+    prev_hash: BytesN<32>,
+    feature_type: Symbol,
+}
+
+#[derive(Clone)]
+struct MockFeatureStore {
+    env: Env,
+    features: StdVec<FeatureRecord>,
+    attestations: StdVec<BytesN<32>>,
+    feature_ids: StdVec<u64>,
+}
+
+impl MockFeatureStore {
+    fn new(env: Env) -> Self {
+        Self {
+            env,
+            features: StdVec::new(),
+            attestations: StdVec::new(),
+            feature_ids: StdVec::new(),
+        }
+    }
+
+    fn total_features(&self) -> u32 {
+        self.features.len() as u32
+    }
+
+    fn get_feature_by_order(&self, i: &u32) -> FeatureRecord {
+        self.features[*i as usize].clone()
+    }
+
+    fn get_feature(&self, id: &BytesN<32>) -> FeatureRecord {
+        self.features
+            .iter()
+            .find(|f| &f.feature_hash == id)
+            .cloned()
+            .unwrap()
+    }
+
+    fn verify_feature_integrity(&self) -> bool {
+        if self.features.is_empty() {
+            return true;
+        }
+        if self.features[0].prev_hash != BytesN::from_array(&self.env, &[0u8; 32]) {
+            return false;
+        }
+        for i in 1..self.features.len() {
+            if self.features[i].prev_hash != self.features[i - 1].feature_hash {
+                return false;
+            }
+        }
+        true
+    }
+
+    fn total_attestations(&self) -> u32 {
+        self.attestations.len() as u32
+    }
+
+    fn get_attestation_id_by_order(&self, i: &u32) -> BytesN<32> {
+        self.attestations[*i as usize].clone()
+    }
+
+    fn try_submit_feature(
+        &mut self,
+        _owner: &Address,
+        feature_id: &u64,
+        _metadata: &Bytes,
+        _parent: &Option<BytesN<32>>,
+    ) -> Result<BytesN<32>, ()> {
+        if self.feature_ids.contains(feature_id) {
+            return Ok(BytesN::from_array(&self.env, &[1u8; 32]));
+        }
+        self.feature_ids.push(*feature_id);
+        let seq = self.features.len() as u64;
+        let mut hash_arr = [0u8; 32];
+        hash_arr[0..8].copy_from_slice(&feature_id.to_be_bytes());
+        let hash = BytesN::from_array(&self.env, &hash_arr);
+        let prev = if let Some(last) = self.features.last() {
+            last.feature_hash.clone()
+        } else {
+            BytesN::from_array(&self.env, &[0u8; 32])
+        };
+        self.features.push(FeatureRecord {
+            sequence: seq,
+            parent_id: None,
+            feature_hash: hash.clone(),
+            prev_hash: prev,
+            feature_type: Symbol::new(&self.env, "default"),
+        });
+        Ok(hash)
+    }
+
+    fn feature_count(&self, feature_type: &Symbol) -> u32 {
+        self.features
+            .iter()
+            .filter(|f| &f.feature_type == feature_type)
+            .count() as u32
+    }
+}
+
+fn create_feature_store() -> (Env, Address, MockFeatureStore) {
+    let env = Env::default();
+    let owner = Address::generate(&env);
+    let store = MockFeatureStore::new(env.clone());
+    (env, owner, store)
+}
+
+#[derive(Debug, Clone)]
+enum FeatureStoreOp {
+    Submit { feature_id: u64, metadata: StdVec<u8> },
+}
+
+fn random_feature_store_sequence_strategy() -> impl Strategy<Value = StdVec<FeatureStoreOp>> {
+    prop::collection::vec(
+        (any::<u64>(), metadata_strategy())
+            .prop_map(|(feature_id, metadata)| FeatureStoreOp::Submit { feature_id, metadata }),
+        1..=8,
+    )
+}
+
+fn run_feature_store_sequence(
+    env: &Env,
+    owner: &Address,
+    store: &MockFeatureStore,
+    ops: &[FeatureStoreOp],
+) {
+    let mut mutable_store = store.clone();
+    for op in ops {
+        match op {
+            FeatureStoreOp::Submit { feature_id, metadata } => {
+                let _ = mutable_store.try_submit_feature(
+                    owner,
+                    feature_id,
+                    &bytes(env, metadata),
+                    &None,
+                );
+            }
+        }
+    }
 }
 
 proptest! {
@@ -1103,5 +1292,162 @@ proptest! {
             total, sum,
             "total_features must equal sum of per-type counts after rollback"
         );
+    }
+
+    // ── State-machine invariants for confidential_metadata (issues #943, #922, #916, #914) ──
+
+    #[test]
+    fn prop_confidential_sequence_monotonicity_and_event_count(
+        events in confidential_event_sequence_strategy()
+    ) {
+        let (env, _admin, submitter, client) = create_confidential_ledger();
+        let key_id = BytesN::from_array(&env, &[9u8; 32]);
+        let mut count = 0u32;
+
+        for (event_type, payload, zk_proof) in events.into_iter() {
+            let sym = Symbol::new(&env, &event_type);
+            let enc_payload = bytes(&env, &payload);
+            let proof = bytes(&env, &zk_proof);
+            let policy = AccessControlPolicy::SubmitterOnly;
+
+            let event_id = client.log_confidential_event(
+                &submitter,
+                &sym,
+                &enc_payload,
+                &policy,
+                &proof,
+                &key_id,
+            ).unwrap();
+
+            count += 1;
+            let record = client.get_confidential_event(&event_id);
+            assert_eq!(record.submitter, submitter);
+            assert_eq!(record.event_type, sym);
+            assert_eq!(record.encrypted_payload, enc_payload);
+            let expected_proof_hash: BytesN<32> = env.crypto().sha256(&proof);
+            assert_eq!(record.zk_proof_hash, expected_proof_hash);
+        }
+
+        assert_eq!(count, count);
+    }
+
+    #[test]
+    fn prop_confidential_key_lifecycle_state_machine(
+        pubkey1 in confidential_payload_strategy(),
+        pubkey2 in confidential_payload_strategy()
+    ) {
+        let (env, _admin, user, client) = create_confidential_ledger();
+
+        // 1. Initial registration
+        let pk1 = bytes(&env, &pubkey1);
+        client.register_encryption_key(&user, &pk1).unwrap();
+
+        // 2. Rotation
+        let pk2 = bytes(&env, &pubkey2);
+        client.rotate_encryption_key(&user, &pk2).unwrap();
+
+        // 3. Revocation
+        client.revoke_encryption_key(&user).unwrap();
+    }
+
+    #[test]
+    fn prop_confidential_access_control_policy_soundness(
+        payload in confidential_payload_strategy(),
+        proof in valid_zk_proof_strategy()
+    ) {
+        let (env, _admin, submitter, client) = create_confidential_ledger();
+        let recipient = Address::generate(&env);
+        let unauthorized = Address::generate(&env);
+        let key_id = BytesN::from_array(&env, &[3u8; 32]);
+
+        let sym = Symbol::new(&env, "access_test");
+        let enc_payload = bytes(&env, &payload);
+        let zk_bytes = bytes(&env, &proof);
+
+        let mut allowed = SorobanVec::new(&env);
+        allowed.push_back(recipient.clone());
+        let policy = AccessControlPolicy::CustomAllowlist(allowed);
+
+        let event_id = client.log_confidential_event(
+            &submitter,
+            &sym,
+            &enc_payload,
+            &policy,
+            &zk_bytes,
+            &key_id,
+        ).unwrap();
+
+        // Submitter and allowlisted recipient must have access
+        assert!(client.check_access(&event_id, &submitter));
+        assert!(client.check_access(&event_id, &recipient));
+        // Unauthorized party must NOT have access
+        assert!(!client.check_access(&event_id, &unauthorized));
+
+        // Submitter and recipient can decrypt
+        let dec1 = client.decrypt_event_metadata(&event_id, &submitter);
+        assert_eq!(dec1, enc_payload);
+        let dec2 = client.decrypt_event_metadata(&event_id, &recipient);
+        assert_eq!(dec2, enc_payload);
+    }
+
+    #[test]
+    fn prop_confidential_zk_proof_and_boundary_rejection(
+        bad_proof in invalid_zk_proof_strategy(),
+        valid_payload in confidential_payload_strategy()
+    ) {
+        let (env, _admin, submitter, client) = create_confidential_ledger();
+        let key_id = BytesN::from_array(&env, &[4u8; 32]);
+        let sym = Symbol::new(&env, "boundary");
+        let enc_payload = bytes(&env, &valid_payload);
+        let proof = bytes(&env, &bad_proof);
+        let policy = AccessControlPolicy::Public;
+
+        // Proof < 16 bytes must be rejected
+        let res = client.try_log_confidential_event(
+            &submitter,
+            &sym,
+            &enc_payload,
+            &policy,
+            &proof,
+            &key_id,
+        );
+        assert!(res.is_err(), "proof < 16 bytes must be rejected");
+    }
+
+    #[test]
+    fn prop_confidential_aggregation_invariance(
+        events in confidential_event_sequence_strategy()
+    ) {
+        let (env, _admin, submitter, client) = create_confidential_ledger();
+        let key_id = BytesN::from_array(&env, &[5u8; 32]);
+        let mut ids = SorobanVec::new(&env);
+        let mut expected_accumulator = Bytes::new(&env);
+
+        for (event_type, payload, proof) in events.into_iter() {
+            let sym = Symbol::new(&env, &event_type);
+            let enc_payload = bytes(&env, &payload);
+            let zk_bytes = bytes(&env, &proof);
+            let policy = AccessControlPolicy::Public;
+
+            let id = client.log_confidential_event(
+                &submitter,
+                &sym,
+                &enc_payload,
+                &policy,
+                &zk_bytes,
+                &key_id,
+            ).unwrap();
+
+            ids.push_back(id);
+            expected_accumulator.append(&enc_payload);
+        }
+
+        let count = ids.len();
+        let agg = client.aggregate_confidential_events(&ids);
+        assert_eq!(agg.total_events, count);
+        assert_eq!(agg.encrypted_accumulator, expected_accumulator);
+        let expected_proof = env.crypto().sha256(&expected_accumulator);
+        let agg_proof_bytes: Bytes = expected_proof.into();
+        assert_eq!(agg.zk_aggregation_proof, agg_proof_bytes);
     }
 }

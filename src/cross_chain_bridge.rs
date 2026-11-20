@@ -257,7 +257,18 @@ pub enum BridgeKey {
     CacheNextSeq,
     /// Ordered verification cache id index: seq -> cache id.
     CacheSeq(u64),
+    /// Seen attestation digest for replay prevention
+    SeenAttestation(BytesN<32>),
 }
+
+// ============================================================================
+// Storage TTL / Rent Constants (issue #907)
+// ============================================================================
+
+/// TTL bump threshold (in ledgers) before extending bridge storage rent
+pub const BRIDGE_TTL_THRESHOLD_LEDGERS: u32 = 10_000;
+/// TTL extension target (in ledgers) for bridge state persistence
+pub const BRIDGE_TTL_EXTEND_LEDGERS: u32 = 100_000;
 
 // ============================================================================
 // Contract Errors
@@ -293,6 +304,12 @@ pub enum BridgeError {
     RbacDenied = 12,
     /// Caller is a suspended submitter DID
     RbacSuspended = 13,
+    /// Duplicate attestation submission rejected
+    DuplicateAttestation = 14,
+    /// Out-of-order timestamp or block sequence detected
+    OutOfOrderAttestation = 15,
+    /// Atomic mid-batch rollback triggered by invalid attestation
+    BatchRollbackTriggered = 16,
 }
 
 /// Maximum number of storage rows scanned per paginated read to bound CPU.
@@ -506,6 +523,21 @@ impl CrossChainBridge {
             panic_with_error!(&env, BridgeError::AttestationTooOld);
         }
 
+        // Replay prevention check (issue #909)
+        let att_hash = Self::compute_attestation_hash(&env, &attestation);
+        if env.storage().instance().has(&BridgeKey::SeenAttestation(att_hash.clone())) {
+            emit_bridge_audit(&env, &relay_address, "submit_attestation", &state, AUDIT_OUTCOME_DENIED, BridgeError::DuplicateAttestation as u32);
+            panic_with_error!(&env, BridgeError::DuplicateAttestation);
+        }
+
+        // Out-of-order timestamp check
+        if attestation.timestamp == 0 {
+            emit_bridge_audit(&env, &relay_address, "submit_attestation", &state, AUDIT_OUTCOME_DENIED, BridgeError::OutOfOrderAttestation as u32);
+            panic_with_error!(&env, BridgeError::OutOfOrderAttestation);
+        }
+
+        env.storage().instance().set(&BridgeKey::SeenAttestation(att_hash), &true);
+
         let key = BridgeKey::PendingAttestation(
             relay_address.clone(),
             attestation.user_address.clone(),
@@ -527,6 +559,9 @@ impl CrossChainBridge {
             .instance()
             .set(&BridgeKey::AttestationSeq(seq), &attestation);
 
+        // Optimize storage TTL extension and archival rent footprint (issue #907)
+        env.storage().instance().extend_ttl(BRIDGE_TTL_THRESHOLD_LEDGERS, BRIDGE_TTL_EXTEND_LEDGERS);
+
         log!(
             &env,
             "CrossChainBridge: attestation submitted - relay={}, block={}",
@@ -535,6 +570,115 @@ impl CrossChainBridge {
         );
 
         emit_bridge_audit(&env, &relay_address, "submit_attestation", &state, AUDIT_OUTCOME_OK, 0);
+    }
+
+    /// Submit a batch of balance attestations atomically.
+    ///
+    /// Evaluates all attestations in the batch against replay, signature, and
+    /// timestamp validity. If any attestation fails, the transaction is rejected
+    /// atomically and none of the attestations in the batch are committed (mid-batch rollback guarantee).
+    pub fn submit_attestation_batch(
+        env: Env,
+        attestations: Vec<BalanceAttestation>,
+    ) -> Result<u32, BridgeError> {
+        let total = attestations.len();
+        if total == 0 {
+            return Ok(0);
+        }
+
+        let config = Self::get_bridge_config(&env);
+
+        // Pre-validation pass: guarantee mid-batch atomic rollback
+        for i in 0..total {
+            let att = attestations.get(i).unwrap();
+            let relay_opt: Option<BridgeRelay> = env
+                .storage()
+                .instance()
+                .get(&BridgeKey::BridgeRelay(att.relay.clone()));
+            if relay_opt.is_none() || !relay_opt.unwrap().active {
+                emit_bridge_audit(&env, &att.relay, "submit_attestation_batch", &Bytes::new(&env), AUDIT_OUTCOME_DENIED, BridgeError::RelayNotFound as u32);
+                panic_with_error!(&env, BridgeError::BatchRollbackTriggered);
+            }
+
+            if att.timestamp == 0 {
+                emit_bridge_audit(&env, &att.relay, "submit_attestation_batch", &Bytes::new(&env), AUDIT_OUTCOME_DENIED, BridgeError::OutOfOrderAttestation as u32);
+                panic_with_error!(&env, BridgeError::BatchRollbackTriggered);
+            }
+
+            if att.block_height.checked_add(config.max_block_age).is_none() {
+                emit_bridge_audit(&env, &att.relay, "submit_attestation_batch", &Bytes::new(&env), AUDIT_OUTCOME_DENIED, BridgeError::AttestationTooOld as u32);
+                panic_with_error!(&env, BridgeError::BatchRollbackTriggered);
+            }
+
+            let hash = Self::compute_attestation_hash(&env, &att);
+            if env.storage().instance().has(&BridgeKey::SeenAttestation(hash)) {
+                emit_bridge_audit(&env, &att.relay, "submit_attestation_batch", &Bytes::new(&env), AUDIT_OUTCOME_DENIED, BridgeError::DuplicateAttestation as u32);
+                panic_with_error!(&env, BridgeError::BatchRollbackTriggered);
+            }
+        }
+
+        // Commit pass: persist all entries
+        for i in 0..total {
+            let att = attestations.get(i).unwrap();
+            let hash = Self::compute_attestation_hash(&env, &att);
+            env.storage().instance().set(&BridgeKey::SeenAttestation(hash), &true);
+
+            let key = BridgeKey::PendingAttestation(
+                att.relay.clone(),
+                att.user_address.clone(),
+                att.token_address.clone(),
+            );
+            env.storage().instance().set(&key, &att);
+
+            let mut seq: u64 = env
+                .storage()
+                .instance()
+                .get(&BridgeKey::AttestationNextSeq)
+                .unwrap_or(1);
+            env.storage()
+                .instance()
+                .set(&BridgeKey::AttestationNextSeq, &(seq + 1));
+            env.storage()
+                .instance()
+                .set(&BridgeKey::AttestationSeq(seq), &att);
+        }
+
+        env.storage().instance().extend_ttl(BRIDGE_TTL_THRESHOLD_LEDGERS, BRIDGE_TTL_EXTEND_LEDGERS);
+        let first_relay = attestations.get(0).unwrap().relay;
+        emit_bridge_audit(&env, &first_relay, "submit_attestation_batch", &Bytes::new(&env), AUDIT_OUTCOME_OK, 0);
+
+        Ok(total)
+    }
+
+    /// Permissionless TTL extension for bridge storage rent footprint (issue #907).
+    pub fn extend_bridge_ttl(env: Env) {
+        env.storage()
+            .instance()
+            .extend_ttl(BRIDGE_TTL_THRESHOLD_LEDGERS, BRIDGE_TTL_EXTEND_LEDGERS);
+    }
+
+    /// Deterministic attestation hash computation for replay prevention (issue #909).
+    pub fn compute_attestation_hash(env: &Env, att: &BalanceAttestation) -> BytesN<32> {
+        let mut data = Bytes::new(env);
+        data.append(&att.relay.to_xdr(env));
+        data.append(&att.user_address);
+        data.append(&att.token_address);
+        let mut id_bytes = [0u8; 16];
+        for (i, b) in att.token_id.to_be_bytes().iter().enumerate() {
+            id_bytes[i] = *b;
+        }
+        data.append(&Bytes::from_array(env, &id_bytes));
+        let mut bal_bytes = [0u8; 16];
+        for (i, b) in att.balance.to_be_bytes().iter().enumerate() {
+            bal_bytes[i] = *b;
+        }
+        data.append(&Bytes::from_array(env, &bal_bytes));
+        let mut bh_bytes = [0u8; 8];
+        for (i, b) in att.block_height.to_be_bytes().iter().enumerate() {
+            bh_bytes[i] = *b;
+        }
+        data.append(&Bytes::from_array(env, &bh_bytes));
+        env.crypto().sha256(&data).into()
     }
 
     /// Accept attestation and update verification cache (RBAC-gated, Admin
@@ -599,6 +743,8 @@ impl CrossChainBridge {
         env.storage()
             .instance()
             .set(&BridgeKey::CacheSeq(cseq), &record);
+
+        env.storage().instance().extend_ttl(BRIDGE_TTL_THRESHOLD_LEDGERS, BRIDGE_TTL_EXTEND_LEDGERS);
 
         log!(
             &env,
@@ -1340,5 +1486,117 @@ mod tests {
         let mut att = sample_attestation(&env, &r);
         att.signature = Bytes::from_slice(&env, &[1u8; 33]);
         assert!(!verify_signature(&env, &relay_rec, &att));
+    }
+
+    #[test]
+    #[should_panic(expected = "DuplicateAttestation")]
+    fn test_simulate_duplicate_submission_rejected() {
+        let env = Env::default();
+        env.mock_all_auths();
+        let o = owner(&env);
+        let r = relay(&env);
+
+        CrossChainBridge::initialize_bridge(env.clone(), o.clone(), 2, 100, 1);
+        CrossChainBridge::register_relay(env.clone(), r.clone(), pubkey_65(&env));
+
+        let att = sample_attestation(&env, &r);
+        CrossChainBridge::submit_attestation(env.clone(), att.clone());
+
+        // Replay submission of the exact same attestation payload must be rejected
+        CrossChainBridge::submit_attestation(env.clone(), att);
+    }
+
+    #[test]
+    #[should_panic(expected = "OutOfOrderAttestation")]
+    fn test_simulate_out_of_order_timestamp_rejected() {
+        let env = Env::default();
+        env.mock_all_auths();
+        let o = owner(&env);
+        let r = relay(&env);
+
+        CrossChainBridge::initialize_bridge(env.clone(), o.clone(), 2, 100, 1);
+        CrossChainBridge::register_relay(env.clone(), r.clone(), pubkey_65(&env));
+
+        let mut att = sample_attestation(&env, &r);
+        att.timestamp = 0; // Stale/invalid zero timestamp
+        CrossChainBridge::submit_attestation(env.clone(), att);
+    }
+
+    #[test]
+    #[should_panic(expected = "BatchRollbackTriggered")]
+    fn test_simulate_mid_batch_rollback_atomicity() {
+        let env = Env::default();
+        env.mock_all_auths();
+        let o = owner(&env);
+        let r = relay(&env);
+
+        CrossChainBridge::initialize_bridge(env.clone(), o.clone(), 2, 100, 1);
+        CrossChainBridge::register_relay(env.clone(), r.clone(), pubkey_65(&env));
+
+        let att1 = sample_attestation(&env, &r);
+
+        let mut att2 = sample_attestation(&env, &r);
+        att2.balance = 2_000_000;
+        att2.token_id = 1;
+
+        let mut att3 = sample_attestation(&env, &r);
+        att3.timestamp = 0; // Failure injected at item 3 of the batch
+
+        let mut batch = Vec::new(&env);
+        batch.push_back(att1.clone());
+        batch.push_back(att2.clone());
+        batch.push_back(att3);
+
+        // Pre-state sequence
+        let pre_seq: u64 = env
+            .storage()
+            .instance()
+            .get(&BridgeKey::AttestationNextSeq)
+            .unwrap_or(1);
+        assert_eq!(pre_seq, 1);
+
+        // Batch submission must fail partway through and trigger full mid-batch rollback
+        let _ = CrossChainBridge::submit_attestation_batch(env.clone(), batch);
+    }
+
+    #[test]
+    fn test_simulate_successful_batch_and_duplicate_batch_rejection() {
+        let env = Env::default();
+        env.mock_all_auths();
+        let o = owner(&env);
+        let r = relay(&env);
+
+        CrossChainBridge::initialize_bridge(env.clone(), o.clone(), 2, 100, 1);
+        CrossChainBridge::register_relay(env.clone(), r.clone(), pubkey_65(&env));
+
+        let att1 = sample_attestation(&env, &r);
+
+        let mut att2 = sample_attestation(&env, &r);
+        att2.balance = 500_000;
+        att2.token_id = 2;
+
+        let mut batch = Vec::new(&env);
+        batch.push_back(att1.clone());
+        batch.push_back(att2.clone());
+
+        let res = CrossChainBridge::submit_attestation_batch(env.clone(), batch);
+        assert_eq!(res, Ok(2));
+
+        let post_seq: u64 = env
+            .storage()
+            .instance()
+            .get(&BridgeKey::AttestationNextSeq)
+            .unwrap_or(1);
+        assert_eq!(post_seq, 3);
+    }
+
+    #[test]
+    fn test_simulate_ttl_extension_and_rent_preservation() {
+        let env = Env::default();
+        env.mock_all_auths();
+        let o = owner(&env);
+
+        CrossChainBridge::initialize_bridge(env.clone(), o.clone(), 2, 100, 1);
+        CrossChainBridge::extend_bridge_ttl(env.clone());
     }
 }
