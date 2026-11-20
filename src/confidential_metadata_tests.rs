@@ -93,6 +93,49 @@ mod tests {
     }
 
     #[test]
+    fn test_byzantine_actor_fuzz_invariants() {
+        let env = Env::default();
+        let contract_id = env.register(ConfidentialEventLedger, ());
+        let client = ConfidentialEventLedgerClient::new(&env, &contract_id);
+
+        let admin = Address::generate(&env);
+        let submitter = Address::generate(&env);
+        let unauthorized = Address::generate(&env);
+        bootstrap(&env, &admin, &submitter);
+        client.initialize(&admin);
+
+        let event_type = Symbol::new(&env, "byzantine");
+        let key_id = BytesN::from_array(&env, &[41u8; 32]);
+        let proof = Bytes::from_slice(&env, b"deterministic-zk-proof-32");
+
+        for seed in 0u32..32 {
+            let mut payload = [0u8; 40];
+            payload[0..4].copy_from_slice(&seed.to_be_bytes());
+            payload[4..].fill(seed as u8);
+            let result = client.try_log_confidential_event(
+                &submitter,
+                &event_type,
+                &Bytes::from_slice(&env, &payload),
+                &AccessControlPolicy::Public,
+                &proof,
+                &key_id,
+            );
+            assert!(result.is_ok());
+        }
+
+        let too_short = Bytes::from_slice(&env, b"short");
+        let rejected = client.try_log_confidential_event(
+            &unauthorized,
+            &event_type,
+            &Bytes::from_slice(&env, b"payload"),
+            &AccessControlPolicy::Public,
+            &too_short,
+            &key_id,
+        );
+        assert!(rejected.is_err());
+    }
+
+    #[test]
     fn test_confidential_analytics_aggregation() {
         let env = Env::default();
         let contract_id = env.register(ConfidentialEventLedger, ());
