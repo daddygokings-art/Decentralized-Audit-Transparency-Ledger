@@ -140,6 +140,10 @@ const nextConfig = {
         headers: [...securityHeaders, ...cacheHeaders],
       },
       {
+        source: "/favicon.ico",
+        headers: [...securityHeaders, ...cacheHeaders],
+      },
+      {
         source: "/robots.txt",
         headers: [...securityHeaders, ...cacheHeaders],
       },
