@@ -1,8 +1,31 @@
 #![no_std]
 
 use crate::suptech_types::{DataFeed, DataFeedType};
-use soroban_sdk::{contracttype, Bytes, BytesN, Env, Vec};
+use soroban_sdk::{contracterror, contracttype, Bytes, BytesN, Env, Vec};
 use soroban_sdk::xdr::ToXdr;
+
+/// Maximum allowed data point payload size (64 KiB).
+pub const MAX_PAYLOAD_SIZE: u32 = 65_536;
+/// Maximum allowed metadata payload size (1 KiB).
+pub const MAX_METADATA_SIZE: u32 = 1_024;
+/// Maximum feeds managed per publisher.
+pub const MAX_FEEDS_PER_PUBLISHER: u32 = 100;
+/// Maximum filter criteria size.
+pub const MAX_FILTER_CRITERIA_SIZE: u32 = 512;
+
+#[contracterror]
+#[derive(Copy, Clone, Debug, Eq, PartialEq, PartialOrd, Ord)]
+#[repr(u32)]
+pub enum SuptechFeedError {
+    EmptyInitialData = 1,
+    FeedNotActive = 2,
+    EmptyPayload = 3,
+    PayloadTooLarge = 4,
+    SubscriptionNotActive = 5,
+    FeedTypeMismatch = 6,
+    MetadataTooLarge = 7,
+    ExceededMaxFeeds = 8,
+}
 
 /// Storage tier classification for keys managed by this module.
 ///
@@ -105,6 +128,9 @@ impl FeedManager {
         if initial_data.is_empty() {
             return Err("Initial data cannot be empty");
         }
+        if initial_data.len() > MAX_PAYLOAD_SIZE {
+            return Err("Initial data exceeds maximum payload size");
+        }
 
         let feed_id = Self::compute_feed_id(env, feed_type);
         let now = env.ledger().timestamp();
@@ -143,6 +169,9 @@ impl FeedManager {
 
         if new_data.is_empty() {
             return Err("Data payload cannot be empty");
+        }
+        if new_data.len() > MAX_PAYLOAD_SIZE {
+            return Err("Data payload exceeds maximum payload size");
         }
 
         let now = env.ledger().timestamp();
@@ -249,11 +278,7 @@ impl FeedManager {
     /// Get feed update lag (seconds behind expected update)
     pub fn get_feed_update_lag(feed: &DataFeed, current_time: u64) -> u64 {
         let age = current_time.saturating_sub(feed.last_updated);
-        if age > feed.update_frequency {
-            age - feed.update_frequency
-        } else {
-            0
-        }
+        age.saturating_sub(feed.update_frequency)
     }
 
     /// Check data quality score (0-100)
