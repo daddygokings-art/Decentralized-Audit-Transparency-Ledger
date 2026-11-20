@@ -626,6 +626,10 @@ impl TamperEvidenceHelper {
 }
 
 #[cfg(test)]
+#[path = "tamper_evidence_fuzz_tests.rs"]
+mod fuzz_tests;
+
+#[cfg(test)]
 mod tests {
     use super::*;
     use soroban_sdk::testutils::Events as _;
