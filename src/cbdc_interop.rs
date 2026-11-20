@@ -2520,6 +2520,53 @@ mod tests {
     proptest::proptest! {
         #![proptest_config(proptest::test_runner::Config::with_cases(256))]
 
+        /// Byzantine fuzz: duplicate, equivocation and split-vote behavior must
+        /// never corrupt canonical state or allow conflicting finality.
+        #[test]
+        fn prop_byzantine_attestation_state_is_safe(
+            (quorum, votes, order) in vote_plan_strategy(),
+        ) {
+            let n = votes.len() as u32;
+            let f = Fixture::new(n, quorum);
+            let id = f.open_settlement(0xC0);
+
+            for &v in &order {
+                if let Some(k) = votes[v] {
+                    let h = f.hash(k);
+                    let first = f.attest(v, &id, &h);
+                    prop_assert!(matches!(
+                        first,
+                        Ok(AttestationOutcome::Recorded)
+                            | Ok(AttestationOutcome::Finalized)
+                            | Ok(AttestationOutcome::Failed)
+                            | Ok(AttestationOutcome::LateRecorded)
+                    ));
+
+                    let replay = f.attest(v, &id, &h);
+                    prop_assert_eq!(replay, Err(InteropError::DuplicateAttestation));
+
+                    let conflicting = f.attest(v, &id, &f.hash(k.wrapping_add(1)));
+                    prop_assert_eq!(conflicting, Err(InteropError::Equivocation));
+                }
+            }
+
+            let state = f.state(&id);
+            let reaching: Vec<_> = state
+                .tallies
+                .iter()
+                .filter(|t| t.votes >= quorum)
+                .collect();
+            prop_assert!(reaching.len() <= 1);
+            prop_assert!(state.attestations.len() <= n);
+            let mut previous = None;
+            for attestation in state.attestations.iter() {
+                if let Some(last) = previous {
+                    prop_assert!(last < attestation.validator);
+                }
+                previous = Some(attestation.validator);
+            }
+        }
+
         /// INV-ATT-2/3/4: for any set of honest votes, applying them in
         /// validator order and in a random shuffled order yields byte-identical
         /// attestation state, digest and settlement status; at most one hash is
