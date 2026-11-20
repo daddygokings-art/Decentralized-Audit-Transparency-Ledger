@@ -140,6 +140,13 @@ pub mod settlement_reserves;
 #[cfg(test)]
 mod settlement_reserves_tests;
 
+// Validator-quorum consensus for regulatory state transitions with rogue
+// validator detection and quarantine.
+pub mod regulatory_consensus;
+
+#[cfg(test)]
+mod regulatory_consensus_sim_tests;
+
 #[cfg(test)]
 mod pause_granular_tests;
 

@@ -76,6 +76,7 @@ files = [
     "src/trade_compliance/tests.rs",
     "src/proof_encoding_tests.rs",
     "src/settlement_reserves_tests.rs",
+    "src/regulatory_consensus_sim_tests.rs",
     "src/test_events.rs",
 
     # Integration tests live outside src/
@@ -590,3 +591,12 @@ path_prefix = "src/settlement_reserves.rs"
 line = 90.0
 branch = 85.0
 description = "Settlement reserve ratio monitoring with below-floor warning/critical events (RBAC-gated)"
+
+# ─ Regulatory state-transition consensus ──────────────────────────────────────
+# Rogue-validator simulation suite: src/regulatory_consensus_sim_tests.rs
+[[module]]
+name = "regulatory_consensus"
+path_prefix = "src/regulatory_consensus.rs"
+line = 90.0
+branch = 85.0
+description = "Validator-quorum regulatory state transitions with rogue detection and quarantine"
