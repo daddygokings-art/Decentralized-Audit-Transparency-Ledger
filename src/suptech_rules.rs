@@ -1,8 +1,29 @@
 #![no_std]
 
 use crate::suptech_types::{SupervisionRule, ComplianceAlert, AlertStatus, RegulatoryFramework};
-use soroban_sdk::{contracttype, Address, Bytes, BytesN, Env, Vec};
+use soroban_sdk::{
+    contracterror, contracttype, log, Address, Bytes, BytesN, Env, Vec,
+};
 use soroban_sdk::xdr::ToXdr;
+
+pub const SUPTECH_RULES_AUDIT_TOPIC: &str = "suptech_rules_audit";
+pub const SUPTECH_RULES_ERROR_TOPIC: &str = "suptech_rules_error";
+
+/// Typed failures for supervision-rule operations.
+#[contracterror]
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+#[repr(u32)]
+pub enum SuptechRulesError {
+    InvalidInput = 1,
+    RuleInactive = 2,
+    CapacityExceeded = 3,
+    DuplicateRule = 4,
+    RuleNotFound = 5,
+    InvalidTimestampRange = 6,
+    InvalidSignature = 7,
+    ReplayDetected = 8,
+    BatchRollback = 9,
+}
 
 /// Hard cap on the number of items returned in a single page.
 pub const MAX_PAGE_LIMIT: u32 = 100;
@@ -187,13 +208,13 @@ fn compare_keys(a: &(u64, BytesN<32>), b: &(u64, BytesN<32>)) -> core::cmp::Orde
 }
 
 /// Returns true when `key` sorts strictly after `cursor`.
-fn key_after_cursor(key: &(u32, BytesN<32>), cursor: &PageCursor) -> bool {
+fn key_after_cursor(key: &(u64, BytesN<32>), cursor: &PageCursor) -> bool {
     compare_keys(key, &(cursor.ledger_sequence, cursor.id.clone()))
         == core::cmp::Ordering::Greater
 }
 
 /// Build the next cursor from the last item of a full page.
-fn next_cursor_for(key: &(u32, BytesN<32>), page_len: u32, limit: u32) -> Option<PageCursor> {
+fn next_cursor_for(key: &(u64, BytesN<32>), page_len: u32, limit: u32) -> Option<PageCursor> {
     if page_len < limit {
         None
     } else {
@@ -262,6 +283,34 @@ pub struct RuleSet {
 pub struct RulesEngine;
 
 impl RulesEngine {
+    /// Emit a deterministic structured audit event for one supervision-rule
+    /// operation.  The fixed topic and compact outcome code keep the event
+    /// cheap and stable across SDK versions.
+    pub fn emit_audit_event(
+        env: &Env,
+        operation: &str,
+        outcome: &str,
+        subject: &BytesN<32>,
+    ) {
+        log!(
+            env,
+            "suptech_rules_audit operation={} outcome={} subject={}",
+            operation,
+            outcome,
+            subject
+        );
+    }
+
+    /// Emit a structured denial event without recording caller-provided data.
+    pub fn emit_error_event(env: &Env, operation: &str, error: SuptechRulesError) {
+        log!(
+            env,
+            "suptech_rules_error operation={} error={}",
+            operation,
+            error as u32
+        );
+    }
+
     /// Create supervision rule
     pub fn create_rule(
         env: &Env,
@@ -464,23 +513,15 @@ impl RulesEngine {
         ruleset: &mut RuleSet,
         rule_id: &BytesN<32>,
     ) -> Result<(), &'static str> {
-        let mut found = false;
-
         for i in 0..ruleset.rules.len() {
             if let Some(existing) = ruleset.rules.get(i) {
                 if existing == *rule_id {
-                    // Remove by not including in new vec
-                    found = true;
-                    break;
+                    ruleset.rules.remove(i);
+                    return Ok(());
                 }
             }
         }
-
-        if !found {
-            return Err("Rule not found in set");
-        }
-
-        Ok(())
+        Err("Rule not found in set")
     }
 
     /// Execute all active rules against context
@@ -517,10 +558,9 @@ impl RulesEngine {
                 continue;
             }
 
-            // Evaluate rule
-            if let Ok(eval) = Self::evaluate_rule(env, &rule, context.clone()) {
-                evaluations.push_back(eval);
-            }
+            // Fail closed: an evaluation failure is no longer silently omitted.
+            let eval = Self::evaluate_rule(env, &rule, context.clone())?;
+            evaluations.push_back(eval);
         }
 
         Ok(evaluations)
@@ -555,7 +595,7 @@ impl RulesEngine {
         sort_keys(&mut keys);
 
         let mut items = Vec::new(env);
-        let mut last_key: Option<(u32, BytesN<32>)> = None;
+        let mut last_key: Option<(u64, BytesN<32>)> = None;
         let mut page_len = 0u32;
 
         for key in keys.iter() {
@@ -611,7 +651,7 @@ impl RulesEngine {
         sort_keys(&mut keys);
 
         let mut items = Vec::new(env);
-        let mut last_key: Option<(u32, BytesN<32>)> = None;
+        let mut last_key: Option<(u64, BytesN<32>)> = None;
         let mut page_len = 0u32;
 
         for key in keys.iter() {
@@ -661,7 +701,7 @@ impl RulesEngine {
         sort_keys(&mut keys);
 
         let mut items = Vec::new(env);
-        let mut last_key: Option<(u32, BytesN<32>)> = None;
+        let mut last_key: Option<(u64, BytesN<32>)> = None;
         let mut page_len = 0u32;
 
         for key in keys.iter() {
@@ -730,8 +770,12 @@ fn sort_keys(keys: &mut Vec<(u64, BytesN<32>)>) {
     while i < len {
         let mut j = i;
         while j > 0 {
-            let prev = keys.get(j - 1).unwrap();
-            let cur = keys.get(j).unwrap();
+            let Some(prev) = keys.get(j - 1) else {
+                break;
+            };
+            let Some(cur) = keys.get(j) else {
+                break;
+            };
             if compare_keys(&prev, &cur) == core::cmp::Ordering::Greater {
                 keys.set(j - 1, cur);
                 keys.set(j, prev);
