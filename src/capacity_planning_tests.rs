@@ -64,27 +64,52 @@ fn test_telemetry_ring_buffer_bounds() {
 
     let count: u32 = env
         .storage()
-        .persistent()
+        .temporary()
         .get(&CapacityStorageKey::TelemetryCount)
         .unwrap_or(0);
     assert_eq!(count, total, "telemetry count must equal records written");
 
     // Latest record lives at (count - 1) % 1000.
     let latest_idx = (total - 1) % 1000;
-    let latest: CapacityMetricRecord = env
+    assert!(env
         .storage()
-        .persistent()
-        .get(&CapacityStorageKey::TelemetrySnapshot(latest_idx))
-        .unwrap();
-    assert_eq!(latest.timestamp, 1000 + total as u64 - 1);
+        .temporary()
+        .has(&CapacityStorageKey::PackedTelemetrySnapshot(latest_idx)));
 
     // Slot 0 was overwritten by record 1000.
-    let slot0: CapacityMetricRecord = env
+    assert!(env
+        .storage()
+        .temporary()
+        .has(&CapacityStorageKey::PackedTelemetrySnapshot(0)));
+    assert!(!env
         .storage()
         .persistent()
-        .get(&CapacityStorageKey::TelemetrySnapshot(0))
-        .unwrap();
-    assert_eq!(slot0.timestamp, 1000 + 1000);
+        .has(&CapacityStorageKey::TelemetrySnapshot(0)));
+}
+
+#[test]
+fn test_legacy_telemetry_count_migrates_to_temporary_storage() {
+    let env = Env::default();
+    env.mock_all_auths();
+    let caller = Address::random(&env);
+    let count_key = CapacityStorageKey::TelemetryCount;
+    let snapshot_key = CapacityStorageKey::TelemetrySnapshot(5);
+
+    env.storage().persistent().set(&count_key, &5u32);
+    env.storage()
+        .persistent()
+        .set(&snapshot_key, &test_metric(&env, 5));
+
+    CapacityPlanning::record_telemetry(&env, caller, test_metric(&env, 6));
+
+    assert_eq!(env.storage().temporary().get::<_, u32>(&count_key), Some(6));
+    assert!(env
+        .storage()
+        .temporary()
+        .has(&CapacityStorageKey::PackedTelemetrySnapshot(5)));
+    assert!(!env.storage().persistent().has(&count_key));
+    assert!(!env.storage().persistent().has(&snapshot_key));
+    assert!(extend_ttl(&env, count_key));
 }
 
 #[test]

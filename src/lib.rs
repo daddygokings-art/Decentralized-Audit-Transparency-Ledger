@@ -22,6 +22,9 @@ pub mod tax;
 pub mod vat_engine;
 pub mod rwa_custody;
 pub mod rwa_oracle;
+// Domain-separated Merkle tree helpers shared by hash-chained logs
+// (RWA oracle price history, CQRS event store).
+pub mod merkle;
 pub mod tax_engines;
 pub mod tax_audit_trail;
 pub mod dao_dispute_resolution;
@@ -61,6 +64,12 @@ pub mod supply_chain;
 pub mod rbac;
 pub mod digital_passport;
 pub mod carbon_credits;
+#[cfg(test)]
+mod carbon_credits_harness;
+#[cfg(test)]
+mod carbon_credits_tests;
+#[cfg(test)]
+mod carbon_credits_race_tests;
 pub mod esg_reporting;
 pub mod reputation_system;
 pub mod rbac;
@@ -87,6 +96,9 @@ pub mod capacity_planning;
 
 #[cfg(test)]
 mod digital_passport_invariant_tests;
+
+#[cfg(test)]
+mod digital_passport_concurrency_tests;
 
 #[cfg(test)]
 mod capacity_planning_tests;
@@ -146,6 +158,9 @@ pub mod regulatory_consensus;
 
 #[cfg(test)]
 mod regulatory_consensus_sim_tests;
+
+#[cfg(test)]
+mod cqrs_storage_tests;
 
 #[cfg(test)]
 mod pause_granular_tests;
@@ -7094,25 +7109,24 @@ impl AuditLedger {
     /// views and projections, and returns a `CommandResult`. RBAC rejections
     /// return `success = false` with the stable `RbacError` code and emit
     /// `cqrs_audit`/`cqrs_denied` events.
-    pub fn cqrs_log_event(env: Env, cmd: LogEventCommand) -> CommandResult {
+    pub fn cqrs_log_event(env: Env, cmd: LogEventCommand) -> Result<CommandResult, CqrsError> {
         Self::require_initialized(&env);
         Self::require_log_events_not_paused(&env);
         Self::cqrs_bootstrap_rbac(&env);
         let auth = match CqrsEngine::authorize(&env, &cmd.submitter, CqrsOperation::LogEvent) {
             Ok(auth) => auth,
-            Err(err) => return CqrsEngine::denied_result(&env, err),
+            Err(err) => return Ok(CqrsEngine::denied_result(&env, err)),
         };
 
         // Check command-level idempotency
         if let Some(ref idemp) = cmd.idempotency_key {
-            if let Some(existing) = env
-                .storage()
-                .instance()
-                .get::<_, CommandResult>(&CqrsStorageKey::Idempotency(idemp.clone()))
-            {
-                return existing;
+            if let Some(existing) = CqrsEngine::get_idempotent_result(&env, idemp.clone()) {
+                return Ok(existing);
             }
         }
+
+        // Enforce CQRS hard bounds before the primary ledger is touched.
+        CqrsEngine::validate_log_command(&env, &cmd)?;
 
         // Delegate to existing core logic for full validation and persistence
         let event_id = Self::log_event_with_hierarchy(
@@ -7127,20 +7141,19 @@ impl AuditLedger {
 
         // Append to CQRS event store and update projection
         CqrsEngine::record_log_event(&env, &auth, event_id, &cmd, env.ledger().timestamp())
-            .unwrap_or_else(|err| panic_with_error!(&env, err))
     }
 
     /// Command: Update an event's metadata through the CQRS write model.
     ///
     /// Requires RBAC `Auditor`+ (not suspended) in addition to the legacy
     /// owner/multisig check.
-    pub fn cqrs_update_event(env: Env, cmd: UpdateEventCommand) -> CommandResult {
+    pub fn cqrs_update_event(env: Env, cmd: UpdateEventCommand) -> Result<CommandResult, CqrsError> {
         Self::require_initialized(&env);
         Self::require_log_events_not_paused(&env);
         Self::cqrs_bootstrap_rbac(&env);
         let auth = match CqrsEngine::authorize(&env, &cmd.caller, CqrsOperation::UpdateEvent) {
             Ok(auth) => auth,
-            Err(err) => return CqrsEngine::denied_result(&env, err),
+            Err(err) => return Ok(CqrsEngine::denied_result(&env, err)),
         };
         Self::require_owner_or_multisig(&env, &cmd.caller);
 
@@ -7151,15 +7164,19 @@ impl AuditLedger {
         {
             Some(e) => e,
             None => {
-                return CommandResult {
+                return Ok(CommandResult {
                     success: false,
                     event_id: Some(cmd.event_id),
                     sequence_number: 0,
                     error_code: Some(ContractError::EventDoesNotExist as u32),
                     message: Some(Symbol::new(&env, "not_found")),
-                };
+                });
             }
         };
+        if cmd.new_metadata.len() > CQRS_MAX_METADATA_BYTES {
+            return Err(CqrsError::MetadataTooLarge);
+        }
+        let new_version = evt.version.checked_add(1).ok_or(CqrsError::CounterOverflow)?;
 
         let new_id = Self::update_event(
             env.clone(),
@@ -7175,23 +7192,22 @@ impl AuditLedger {
             cmd.event_id,
             evt.event_type,
             cmd.new_metadata,
-            evt.version.saturating_add(1),
+            new_version,
             env.ledger().timestamp(),
         )
-        .unwrap_or_else(|err| panic_with_error!(&env, err))
     }
 
     /// Command: Execute a governance command via CQRS pipeline.
     ///
     /// Requires RBAC `Admin` (not suspended) in addition to the legacy
     /// owner/multisig check.
-    pub fn cqrs_governance(env: Env, cmd: GovernanceCommand) -> CommandResult {
+    pub fn cqrs_governance(env: Env, cmd: GovernanceCommand) -> Result<CommandResult, CqrsError> {
         Self::require_initialized(&env);
         Self::require_governance_not_paused(&env);
         Self::cqrs_bootstrap_rbac(&env);
         let auth = match CqrsEngine::authorize(&env, &cmd.caller, CqrsOperation::Governance) {
             Ok(auth) => auth,
-            Err(err) => return CqrsEngine::denied_result(&env, err),
+            Err(err) => return Ok(CqrsEngine::denied_result(&env, err)),
         };
         Self::require_owner_or_multisig(&env, &cmd.caller);
 
@@ -7219,19 +7235,18 @@ impl AuditLedger {
         }
 
         CqrsEngine::record_governance_command(&env, &auth, cmd.action, env.ledger().timestamp())
-            .unwrap_or_else(|err| panic_with_error!(&env, err))
     }
 
     /// Command: Capture a point-in-time snapshot of the projection state.
     ///
     /// Requires RBAC `Admin`; panics with the stable `RbacError` code otherwise.
-    pub fn cqrs_create_snapshot(env: Env, caller: Address) -> u32 {
+    pub fn cqrs_create_snapshot(env: Env, caller: Address) -> Result<u32, CqrsError> {
         Self::require_initialized(&env);
         Self::cqrs_bootstrap_rbac(&env);
         let auth = CqrsEngine::authorize(&env, &caller, CqrsOperation::Snapshot)
             .unwrap_or_else(|err| panic_with_error!(&env, err));
         Self::require_owner_or_multisig(&env, &caller);
-        CqrsEngine::create_snapshot(&env, &auth).unwrap_or_else(|err| panic_with_error!(&env, err))
+        CqrsEngine::create_snapshot(&env, &auth)
     }
 
     /// Command: Rebuild projection state by replaying all sequenced events from the log.
@@ -7240,20 +7255,24 @@ impl AuditLedger {
     /// If CQRS event store has not yet ingested events from the primary ledger, imports them first.
     ///
     /// Requires RBAC `Admin`; panics with the stable `RbacError` code otherwise.
-    pub fn cqrs_rebuild_projection(env: Env, caller: Address, from_snapshot: bool) -> EventProjection {
+    pub fn cqrs_rebuild_projection(
+        env: Env,
+        caller: Address,
+        from_snapshot: bool,
+    ) -> Result<EventProjection, CqrsError> {
         Self::require_initialized(&env);
         Self::cqrs_bootstrap_rbac(&env);
         let auth = CqrsEngine::authorize(&env, &caller, CqrsOperation::RebuildProjection)
             .unwrap_or_else(|err| panic_with_error!(&env, err));
         Self::require_owner_or_multisig(&env, &caller);
 
-        let current_cqrs_seq: u32 = env
-            .storage()
-            .instance()
-            .get(&CqrsStorageKey::EventSequence)
-            .unwrap_or(0);
+        let current_cqrs_seq = CqrsEngine::current_sequence(&env);
         if current_cqrs_seq == 0 {
             let total = Self::total_events_internal(&env);
+            // Bound the one-off import by the same replay window as rebuilds.
+            if total > CQRS_MAX_REPLAY_EVENTS {
+                return Err(CqrsError::ReplayWindowTooLarge);
+            }
             for i in 0..total {
                 if let Some(id) = env.storage().instance().get::<_, BytesN<32>>(&DataKey::EventOrder(i)) {
                     if let Some(evt) = env.storage().instance().get::<_, Event>(&DataKey::EventData(id.clone())) {
@@ -7267,15 +7286,13 @@ impl AuditLedger {
                             force: true,
                         };
                         // Admin replay on behalf of the historical submitter.
-                        CqrsEngine::record_log_event(&env, &auth, id, &cmd, evt.timestamp)
-                            .unwrap_or_else(|err| panic_with_error!(&env, err));
+                        CqrsEngine::record_log_event(&env, &auth, id, &cmd, evt.timestamp)?;
                     }
                 }
             }
         }
 
         CqrsEngine::rebuild_projection(&env, &auth, from_snapshot)
-            .unwrap_or_else(|err| panic_with_error!(&env, err))
     }
 
     // ── CQRS RBAC administration ────────────────────────────────────────────
@@ -7398,6 +7415,20 @@ impl AuditLedger {
         Self::require_initialized(&env);
         Self::require_queries_not_paused(&env);
         CqrsEngine::get_materialized_submitter_events(&env, submitter, start, limit)
+    }
+
+    /// Permissionless: extend the TTL of an archival-critical CQRS event record
+    /// (event body, ID lookup and materialized index entries) so active audit
+    /// history is not archived. Anyone may pay the rent; no auth required.
+    pub fn cqrs_extend_event_ttl(env: Env, sequence: u32) -> Result<(), CqrsError> {
+        Self::require_initialized(&env);
+        CqrsEngine::extend_event_ttl(&env, sequence)
+    }
+
+    /// Permissionless: extend the TTL of a CQRS projection snapshot.
+    pub fn cqrs_extend_snapshot_ttl(env: Env, snapshot_id: u32) -> Result<(), CqrsError> {
+        Self::require_initialized(&env);
+        CqrsEngine::extend_snapshot_ttl(&env, snapshot_id)
     }
 
     /// Compute the `Vec<FieldChange>` between two event snapshots.

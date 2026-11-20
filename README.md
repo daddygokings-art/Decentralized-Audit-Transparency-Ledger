@@ -369,3 +369,9 @@ This project follows security best practices:
 
 <!-- handsoff-issue-881 -->
 - #881: [carbon-credits] Optimize Soroban storage TTL extension and archival rent footprint for `src/carbon_credits.rs`
+
+<!-- handsoff-issue-1048 -->
+- #1048: perf(src/storage): implement compact BitSet encoding for active validator participation maps
+
+<!-- handsoff-issue-1051 -->
+- #1051: security(src/confidential): audit zero-knowledge proof verification constraints against malleability
