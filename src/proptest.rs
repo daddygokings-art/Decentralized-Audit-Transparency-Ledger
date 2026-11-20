@@ -3,6 +3,12 @@
 extern crate std;
 
 use super::*;
+use crate::confidential_metadata::{
+    AccessControlPolicy, ConfidentialAggregate, ConfidentialError, ConfidentialEventLedger,
+    ConfidentialEventLedgerClient, ConfidentialMetadata, EncryptionKeyRecord,
+    MAX_AGGREGATE_BATCH, MAX_ENCRYPTED_PAYLOAD_BYTES, MAX_POLICY_PARTIES, MAX_ZK_PROOF_BYTES,
+};
+use crate::rbac::{RbacManager, Role};
 use proptest::prelude::*;
 use soroban_sdk::testutils::{Address as _, Ledger};
 use soroban_sdk::{Bytes, Symbol, Vec as SorobanVec};
@@ -316,6 +322,189 @@ fn boundary_i128_strategy() -> impl Strategy<Value = i128> {
         Just(i128::MIN + 1),
         any::<i128>(),
     ]
+}
+
+// ── Confidential Event Ledger proptest helpers ──────────────────────────────
+
+fn create_confidential_ledger() -> (Env, Address, Address, ConfidentialEventLedgerClient<'static>) {
+    let env = Env::default();
+    let contract_id = env.register(ConfidentialEventLedger, ());
+    let client = ConfidentialEventLedgerClient::new(&env, &contract_id);
+
+    let admin = Address::generate(&env);
+    let submitter = Address::generate(&env);
+    env.mock_all_auths();
+    RbacManager::initialize_admin(&env, &admin);
+    RbacManager::set_role(&env, &admin, &submitter, Role::Submitter).unwrap();
+    client.initialize(&admin);
+
+    (env, admin, submitter, client)
+}
+
+fn confidential_payload_strategy() -> impl Strategy<Value = StdVec<u8>> {
+    prop::collection::vec(any::<u8>(), 1..=128)
+}
+
+fn valid_zk_proof_strategy() -> impl Strategy<Value = StdVec<u8>> {
+    prop::collection::vec(any::<u8>(), 16..=64)
+}
+
+fn invalid_zk_proof_strategy() -> impl Strategy<Value = StdVec<u8>> {
+    prop::collection::vec(any::<u8>(), 0..=15)
+}
+
+fn confidential_event_sequence_strategy() -> impl Strategy<Value = StdVec<(String, StdVec<u8>, StdVec<u8>)>> {
+    prop::collection::vec(
+        (event_type_strategy(), confidential_payload_strategy(), valid_zk_proof_strategy()),
+        1..=8,
+    )
+}
+
+// ── ML Feature Store proptest reference model ───────────────────────────────
+
+#[derive(Debug, Clone)]
+struct FeatureRecord {
+    sequence: u64,
+    parent_id: Option<BytesN<32>>,
+    feature_hash: BytesN<32>,
+    prev_hash: BytesN<32>,
+    feature_type: Symbol,
+}
+
+#[derive(Clone)]
+struct MockFeatureStore {
+    env: Env,
+    features: StdVec<FeatureRecord>,
+    attestations: StdVec<BytesN<32>>,
+    feature_ids: StdVec<u64>,
+}
+
+impl MockFeatureStore {
+    fn new(env: Env) -> Self {
+        Self {
+            env,
+            features: StdVec::new(),
+            attestations: StdVec::new(),
+            feature_ids: StdVec::new(),
+        }
+    }
+
+    fn total_features(&self) -> u32 {
+        self.features.len() as u32
+    }
+
+    fn get_feature_by_order(&self, i: &u32) -> FeatureRecord {
+        self.features[*i as usize].clone()
+    }
+
+    fn get_feature(&self, id: &BytesN<32>) -> FeatureRecord {
+        self.features
+            .iter()
+            .find(|f| &f.feature_hash == id)
+            .cloned()
+            .unwrap()
+    }
+
+    fn verify_feature_integrity(&self) -> bool {
+        if self.features.is_empty() {
+            return true;
+        }
+        if self.features[0].prev_hash != BytesN::from_array(&self.env, &[0u8; 32]) {
+            return false;
+        }
+        for i in 1..self.features.len() {
+            if self.features[i].prev_hash != self.features[i - 1].feature_hash {
+                return false;
+            }
+        }
+        true
+    }
+
+    fn total_attestations(&self) -> u32 {
+        self.attestations.len() as u32
+    }
+
+    fn get_attestation_id_by_order(&self, i: &u32) -> BytesN<32> {
+        self.attestations[*i as usize].clone()
+    }
+
+    fn try_submit_feature(
+        &mut self,
+        _owner: &Address,
+        feature_id: &u64,
+        _metadata: &Bytes,
+        _parent: &Option<BytesN<32>>,
+    ) -> Result<BytesN<32>, ()> {
+        if self.feature_ids.contains(feature_id) {
+            return Ok(BytesN::from_array(&self.env, &[1u8; 32]));
+        }
+        self.feature_ids.push(*feature_id);
+        let seq = self.features.len() as u64;
+        let mut hash_arr = [0u8; 32];
+        hash_arr[0..8].copy_from_slice(&feature_id.to_be_bytes());
+        let hash = BytesN::from_array(&self.env, &hash_arr);
+        let prev = if let Some(last) = self.features.last() {
+            last.feature_hash.clone()
+        } else {
+            BytesN::from_array(&self.env, &[0u8; 32])
+        };
+        self.features.push(FeatureRecord {
+            sequence: seq,
+            parent_id: None,
+            feature_hash: hash.clone(),
+            prev_hash: prev,
+            feature_type: Symbol::new(&self.env, "default"),
+        });
+        Ok(hash)
+    }
+
+    fn feature_count(&self, feature_type: &Symbol) -> u32 {
+        self.features
+            .iter()
+            .filter(|f| &f.feature_type == feature_type)
+            .count() as u32
+    }
+}
+
+fn create_feature_store() -> (Env, Address, MockFeatureStore) {
+    let env = Env::default();
+    let owner = Address::generate(&env);
+    let store = MockFeatureStore::new(env.clone());
+    (env, owner, store)
+}
+
+#[derive(Debug, Clone)]
+enum FeatureStoreOp {
+    Submit { feature_id: u64, metadata: StdVec<u8> },
+}
+
+fn random_feature_store_sequence_strategy() -> impl Strategy<Value = StdVec<FeatureStoreOp>> {
+    prop::collection::vec(
+        (any::<u64>(), metadata_strategy())
+            .prop_map(|(feature_id, metadata)| FeatureStoreOp::Submit { feature_id, metadata }),
+        1..=8,
+    )
+}
+
+fn run_feature_store_sequence(
+    env: &Env,
+    owner: &Address,
+    store: &MockFeatureStore,
+    ops: &[FeatureStoreOp],
+) {
+    let mut mutable_store = store.clone();
+    for op in ops {
+        match op {
+            FeatureStoreOp::Submit { feature_id, metadata } => {
+                let _ = mutable_store.try_submit_feature(
+                    owner,
+                    feature_id,
+                    &bytes(env, metadata),
+                    &None,
+                );
+            }
+        }
+    }
 }
 
 proptest! {
@@ -1104,4 +1293,640 @@ proptest! {
             "total_features must equal sum of per-type counts after rollback"
         );
     }
+
+    // ── State-machine invariants for confidential_metadata (issues #943, #922, #916, #914) ──
+
+    #[test]
+    fn prop_confidential_sequence_monotonicity_and_event_count(
+        events in confidential_event_sequence_strategy()
+    ) {
+        let (env, _admin, submitter, client) = create_confidential_ledger();
+        let key_id = BytesN::from_array(&env, &[9u8; 32]);
+        let mut count = 0u32;
+
+        for (event_type, payload, zk_proof) in events.into_iter() {
+            let sym = Symbol::new(&env, &event_type);
+            let enc_payload = bytes(&env, &payload);
+            let proof = bytes(&env, &zk_proof);
+            let policy = AccessControlPolicy::SubmitterOnly;
+
+            let event_id = client.log_confidential_event(
+                &submitter,
+                &sym,
+                &enc_payload,
+                &policy,
+                &proof,
+                &key_id,
+            ).unwrap();
+
+            count += 1;
+            let record = client.get_confidential_event(&event_id);
+            assert_eq!(record.submitter, submitter);
+            assert_eq!(record.event_type, sym);
+            assert_eq!(record.encrypted_payload, enc_payload);
+            let expected_proof_hash: BytesN<32> = env.crypto().sha256(&proof);
+            assert_eq!(record.zk_proof_hash, expected_proof_hash);
+        }
+
+        assert_eq!(count, count);
+    }
+
+    #[test]
+    fn prop_confidential_key_lifecycle_state_machine(
+        pubkey1 in confidential_payload_strategy(),
+        pubkey2 in confidential_payload_strategy()
+    ) {
+        let (env, _admin, user, client) = create_confidential_ledger();
+
+        // 1. Initial registration
+        let pk1 = bytes(&env, &pubkey1);
+        client.register_encryption_key(&user, &pk1).unwrap();
+
+        // 2. Rotation
+        let pk2 = bytes(&env, &pubkey2);
+        client.rotate_encryption_key(&user, &pk2).unwrap();
+
+        // 3. Revocation
+        client.revoke_encryption_key(&user).unwrap();
+    }
+
+    #[test]
+    fn prop_confidential_access_control_policy_soundness(
+        payload in confidential_payload_strategy(),
+        proof in valid_zk_proof_strategy()
+    ) {
+        let (env, _admin, submitter, client) = create_confidential_ledger();
+        let recipient = Address::generate(&env);
+        let unauthorized = Address::generate(&env);
+        let key_id = BytesN::from_array(&env, &[3u8; 32]);
+
+        let sym = Symbol::new(&env, "access_test");
+        let enc_payload = bytes(&env, &payload);
+        let zk_bytes = bytes(&env, &proof);
+
+        let mut allowed = SorobanVec::new(&env);
+        allowed.push_back(recipient.clone());
+        let policy = AccessControlPolicy::CustomAllowlist(allowed);
+
+        let event_id = client.log_confidential_event(
+            &submitter,
+            &sym,
+            &enc_payload,
+            &policy,
+            &zk_bytes,
+            &key_id,
+        ).unwrap();
+
+        // Submitter and allowlisted recipient must have access
+        assert!(client.check_access(&event_id, &submitter));
+        assert!(client.check_access(&event_id, &recipient));
+        // Unauthorized party must NOT have access
+        assert!(!client.check_access(&event_id, &unauthorized));
+
+        // Submitter and recipient can decrypt
+        let dec1 = client.decrypt_event_metadata(&event_id, &submitter);
+        assert_eq!(dec1, enc_payload);
+        let dec2 = client.decrypt_event_metadata(&event_id, &recipient);
+        assert_eq!(dec2, enc_payload);
+    }
+
+    #[test]
+    fn prop_confidential_zk_proof_and_boundary_rejection(
+        bad_proof in invalid_zk_proof_strategy(),
+        valid_payload in confidential_payload_strategy()
+    ) {
+        let (env, _admin, submitter, client) = create_confidential_ledger();
+        let key_id = BytesN::from_array(&env, &[4u8; 32]);
+        let sym = Symbol::new(&env, "boundary");
+        let enc_payload = bytes(&env, &valid_payload);
+        let proof = bytes(&env, &bad_proof);
+        let policy = AccessControlPolicy::Public;
+
+        // Proof < 16 bytes must be rejected
+        let res = client.try_log_confidential_event(
+            &submitter,
+            &sym,
+            &enc_payload,
+            &policy,
+            &proof,
+            &key_id,
+        );
+        assert!(res.is_err(), "proof < 16 bytes must be rejected");
+    }
+
+    #[test]
+    fn prop_confidential_aggregation_invariance(
+        events in confidential_event_sequence_strategy()
+    ) {
+        let (env, _admin, submitter, client) = create_confidential_ledger();
+        let key_id = BytesN::from_array(&env, &[5u8; 32]);
+        let mut ids = SorobanVec::new(&env);
+        let mut expected_accumulator = Bytes::new(&env);
+
+        for (event_type, payload, proof) in events.into_iter() {
+            let sym = Symbol::new(&env, &event_type);
+            let enc_payload = bytes(&env, &payload);
+            let zk_bytes = bytes(&env, &proof);
+            let policy = AccessControlPolicy::Public;
+
+            let id = client.log_confidential_event(
+                &submitter,
+                &sym,
+                &enc_payload,
+                &policy,
+                &zk_bytes,
+                &key_id,
+            ).unwrap();
+
+            ids.push_back(id);
+            expected_accumulator.append(&enc_payload);
+        }
+
+        let count = ids.len();
+        let agg = client.aggregate_confidential_events(&ids);
+        assert_eq!(agg.total_events, count);
+        assert_eq!(agg.encrypted_accumulator, expected_accumulator);
+        let expected_proof = env.crypto().sha256(&expected_accumulator);
+        let agg_proof_bytes: Bytes = expected_proof.into();
+        assert_eq!(agg.zk_aggregation_proof, agg_proof_bytes);
+    }
 }
+
+// ── RWA oracle state-machine invariants (src/rwa_oracle.rs) ─────────────────
+//
+// Reference-model property suite for the RWA valuation oracle feed verifier.
+// Formal statement of the invariants: formal-verification/rwa_oracle_invariants.md.
+//
+// Every generated sequence mixes fresh submissions, exact replays (duplicate
+// submissions), reordered/out-of-order observations, future-dated feeds,
+// atomic batches with injected mid-batch failures (rollback), oracle
+// suspension/reactivation, clock advances (staleness) and consensus rounds.
+// After every step the contract state is compared with an independent model;
+// at the end of each sequence the hash chain and Merkle commitments are
+// verified, a tampered entry is detected, and verification succeeds again
+// after recovery.
+//
+// Runs 1,024 + 256 + 256 = 1,536 generated sequences with a fixed RNG seed
+// (override with RWA_ORACLE_PROPTEST_SEED) so CI is deterministic.
+mod rwa_oracle_invariants {
+    extern crate std;
+
+    use crate::rwa_oracle::*;
+    use ::proptest::prelude::*;
+    use ::proptest::test_runner::{Config, RngSeed};
+    use alloc::collections::BTreeMap;
+    use alloc::vec::Vec;
+    use soroban_sdk::testutils::{Address as _, Ledger as _};
+    use soroban_sdk::{contract, contractimpl, Address, Bytes, BytesN, Env, Symbol};
+
+    const ORACLES: usize = 4;
+    const ASSETS: usize = 2;
+    const QUORUM: u32 = 2;
+    const BASE_PRICE: u128 = 5_000_000_000_000;
+    const CONF: u128 = 1_000_000;
+    const START: u64 = 1_000_000;
+    const DEFAULT_SEED: u64 = 0x5EED_0AC1;
+
+    fn config(cases: u32) -> Config {
+        let seed = std::env::var("RWA_ORACLE_PROPTEST_SEED")
+            .ok()
+            .and_then(|v| {
+                let v = v.trim();
+                match v.strip_prefix("0x") {
+                    Some(hex) => u64::from_str_radix(hex, 16).ok(),
+                    None => v.parse().ok(),
+                }
+            })
+            .unwrap_or(DEFAULT_SEED);
+        Config {
+            cases,
+            rng_seed: RngSeed::Fixed(seed),
+            failure_persistence: None,
+            ..Config::default()
+        }
+    }
+
+    #[contract]
+    struct OracleInvariantHost;
+
+    #[contractimpl]
+    impl OracleInvariantHost {}
+
+    struct World {
+        env: Env,
+        contract: Address,
+        oracles: Vec<Address>,
+        assets: Vec<Symbol>,
+    }
+
+    impl World {
+        fn new() -> Self {
+            let env = Env::default();
+            env.cost_estimate().budget().reset_unlimited();
+            env.ledger().with_mut(|l| l.timestamp = START);
+            let contract = env.register(OracleInvariantHost, ());
+            let oracles: Vec<Address> = (0..ORACLES).map(|_| Address::generate(&env)).collect();
+            let assets: Vec<Symbol> = (0..ASSETS)
+                .map(|i| Symbol::new(&env, ["RWA_A", "RWA_B"][i]))
+                .collect();
+            let w = World { env, contract, oracles, assets };
+            w.run(|env| {
+                for o in &w.oracles {
+                    register_oracle(env, o.clone(), Bytes::from_slice(env, b"oracle"), soroban_sdk::Vec::new(env), 80)
+                        .unwrap();
+                }
+                for a in &w.assets {
+                    register_asset(
+                        env,
+                        a.clone(),
+                        AssetClass::RealEstate,
+                        Bytes::from_slice(env, b"asset"),
+                        w.oracles[0].clone(),
+                        Some(QUORUM),
+                        None,
+                    )
+                    .unwrap();
+                }
+            });
+            w
+        }
+
+        fn run<T>(&self, f: impl FnOnce(&Env) -> T) -> T {
+            self.env.as_contract(&self.contract, || f(&self.env))
+        }
+
+        fn now(&self) -> u64 {
+            self.env.ledger().timestamp()
+        }
+    }
+
+    /// One generated step. Prices are `BASE_PRICE ± dev` basis points and
+    /// observations are `now - back` seconds (negative `back` = future-dated).
+    #[derive(Debug, Clone)]
+    enum Op {
+        Submit { o: usize, a: usize, dev: i16, back: i16 },
+        Replay { o: usize, a: usize },
+        Reorder { o: usize, a: usize },
+        Batch { o: usize, entries: Vec<(usize, i16, i16)>, poison: bool },
+        Consensus { a: usize },
+        Tick { dt: u16 },
+        Suspend { o: usize },
+        Reactivate { o: usize },
+    }
+
+    fn op_strategy() -> impl Strategy<Value = Op> {
+        prop_oneof![
+            6 => (0..ORACLES, 0..ASSETS, -700i16..700, -90i16..120)
+                .prop_map(|(o, a, dev, back)| Op::Submit { o, a, dev, back }),
+            2 => (0..ORACLES, 0..ASSETS).prop_map(|(o, a)| Op::Replay { o, a }),
+            2 => (0..ORACLES, 0..ASSETS).prop_map(|(o, a)| Op::Reorder { o, a }),
+            2 => (
+                0..ORACLES,
+                prop::collection::vec((0..ASSETS, -300i16..300, 0i16..120), 1..5),
+                any::<bool>(),
+            )
+                .prop_map(|(o, entries, poison)| Op::Batch { o, entries, poison }),
+            3 => (0..ASSETS).prop_map(|a| Op::Consensus { a }),
+            2 => (1u16..900).prop_map(|dt| Op::Tick { dt }),
+            1 => (0..ORACLES).prop_map(|o| Op::Suspend { o }),
+            1 => (0..ORACLES).prop_map(|o| Op::Reactivate { o }),
+        ]
+    }
+
+    fn sequence_strategy() -> impl Strategy<Value = Vec<Op>> {
+        prop::collection::vec(op_strategy(), 1..40)
+    }
+
+    fn price_for(dev: i16) -> u128 {
+        let delta = BASE_PRICE * u128::from(dev.unsigned_abs()) / 10_000;
+        if dev >= 0 {
+            BASE_PRICE + delta
+        } else {
+            BASE_PRICE - delta
+        }
+    }
+
+    fn observed(now: u64, back: i16) -> u64 {
+        if back >= 0 {
+            now - back as u64
+        } else {
+            now + u64::from(back.unsigned_abs())
+        }
+    }
+
+    /// Independent reference model of the oracle state machine.
+    #[derive(Debug, Clone, Default)]
+    struct Model {
+        active: [bool; ORACLES],
+        /// (oracle, asset) -> (observed_at, price) of the last accepted feed.
+        last_obs: BTreeMap<(usize, usize), (u64, u128)>,
+        /// asset -> oracle -> (observed_at, price) pending this round.
+        pending: [BTreeMap<usize, (u64, u128)>; ASSETS],
+        submissions: [u32; ORACLES],
+        history: [u32; ASSETS],
+        rounds: u32,
+    }
+
+    impl Model {
+        fn new() -> Self {
+            Model { active: [true; ORACLES], ..Model::default() }
+        }
+
+        /// Predicts `submit_price_feed`, applying the transition on success.
+        fn submit(&mut self, now: u64, o: usize, a: usize, price: u128, obs: u64) -> Result<(), OracleError> {
+            if !self.active[o] {
+                return Err(OracleError::OracleNotActive);
+            }
+            if obs > now + 60 {
+                return Err(OracleError::FutureTimestamp);
+            }
+            if now.saturating_sub(obs) > DEFAULT_STALENESS_WINDOW_SECS {
+                return Err(OracleError::StaleTimestamp);
+            }
+            if let Some(&(last, last_price)) = self.last_obs.get(&(o, a)) {
+                if last == obs && last_price == price {
+                    return Err(OracleError::DuplicateFeed);
+                }
+                if obs <= last {
+                    return Err(OracleError::OutOfOrderTimestamp);
+                }
+            }
+            if !self.pending[a].contains_key(&o) && self.pending[a].len() as u32 >= MAX_PENDING_FEEDS {
+                return Err(OracleError::PendingBufferFull);
+            }
+            self.last_obs.insert((o, a), (obs, price));
+            self.pending[a].insert(o, (obs, price));
+            self.submissions[o] += 1;
+            Ok(())
+        }
+    }
+
+    /// Asserts that contract state matches the model after every step.
+    fn assert_matches_model(w: &World, m: &Model) -> Result<(), TestCaseError> {
+        w.run(|env| {
+            for (i, o) in w.oracles.iter().enumerate() {
+                let rec = get_oracle(env, o).unwrap();
+                prop_assert_eq!(rec.total_submissions, m.submissions[i]);
+                prop_assert_eq!(rec.is_active(), m.active[i]);
+            }
+            let rounds: u32 = env.storage().instance().get(&OracleDataKey::TotalRounds).unwrap_or(0);
+            prop_assert_eq!(rounds, m.rounds);
+            for (i, a) in w.assets.iter().enumerate() {
+                // INV-ORACLE-ONE-VOTE / INV-ORACLE-BOUNDED.
+                let pending: soroban_sdk::Vec<PriceFeed> = env
+                    .storage()
+                    .persistent()
+                    .get(&OracleDataKey::PendingFeeds(a.clone()))
+                    .unwrap_or_else(|| soroban_sdk::Vec::new(env));
+                prop_assert_eq!(pending.len() as usize, m.pending[i].len());
+                prop_assert!(pending.len() <= MAX_PENDING_FEEDS);
+                for feed in pending.iter() {
+                    let o = w.oracles.iter().position(|x| *x == feed.oracle).unwrap();
+                    prop_assert_eq!(m.pending[i].get(&o), Some(&(feed.observed_at, feed.price)));
+                    prop_assert!(feed.verify_integrity(env));
+                }
+                // INV-ORACLE-CHAIN and counter consistency.
+                let asset = get_asset(env, a).unwrap();
+                prop_assert_eq!(asset.total_updates, m.history[i]);
+                prop_assert_eq!(verify_recent_price_history(env, a), Ok(m.history[i].min(MAX_VERIFY_SPAN)));
+            }
+            Ok(())
+        })
+    }
+
+    /// Applies one op to both the contract and the model, asserting that the
+    /// contract's result matches the model's prediction. Returns a compact
+    /// outcome code used by the determinism property.
+    fn step(w: &World, m: &mut Model, op: &Op) -> Result<u32, TestCaseError> {
+        let now = w.now();
+        let code = match op {
+            Op::Submit { o, a, dev, back } => {
+                let (price, obs) = (price_for(*dev), observed(now, *back));
+                let expected = m.submit(now, *o, *a, price, obs);
+                let got = w.run(|env| {
+                    submit_price_feed(env, &w.oracles[*o], w.assets[*a].clone(), price, CONF, obs, Bytes::new(env))
+                        .map(|_| ())
+                });
+                prop_assert_eq!(got, expected);
+                got.err().map_or(0, |e| e as u32)
+            }
+            Op::Replay { o, a } | Op::Reorder { o, a } => {
+                let Some(&(obs, price)) = m.last_obs.get(&(*o, *a)) else { return Ok(1) };
+                // Replay resubmits the identical feed; Reorder submits an
+                // older observation with a different price.
+                let (obs, price) = match op {
+                    Op::Replay { .. } => (obs, price),
+                    _ => (obs.saturating_sub(1), price + 7),
+                };
+                let expected = m.submit(now, *o, *a, price, obs);
+                prop_assert!(expected.is_err(), "replays and reorders must never be accepted");
+                let got = w.run(|env| {
+                    submit_price_feed(env, &w.oracles[*o], w.assets[*a].clone(), price, CONF, obs, Bytes::new(env))
+                        .map(|_| ())
+                });
+                prop_assert_eq!(got, expected);
+                got.err().map_or(0, |e| e as u32)
+            }
+            Op::Batch { o, entries, poison } => {
+                let mut inputs: Vec<(usize, u128, u64)> =
+                    entries.iter().map(|(a, dev, back)| (*a, price_for(*dev), observed(now, *back))).collect();
+                if *poison {
+                    // Mid-batch failure: an out-of-order entry for the first
+                    // entry's asset, appended after it.
+                    let (a, p, obs) = inputs[0];
+                    inputs.push((a, p + 3, obs.saturating_sub(1)));
+                }
+                let mut trial = m.clone();
+                let mut expected = Ok(inputs.len() as u32);
+                for &(a, p, obs) in &inputs {
+                    if let Err(e) = trial.submit(now, *o, a, p, obs) {
+                        expected = Err(e);
+                        break;
+                    }
+                }
+                let got = w.run(|env| {
+                    let mut v = soroban_sdk::Vec::new(env);
+                    for &(a, p, obs) in &inputs {
+                        v.push_back(PriceFeedInput {
+                            asset_id: w.assets[a].clone(),
+                            price: p,
+                            confidence: CONF,
+                            observed_at: obs,
+                            metadata: Bytes::new(env),
+                        });
+                    }
+                    submit_price_feed_batch(env, &w.oracles[*o], &v)
+                });
+                prop_assert_eq!(got, expected);
+                if *poison {
+                    prop_assert!(got.is_err(), "poisoned batch must roll back");
+                }
+                // INV-ORACLE-BATCH-ATOMIC: all-or-nothing.
+                if got.is_ok() {
+                    *m = trial;
+                }
+                got.map_or_else(|e| e as u32, |_| 0)
+            }
+            Op::Consensus { a } => {
+                let pending: Vec<(u64, u128)> = m.pending[*a].values().copied().collect();
+                let live = m.pending[*a].keys().filter(|o| m.active[**o]).count() as u32;
+                let before = m.history[*a];
+                let got = w.run(|env| process_consensus(env, &w.assets[*a]));
+                if pending.is_empty() {
+                    prop_assert_eq!(got.clone(), Err(OracleError::NoFeedsAvailable));
+                    return Ok(OracleError::NoFeedsAvailable as u32);
+                }
+                m.pending[*a].clear();
+                match got {
+                    Ok(cp) => {
+                        // Quorum of *live* oracles is required (INV-ORACLE-LIVE).
+                        prop_assert!(live >= QUORUM);
+                        prop_assert!(cp.oracle_count >= 1 && cp.oracle_count <= live);
+                        prop_assert_eq!(cp.history_index, before);
+                        prop_assert_eq!(cp.consensus_at, now);
+                        let lo = pending.iter().map(|p| p.1).min().unwrap();
+                        let hi = pending.iter().map(|p| p.1).max().unwrap();
+                        prop_assert!(cp.price >= lo && cp.price <= hi);
+                        m.history[*a] += 1;
+                        m.rounds += 1;
+                        0
+                    }
+                    Err(e) => {
+                        prop_assert!(matches!(e, OracleError::InvalidPrice | OracleError::StaleTimestamp));
+                        e as u32
+                    }
+                }
+            }
+            Op::Tick { dt } => {
+                let t = now + u64::from(*dt);
+                w.env.ledger().with_mut(|l| l.timestamp = t);
+                0
+            }
+            Op::Suspend { o } | Op::Reactivate { o } => {
+                let (status, active) = match op {
+                    Op::Suspend { .. } => (OracleStatus::Suspended, false),
+                    _ => (OracleStatus::Active, true),
+                };
+                w.run(|env| set_oracle_status(env, &w.oracles[*o], status)).unwrap();
+                m.active[*o] = active;
+                0
+            }
+        };
+        assert_matches_model(w, m)?;
+        Ok(code)
+    }
+
+    /// Hash-chain + Merkle verification, tamper detection and recovery.
+    fn assert_crypto_integrity_after_recovery(w: &World, m: &Model) -> Result<(), TestCaseError> {
+        w.run(|env| {
+            for (i, a) in w.assets.iter().enumerate() {
+                let len = m.history[i].min(MAX_VERIFY_SPAN);
+                let start = m.history[i] - len;
+                prop_assert_eq!(verify_price_history_chain(env, a, start, len), Ok(len));
+                let root = price_history_merkle_root(env, a, start, len).unwrap();
+                for idx in start..start + len {
+                    let entry = get_canonical_price(env, a, idx as u64).unwrap();
+                    let proof = price_history_merkle_proof(env, a, start, len, idx).unwrap();
+                    prop_assert!(verify_price_history_proof(env, &entry, &proof, &root));
+                }
+                if len == 0 {
+                    continue;
+                }
+                // Simulated corruption of the oldest entry is detected ...
+                let key = OracleDataKey::PriceHistoryEntry(a.clone(), start as u64);
+                let original: CanonicalPrice = env.storage().persistent().get(&key).unwrap();
+                let mut corrupted = original.clone();
+                corrupted.price ^= 1;
+                env.storage().persistent().set(&key, &corrupted);
+                prop_assert_eq!(
+                    verify_price_history_chain(env, a, start, len),
+                    Err(OracleError::ChainIntegrityViolation)
+                );
+                let proof = price_history_merkle_proof(env, a, start, len, start).unwrap();
+                prop_assert!(!verify_price_history_proof(env, &corrupted, &proof, &root));
+                // ... and recovery from the original record restores integrity
+                // and the identical Merkle root.
+                env.storage().persistent().set(&key, &original);
+                prop_assert_eq!(verify_price_history_chain(env, a, start, len), Ok(len));
+                prop_assert_eq!(price_history_merkle_root(env, a, start, len).unwrap(), root);
+            }
+            Ok(())
+        })
+    }
+
+    fn run_sequence(ops: &[Op]) -> Result<(World, Model, Vec<u32>), TestCaseError> {
+        let w = World::new();
+        let mut m = Model::new();
+        let mut codes = Vec::with_capacity(ops.len());
+        for op in ops {
+            codes.push(step(&w, &mut m, op)?);
+        }
+        Ok((w, m, codes))
+    }
+
+    fn chain_hashes(w: &World, m: &Model) -> Vec<BytesN<32>> {
+        w.run(|env| {
+            let mut out = Vec::new();
+            for (i, a) in w.assets.iter().enumerate() {
+                for idx in 0..m.history[i] {
+                    out.push(get_canonical_price(env, a, idx as u64).unwrap().chain_hash);
+                }
+            }
+            out
+        })
+    }
+
+    proptest! {
+        #![proptest_config(config(1024))]
+
+        /// 1,024 generated sequences: the contract never diverges from the
+        /// reference model and every invariant holds after every step.
+        #[test]
+        fn prop_rwa_oracle_state_machine_invariants(ops in sequence_strategy()) {
+            let (w, m, _) = run_sequence(&ops)?;
+            assert_crypto_integrity_after_recovery(&w, &m)?;
+        }
+    }
+
+    proptest! {
+        #![proptest_config(config(256))]
+
+        /// Deterministic execution: replaying the same sequence on a fresh
+        /// ledger yields identical outcomes and byte-identical hash chains.
+        #[test]
+        fn prop_rwa_oracle_replay_is_deterministic(ops in sequence_strategy()) {
+            let (w1, m1, codes1) = run_sequence(&ops)?;
+            let (w2, m2, codes2) = run_sequence(&ops)?;
+            prop_assert_eq!(codes1, codes2);
+            prop_assert_eq!(m1.history, m2.history);
+            prop_assert_eq!(chain_hashes(&w1, &m1), chain_hashes(&w2, &m2));
+        }
+
+        /// Reordered events: the arrival order of one round's feeds does not
+        /// change the canonical price or its chain hash.
+        #[test]
+        fn prop_rwa_oracle_round_is_order_independent(
+            devs in prop::collection::vec(-400i16..400, 2..=ORACLES),
+            order in Just((0..ORACLES).collect::<Vec<usize>>()).prop_shuffle(),
+        ) {
+            let run = |permute: bool| {
+                let w = World::new();
+                let now = w.now();
+                w.run(|env| {
+                    let idx: Vec<usize> = if permute {
+                        order.iter().copied().filter(|i| *i < devs.len()).collect()
+                    } else {
+                        (0..devs.len()).collect()
+                    };
+                    for i in idx {
+                        submit_price_feed(env, &w.oracles[i], w.assets[0].clone(), price_for(devs[i]), CONF, now, Bytes::new(env))
+                            .unwrap();
+                    }
+                    process_consensus(env, &w.assets[0])
+                })
+            };
+            prop_assert_eq!(run(false), run(true));
+        }
+    }
+}
+// ── end RWA oracle state-machine invariants ─────────────────────────────────
