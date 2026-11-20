@@ -348,6 +348,57 @@ def print_cbdc_footprint_report(footprint_violations: list) -> None:
     print()
 
 
+# CQRS projection engine storage footprint budget
+# ---------------------------------------------------------------------------
+#
+# Pinned serialized XDR sizes for `src/cqrs.rs` live in
+# `snapshots/cqrs_footprint.json` (asserted byte-for-byte by
+# `src/cqrs_storage_tests.rs`). This check fails CI when a pinned size exceeds
+# its byte budget, when a record regresses above its legacy (pre-packing) size,
+# or when the per-transaction write budget of the 1,000-tx benchmark is blown.
+CQRS_FOOTPRINT_PATH = Path(__file__).parent / "snapshots" / "cqrs_footprint.json"
+
+
+def check_cqrs_footprint(path: Path = CQRS_FOOTPRINT_PATH) -> list:
+    """Return a list of human-readable CQRS footprint violations."""
+    import json
+
+    if not path.exists():
+        return [f"missing pinned CQRS footprint file: {path}"]
+    data = json.loads(path.read_text())
+    violations = []
+    for name, rec in data.get("records", {}).items():
+        size, budget = rec.get("xdr_size"), rec.get("byte_budget")
+        legacy = rec.get("legacy_xdr_size")
+        if size is None or budget is None:
+            violations.append(f"{name}: missing xdr_size or byte_budget")
+            continue
+        if size > budget:
+            violations.append(f"{name}: xdr_size={size} exceeds byte_budget={budget}")
+        if legacy is not None and size >= legacy:
+            violations.append(f"{name}: xdr_size={size} is not smaller than legacy={legacy}")
+    bench = data.get("benchmark", {})
+    measured = bench.get("measured_max_write_bytes_per_tx")
+    limit = bench.get("max_write_bytes_per_tx_budget")
+    if measured is not None and limit is not None and measured > limit:
+        violations.append(
+            f"benchmark: max write bytes/tx {measured} exceeds budget {limit}"
+        )
+    for key, tier in data.get("storage_tiers", {}).items():
+        if tier not in ("instance", "persistent", "temporary"):
+            violations.append(f"storage tier for {key} is invalid: {tier}")
+    return violations
+
+
+def print_cqrs_footprint_report(violations: list) -> None:
+    print(_bold("STORAGE FOOTPRINT (cqrs):"))
+    if not violations:
+        print(f"  {_green('✓')} all src/cqrs.rs records within pinned byte budgets")
+    for v in violations:
+        print(f"  {_red('✗')} {v}")
+    print()
+
+
 # ---------------------------------------------------------------------------
 # Colour helpers
 # ---------------------------------------------------------------------------
@@ -548,7 +599,11 @@ def main() -> int:
     ml_violations, ml_warnings = check_ml_feature_store_footprint(new_snapshot)
     print_ml_footprint_report(ml_violations, ml_warnings, strict=args.strict)
 
-    if violations or footprint_violations or sc_violations or ml_violations:
+    # Storage footprint regression assertions for src/cqrs.rs
+    cqrs_violations = check_cqrs_footprint()
+    print_cqrs_footprint_report(cqrs_violations)
+
+    if violations or footprint_violations or sc_violations or ml_violations or cqrs_violations:
         return 2
     if (warnings or ml_warnings) and args.strict:
         return 1
