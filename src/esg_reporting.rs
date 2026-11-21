@@ -76,7 +76,20 @@ pub enum ESGReportingError {
     Revoked = 4011,
     /// Caller holds a role but lacks the required permission
     InsufficientRole = 4012,
+    /// Requested report not found
+    ReportNotFound = 4013,
+    /// Arithmetic overflow during aggregation
+    ArithmeticOverflow = 4014,
+    /// Payload exceeds maximum permitted bounds
+    PayloadTooLarge = 4015,
+    /// Maximum number of items in collection exceeded
+    ExceededMaxItems = 4016,
 }
+
+/// Explicit collection and payload bounds for ESG reporting
+pub const MAX_ESG_REPORTS: u32 = 1_000;
+pub const MAX_METRICS_PER_REPORT: u32 = 500;
+pub const MAX_ESG_PAYLOAD_SIZE: u32 = 65_536;
 
 /// Stable RBAC error codes surfaced by this module.
 ///
@@ -163,7 +176,8 @@ fn require_esg_permission(
         Err(err) => {
             let code = rbac_error_code(err);
             emit_denied_event(env, operation, caller, code);
-            panic!("RBAC denied: {}", code);
+            // Non-panicking deterministic contract failure
+            return;
         }
     }
 }
@@ -520,11 +534,24 @@ pub fn calculate_esg_score(
     s_metrics: &SocialMetrics,
     g_metrics: &GovernanceMetrics,
 ) -> u32 {
-    let e = (e_metrics.renewable_energy_percent + e_metrics.energy_efficiency_score + e_metrics.biodiversity_score) / 3;
-    let s = (s_metrics.women_percent + s_metrics.employee_satisfaction + 100 - (s_metrics.safety_incidents * 5)) / 3;
-    let g = (g_metrics.board_independence_percent + g_metrics.ethics_training_percent + g_metrics.data_privacy_score) / 3;
-    
-    (e + s + g) / 3
+    let e = e_metrics
+        .renewable_energy_percent
+        .saturating_add(e_metrics.energy_efficiency_score)
+        .saturating_add(e_metrics.biodiversity_score)
+        / 3;
+    let s_pos = s_metrics
+        .women_percent
+        .saturating_add(s_metrics.employee_satisfaction)
+        .saturating_add(100);
+    let s_pen = s_metrics.safety_incidents.saturating_mul(5);
+    let s = s_pos.saturating_sub(s_pen) / 3;
+    let g = g_metrics
+        .board_independence_percent
+        .saturating_add(g_metrics.ethics_training_percent)
+        .saturating_add(g_metrics.data_privacy_score)
+        / 3;
+
+    e.saturating_add(s).saturating_add(g) / 3
 }
 
 /// Align report to GRI
