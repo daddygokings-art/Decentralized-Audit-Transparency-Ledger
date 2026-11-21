@@ -37,6 +37,25 @@ pub const TEMPORARY_TTL_EXTEND_TO: u32 = 50_000;
 /// and the fixed `BytesN<32>` hash.
 #[contracttype]
 #[derive(Clone, Debug, Eq, PartialEq)]
+pub struct FeedPageQuery {
+    pub cursor: u32,
+    pub limit: u32,
+    pub feed_type: Option<u32>,
+    pub min_timestamp: Option<u64>,
+    pub max_timestamp: Option<u64>,
+}
+
+#[contracttype]
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct FeedPageResult {
+    pub feeds: Vec<DataFeed>,
+    pub next_cursor: Option<u32>,
+    pub has_more: bool,
+    pub total: u32,
+}
+
+#[contracttype]
+#[derive(Clone, Debug, Eq, PartialEq)]
 pub struct DataPoint {
     /// Timestamp of data point
     pub timestamp: u64,
@@ -324,6 +343,56 @@ impl FeedManager {
         feed.is_active = true;
         feed.last_updated = current_time;
         Ok(())
+    }
+
+    /// Paginated and filtered query over a collection of feeds
+    pub fn query_feeds_paginated(
+        env: &Env,
+        all_feeds: &Vec<DataFeed>,
+        query: &FeedPageQuery,
+    ) -> FeedPageResult {
+        let max_limit = 100u32;
+        let limit = if query.limit == 0 || query.limit > max_limit {
+            max_limit
+        } else {
+            query.limit
+        };
+
+        let mut filtered = Vec::new(env);
+        let len = all_feeds.len();
+
+        for i in 0..len {
+            let feed = all_feeds.get(i).unwrap();
+            let matches_type = query.feed_type.map_or(true, |t| feed.feed_type == t);
+            let matches_min = query.min_timestamp.map_or(true, |min_ts| feed.last_updated >= min_ts);
+            let matches_max = query.max_timestamp.map_or(true, |max_ts| feed.last_updated <= max_ts);
+
+            if matches_type && matches_min && matches_max {
+                filtered.push_back(feed);
+            }
+        }
+
+        let total = filtered.len();
+        let start = query.cursor;
+        let mut page = Vec::new(env);
+        let mut next_cursor = None;
+
+        if start < total {
+            let end = (start + limit).min(total);
+            for i in start..end {
+                page.push_back(filtered.get(i).unwrap());
+            }
+            if end < total {
+                next_cursor = Some(end);
+            }
+        }
+
+        FeedPageResult {
+            feeds: page,
+            next_cursor,
+            has_more: next_cursor.is_some(),
+            total,
+        }
     }
 }
 
