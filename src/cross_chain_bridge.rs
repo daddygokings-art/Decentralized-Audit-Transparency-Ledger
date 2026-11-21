@@ -278,6 +278,8 @@ pub enum BridgeKey {
     CacheSeq(u64),
     /// Seen attestation digest for replay prevention
     SeenAttestation(BytesN<32>),
+    /// Partition fault tolerance breaker status: true if partitioned
+    PartitionCircuitBreaker,
 }
 
 // ============================================================================
@@ -1199,6 +1201,15 @@ fn enforce_bridge_role(
         Err(BridgeError::RbacDenied)
     }
 
+    /// Implement fault tolerance recovery during network partition events
+    pub fn recover_from_partition(env: Env, caller: Address) -> Result<(), BridgeError> {
+        caller.require_auth();
+        env.storage().instance().set(&BridgeKey::PartitionCircuitBreaker, &false);
+        env.events().publish(
+            (Symbol::new(&env, "bridge"), Symbol::new(&env, "partition_recovered")),
+            (caller, env.ledger().timestamp()),
+        );
+        Ok(())
     /// Open a dispute challenge against an oracle attestation with a bonded stake
     pub fn open_oracle_dispute(
         env: Env,

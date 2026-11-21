@@ -1,8 +1,7 @@
-//! Zero-Knowledge Proof Verifier Module for Confidential Audit Logs
+//! Zero-Knowledge Proof Verifier with Network Partition Fault Tolerance
 //!
 //! Provides cryptographic verification for confidential audit records,
-//! Groth16 / Bulletproofs proof verification stubs, replay protection,
-//! and structured monitoring events.
+//! error propagation, structured monitoring events, and partition recovery.
 //! Zero-Knowledge Membership Proofs for Confidential Audit Logs (#983)
 //!
 //! Regulators and external auditors require verifiable proof of inclusion without
@@ -13,7 +12,7 @@
 #![no_std]
 
 use soroban_sdk::{
-    contracterror, contracttype, Bytes, BytesN, Env, Symbol, Vec,
+    contracterror, contracttype, Address, Bytes, BytesN, Env, Symbol, Vec,
 };
 
 #[contracterror]
@@ -27,6 +26,10 @@ pub enum ZkVerifierError {
     PartitionActive = 5005,
     AttestationRaceDetected = 5006,
     UnauthorizedValidator = 5007,
+    NetworkPartitionActive = 5009,
+    PartitionRecoveryFailed = 5008,
+}
+
 pub enum ZkMembershipError {
     InvalidProofFormat = 7001,
     VerificationFailed = 7002,
@@ -41,6 +44,11 @@ pub struct ZkProof {
     pub a: BytesN<32>,
     pub b: BytesN<64>,
     pub c: BytesN<32>,
+    pub public_inputs: Vec<BytesN<32>>,
+}
+
+#[contracttype]
+#[derive(Clone, Debug, Eq, PartialEq)]
 pub struct ConfidentialAuditProof {
     /// Proof point A (G1 element)
     pub a: BytesN<32>,
@@ -61,16 +69,36 @@ pub struct ZkVerificationRecord {
     pub is_valid: bool,
 }
 
-pub struct ZkVerifier;
+#[contracttype]
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct PartitionState {
+    pub is_partitioned: bool,
+    pub partition_start: u64,
+    pub recovered_at: u64,
+    pub recovery_nonce: u32,
+}
 
-impl ZkVerifier {
-    /// Compute deterministic proof digest
-    pub fn compute_digest(env: &Env, proof: &ZkProof) -> BytesN<32> {
 pub struct ConfidentialAttestation {
     pub attestation_digest: BytesN<32>,
     pub commitment_root: BytesN<32>,
     pub verified_at: u64,
     pub is_valid: bool,
+}
+
+pub struct ZkVerifier;
+
+impl ZkVerifier {
+    /// Compute deterministic proof digest
+    pub fn compute_digest(env: &Env, proof: &ZkProof) -> BytesN<32> {
+        let mut buf = Bytes::new(env);
+        buf.append(&proof.a.clone().into());
+        buf.append(&proof.b.clone().into());
+        buf.append(&proof.c.clone().into());
+        for i in 0..proof.public_inputs.len() {
+            buf.append(&proof.public_inputs.get(i).unwrap().into());
+        }
+        env.crypto().sha256(&buf).to_bytes()
+    }
 }
 
 pub struct ConfidentialZkVerifier;
@@ -88,12 +116,18 @@ impl ConfidentialZkVerifier {
         env.crypto().sha256(&buf).to_bytes()
     }
 
+    /// Verify a zero-knowledge membership proof with partition circuit-breaker
     /// Verify a zero-knowledge membership proof
     pub fn verify_membership_proof(
         env: &Env,
         proof: &ZkProof,
         commitment_root: &BytesN<32>,
+        partition_state: &PartitionState,
     ) -> Result<bool, ZkVerifierError> {
+        if partition_state.is_partitioned {
+            return Err(ZkVerifierError::NetworkPartitionActive);
+        }
+
         if proof.public_inputs.is_empty() {
             return Err(ZkVerifierError::PublicInputsMismatch);
         }
@@ -117,6 +151,27 @@ impl ConfidentialZkVerifier {
         );
 
         Ok(true)
+    }
+
+    /// Trigger fault recovery after a network partition event
+    pub fn recover_from_partition(
+        env: &Env,
+        caller: &Address,
+        partition_state: &mut PartitionState,
+    ) -> Result<(), ZkVerifierError> {
+        caller.require_auth();
+        partition_state.is_partitioned = false;
+        partition_state.recovered_at = env.ledger().timestamp();
+        partition_state.recovery_nonce = partition_state.recovery_nonce.saturating_add(1);
+
+        env.events().publish(
+            (Symbol::new(env, "zk_verifier"), Symbol::new(env, "partition_recovered")),
+            (caller.clone(), partition_state.recovery_nonce, env.ledger().timestamp()),
+        );
+
+        Ok(())
+    }
+
     /// Verify zero-knowledge membership proof for confidential audit logs
     pub fn verify_confidential_membership(
         env: &Env,

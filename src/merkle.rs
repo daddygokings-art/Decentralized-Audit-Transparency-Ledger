@@ -140,6 +140,7 @@ pub fn verify_merkle_proof(
     proof: &Vec<BytesN<32>>,
     root: &BytesN<32>,
 ) -> bool {
+) -> Result<bool, MerkleError> {
     if index >= leaf_count {
         return false;
     }
@@ -166,6 +167,26 @@ pub fn verify_merkle_proof(
     used == proof.len() && hash == *root
 }
 
+/// Audit and verify Merkle proof with anti-replay protection (epoch & nonce binding).
+pub fn verify_merkle_proof_anti_replay(
+    env: &Env,
+    leaf: &BytesN<32>,
+    index: u32,
+    leaf_count: u32,
+    proof: &Vec<BytesN<32>>,
+    root: &BytesN<32>,
+    epoch: u64,
+    nonce: u32,
+) -> bool {
+    let mut bound_buf = Bytes::new(env);
+    bound_buf.append(&leaf.clone().into());
+    bound_buf.append(&Bytes::from_slice(env, &epoch.to_be_bytes()));
+    bound_buf.append(&Bytes::from_slice(env, &nonce.to_be_bytes()));
+    let bound_leaf = env.crypto().sha256(&bound_buf).to_bytes();
+
+    verify_merkle_proof(env, &bound_leaf, index, leaf_count, proof, root)
+}
+
 /// Verify a Merkle proof with structured monitoring events and modern error propagation.
 pub fn verify_merkle_proof_with_events(
     env: &Env,
@@ -174,7 +195,6 @@ pub fn verify_merkle_proof_with_events(
     leaf_count: u32,
     proof: &Vec<BytesN<32>>,
     root: &BytesN<32>,
-) -> Result<bool, MerkleError> {
     if index >= leaf_count {
         return Err(MerkleError::LeafIndexOutOfRange);
     }
@@ -192,6 +212,8 @@ pub fn verify_merkle_proof_with_events(
         );
         Err(MerkleError::RootMismatch)
     }
+}
+
 /// Batch verify multiple Merkle proofs with optimized CPU metering and memory footprint.
 pub fn verify_merkle_batch(
     env: &Env,
@@ -244,6 +266,8 @@ pub fn recover_merkle_from_partition(
         (checkpoint.root.clone(), checkpoint.recovery_nonce, env.ledger().timestamp()),
     );
     checkpoint.root.clone()
+}
+
 /// Hash a key-value pair for Sparse Merkle Tree (SMT): `sha256(0x02 || key || value)`.
 pub fn hash_smt_leaf(env: &Env, key: &BytesN<32>, value: &BytesN<32>) -> BytesN<32> {
     let mut buf = Bytes::from_array(env, &[SMT_LEAF_PREFIX]);
