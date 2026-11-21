@@ -7620,4 +7620,5 @@ mod cbdc_privacy_tests;
 #[cfg(test)]
 mod chaos_tests;
 #[cfg(test)]
+mod zk_verifier_fuzz_tests;
 mod oracle_bridge_fuzz_tests;

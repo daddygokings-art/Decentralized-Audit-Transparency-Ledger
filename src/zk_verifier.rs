@@ -23,10 +23,13 @@ pub enum ZkVerifierError {
     VerificationFailed = 5002,
     ProofReplayDetected = 5003,
     PublicInputsMismatch = 5004,
-    NetworkPartitionActive = 5005,
+    PartitionActive = 5005,
     AttestationRaceDetected = 5006,
     UnauthorizedValidator = 5007,
+    NetworkPartitionActive = 5009,
     PartitionRecoveryFailed = 5008,
+}
+
 pub enum ZkMembershipError {
     InvalidProofFormat = 7001,
     VerificationFailed = 7002,
@@ -41,6 +44,11 @@ pub struct ZkProof {
     pub a: BytesN<32>,
     pub b: BytesN<64>,
     pub c: BytesN<32>,
+    pub public_inputs: Vec<BytesN<32>>,
+}
+
+#[contracttype]
+#[derive(Clone, Debug, Eq, PartialEq)]
 pub struct ConfidentialAuditProof {
     /// Proof point A (G1 element)
     pub a: BytesN<32>,
@@ -54,6 +62,15 @@ pub struct ConfidentialAuditProof {
 
 #[contracttype]
 #[derive(Clone, Debug, Eq, PartialEq)]
+pub struct ZkVerificationRecord {
+    pub proof_digest: BytesN<32>,
+    pub verified_at: u64,
+    pub validator_count: u32,
+    pub is_valid: bool,
+}
+
+#[contracttype]
+#[derive(Clone, Debug, Eq, PartialEq)]
 pub struct PartitionState {
     pub is_partitioned: bool,
     pub partition_start: u64,
@@ -61,15 +78,27 @@ pub struct PartitionState {
     pub recovery_nonce: u32,
 }
 
-pub struct ZkVerifier;
-
-impl ZkVerifier {
-    pub fn compute_digest(env: &Env, proof: &ZkProof) -> BytesN<32> {
 pub struct ConfidentialAttestation {
     pub attestation_digest: BytesN<32>,
     pub commitment_root: BytesN<32>,
     pub verified_at: u64,
     pub is_valid: bool,
+}
+
+pub struct ZkVerifier;
+
+impl ZkVerifier {
+    /// Compute deterministic proof digest
+    pub fn compute_digest(env: &Env, proof: &ZkProof) -> BytesN<32> {
+        let mut buf = Bytes::new(env);
+        buf.append(&proof.a.clone().into());
+        buf.append(&proof.b.clone().into());
+        buf.append(&proof.c.clone().into());
+        for i in 0..proof.public_inputs.len() {
+            buf.append(&proof.public_inputs.get(i).unwrap().into());
+        }
+        env.crypto().sha256(&buf).to_bytes()
+    }
 }
 
 pub struct ConfidentialZkVerifier;
@@ -88,6 +117,7 @@ impl ConfidentialZkVerifier {
     }
 
     /// Verify a zero-knowledge membership proof with partition circuit-breaker
+    /// Verify a zero-knowledge membership proof
     pub fn verify_membership_proof(
         env: &Env,
         proof: &ZkProof,
@@ -103,6 +133,8 @@ impl ConfidentialZkVerifier {
         }
 
         let digest = Self::compute_digest(env, proof);
+
+        // Verification simulation: check root binding in public inputs
         let first_input = proof.public_inputs.get(0).unwrap();
         if first_input != *commitment_root {
             env.events().publish(
@@ -112,6 +144,7 @@ impl ConfidentialZkVerifier {
             return Err(ZkVerifierError::VerificationFailed);
         }
 
+        // Emit structured verification event
         env.events().publish(
             (Symbol::new(env, "zk_verifier"), Symbol::new(env, "proof_verified")),
             (digest, commitment_root.clone(), env.ledger().timestamp()),
@@ -137,6 +170,8 @@ impl ConfidentialZkVerifier {
         );
 
         Ok(())
+    }
+
     /// Verify zero-knowledge membership proof for confidential audit logs
     pub fn verify_confidential_membership(
         env: &Env,

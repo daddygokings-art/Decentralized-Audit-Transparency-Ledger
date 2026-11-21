@@ -20,7 +20,20 @@
 //! is pure and deterministic: identical inputs give identical roots on every
 //! host.
 
-use soroban_sdk::{contracttype, Bytes, BytesN, Env, Symbol, Vec};
+use soroban_sdk::{contracterror, Bytes, BytesN, Env, Symbol, Vec, contracttype};
+
+
+
+#[contracterror]
+#[derive(Copy, Clone, Debug, Eq, PartialEq, PartialOrd, Ord)]
+#[repr(u32)]
+pub enum MerkleError {
+    LeafIndexOutOfRange = 6001,
+    ProofMalformed = 6002,
+    RootMismatch = 6003,
+    EmptyLeaves = 6004,
+}
+
 
 /// Merkle checkpoint record for network partition recovery
 #[contracttype]
@@ -127,6 +140,7 @@ pub fn verify_merkle_proof(
     proof: &Vec<BytesN<32>>,
     root: &BytesN<32>,
 ) -> bool {
+) -> Result<bool, MerkleError> {
     if index >= leaf_count {
         return false;
     }
@@ -171,6 +185,35 @@ pub fn verify_merkle_proof_anti_replay(
     let bound_leaf = env.crypto().sha256(&bound_buf).to_bytes();
 
     verify_merkle_proof(env, &bound_leaf, index, leaf_count, proof, root)
+}
+
+/// Verify a Merkle proof with structured monitoring events and modern error propagation.
+pub fn verify_merkle_proof_with_events(
+    env: &Env,
+    leaf: &BytesN<32>,
+    index: u32,
+    leaf_count: u32,
+    proof: &Vec<BytesN<32>>,
+    root: &BytesN<32>,
+    if index >= leaf_count {
+        return Err(MerkleError::LeafIndexOutOfRange);
+    }
+    let ok = verify_merkle_proof(env, leaf, index, leaf_count, proof, root);
+    if ok {
+        env.events().publish(
+            (Symbol::new(env, "merkle_tree"), Symbol::new(env, "proof_verified")),
+            (index, leaf.clone(), root.clone()),
+        );
+        Ok(true)
+    } else {
+        env.events().publish(
+            (Symbol::new(env, "merkle_tree"), Symbol::new(env, "proof_failed")),
+            (index, leaf.clone(), root.clone()),
+        );
+        Err(MerkleError::RootMismatch)
+    }
+}
+
 /// Batch verify multiple Merkle proofs with optimized CPU metering and memory footprint.
 pub fn verify_merkle_batch(
     env: &Env,
@@ -223,6 +266,8 @@ pub fn recover_merkle_from_partition(
         (checkpoint.root.clone(), checkpoint.recovery_nonce, env.ledger().timestamp()),
     );
     checkpoint.root.clone()
+}
+
 /// Hash a key-value pair for Sparse Merkle Tree (SMT): `sha256(0x02 || key || value)`.
 pub fn hash_smt_leaf(env: &Env, key: &BytesN<32>, value: &BytesN<32>) -> BytesN<32> {
     let mut buf = Bytes::from_array(env, &[SMT_LEAF_PREFIX]);
