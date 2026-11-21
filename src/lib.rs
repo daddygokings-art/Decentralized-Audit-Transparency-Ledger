@@ -48,6 +48,9 @@ mod regulator_tests;
 mod regulatory_reporting_tests;
 
 #[cfg(test)]
+mod regulatory_reporting_fuzz_tests;
+
+#[cfg(test)]
 mod dao_dispute_resolution_tests;
 
 use soroban_sdk::{
@@ -7625,3 +7628,5 @@ mod cbdc_privacy_tests;
 
 #[cfg(test)]
 mod chaos_tests;
+#[cfg(test)]
+mod oracle_bridge_fuzz_tests;

@@ -34,6 +34,7 @@
 #![no_std]
 
 use soroban_sdk::{contracttype, Address, Bytes, BytesN, Env, Symbol, Vec};
+use crate::rbac::{RbacError, RbacManager, Role};
 
 // ---------------------------------------------------------------------------
 // Enumerations
@@ -705,6 +706,76 @@ impl CustodyConfig {
     /// Whether the given LTV is within the allowed ceiling.
     pub fn is_valid_ltv(&self, ltv_bps: u32) -> bool {
         ltv_bps <= self.max_ltv_bps
+    }
+}
+
+// ---------------------------------------------------------------------------
+// Custody Manager & RBAC Enforcement
+// ---------------------------------------------------------------------------
+
+pub struct CustodyManager;
+
+impl CustodyManager {
+    /// Verify caller authorization and required RBAC role permissions
+    pub fn check_permission(env: &Env, caller: &Address, required_role: Role) -> Result<(), RbacError> {
+        caller.require_auth();
+        RbacManager::require_role(env, caller, required_role)
+    }
+
+    /// Update custodian status with RBAC gating and audit event emission
+    pub fn update_custodian_status(
+        env: &Env,
+        caller: &Address,
+        custodian: &mut CustodianRecord,
+        new_status: CustodianStatus,
+    ) -> Result<(), RbacError> {
+        caller.require_auth();
+        RbacManager::require_role(env, caller, Role::Admin)?;
+
+        let old_status = custodian.status;
+        custodian.status = new_status as u8;
+        custodian.last_updated = env.ledger().timestamp();
+
+        env.events().publish(
+            (Symbol::new(env, "rwa_custody"), Symbol::new(env, "status_updated")),
+            (
+                caller.clone(),
+                custodian.custodian.clone(),
+                old_status as u32,
+                new_status as u32,
+                env.ledger().timestamp(),
+            ),
+        );
+
+        Ok(())
+    }
+
+    /// Mutate collateral pledge with RBAC gating and audit event emission
+    pub fn pledge_collateral(
+        env: &Env,
+        caller: &Address,
+        record: &mut CollateralRecord,
+        new_pledged_value: u128,
+    ) -> Result<(), RbacError> {
+        caller.require_auth();
+        RbacManager::require_role(env, caller, Role::Submitter)?;
+
+        let old_val = record.pledged_value;
+        record.pledged_value = new_pledged_value;
+        record.collateral_state = CollateralState::Pledged as u8;
+
+        env.events().publish(
+            (Symbol::new(env, "rwa_custody"), Symbol::new(env, "collateral_pledged")),
+            (
+                caller.clone(),
+                record.position_id.clone(),
+                old_val,
+                new_pledged_value,
+                env.ledger().timestamp(),
+            ),
+        );
+
+        Ok(())
     }
 }
 
