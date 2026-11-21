@@ -96,7 +96,8 @@ fn test_over_length_settlement_path_is_typed_error() {
     for _ in 0..(MAX_SETTLEMENT_PATH_LEN + 1) {
         tx_ids.push_back(BytesN::zero());
     }
-    let result = OfflineManager::create_batch_settlement(&env, tx_ids, 1_000_00);
+    let caller = Address::generate(&env);
+    let result = OfflineManager::create_batch_settlement(&env, &caller, tx_ids, 1_000_00);
     assert!(result.is_err());
 }
 
@@ -107,7 +108,8 @@ fn test_max_settlement_path_len_accepted() {
     for _ in 0..MAX_SETTLEMENT_PATH_LEN {
         tx_ids.push_back(BytesN::zero());
     }
-    let result = OfflineManager::create_batch_settlement(&env, tx_ids, 1_000_00);
+    let caller = Address::generate(&env);
+    let result = OfflineManager::create_batch_settlement(&env, &caller, tx_ids, 1_000_00);
     assert!(result.is_ok());
 }
 
@@ -788,8 +790,9 @@ fn test_offline_batch_workflow() {
     tx_ids.push_back(offline_tx1.tx_hash);
     tx_ids.push_back(offline_tx2.tx_hash);
 
+    let batch_caller = Address::generate(&env);
     let batch =
-        OfflineManager::create_batch_settlement(&env, tx_ids, 2_000_00).unwrap();
+        OfflineManager::create_batch_settlement(&env, &batch_caller, tx_ids, 2_000_00).unwrap();
     assert_eq!(batch.transaction_ids.len(), 2);
 }
 
@@ -970,7 +973,8 @@ fn test_property_mid_batch_rollback_consistency() {
         } else {
             // A fully staged batch must be creatable and preserve its size.
             let total = (batch_size as u128) * 1_000_00;
-            let batch = OfflineManager::create_batch_settlement(&env, tx_ids, total).unwrap();
+            let caller = Address::generate(&env);
+            let batch = OfflineManager::create_batch_settlement(&env, &caller, tx_ids, total).unwrap();
             assert_eq!(batch.transaction_ids.len(), batch_size as u32);
             assert_eq!(committed.len(), batch_size);
         }
