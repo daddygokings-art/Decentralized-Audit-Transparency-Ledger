@@ -1,8 +1,31 @@
 #![no_std]
 
 use crate::suptech_types::{DataFeed, DataFeedType};
-use soroban_sdk::{contracttype, Bytes, BytesN, Env, Vec};
+use soroban_sdk::{contracterror, contracttype, Bytes, BytesN, Env, Vec};
 use soroban_sdk::xdr::ToXdr;
+
+/// Maximum allowed data point payload size (64 KiB).
+pub const MAX_PAYLOAD_SIZE: u32 = 65_536;
+/// Maximum allowed metadata payload size (1 KiB).
+pub const MAX_METADATA_SIZE: u32 = 1_024;
+/// Maximum feeds managed per publisher.
+pub const MAX_FEEDS_PER_PUBLISHER: u32 = 100;
+/// Maximum filter criteria size.
+pub const MAX_FILTER_CRITERIA_SIZE: u32 = 512;
+
+#[contracterror]
+#[derive(Copy, Clone, Debug, Eq, PartialEq, PartialOrd, Ord)]
+#[repr(u32)]
+pub enum SuptechFeedError {
+    EmptyInitialData = 1,
+    FeedNotActive = 2,
+    EmptyPayload = 3,
+    PayloadTooLarge = 4,
+    SubscriptionNotActive = 5,
+    FeedTypeMismatch = 6,
+    MetadataTooLarge = 7,
+    ExceededMaxFeeds = 8,
+}
 
 /// Storage tier classification for keys managed by this module.
 ///
@@ -35,6 +58,25 @@ pub const TEMPORARY_TTL_EXTEND_TO: u32 = 50_000;
 /// Field order is chosen to minimize XDR padding: fixed-width scalars
 /// (`u64`, `u32`) are packed first, followed by variable-width `Bytes`
 /// and the fixed `BytesN<32>` hash.
+#[contracttype]
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct FeedPageQuery {
+    pub cursor: u32,
+    pub limit: u32,
+    pub feed_type: Option<u32>,
+    pub min_timestamp: Option<u64>,
+    pub max_timestamp: Option<u64>,
+}
+
+#[contracttype]
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct FeedPageResult {
+    pub feeds: Vec<DataFeed>,
+    pub next_cursor: Option<u32>,
+    pub has_more: bool,
+    pub total: u32,
+}
+
 #[contracttype]
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub struct DataPoint {
@@ -105,6 +147,9 @@ impl FeedManager {
         if initial_data.is_empty() {
             return Err("Initial data cannot be empty");
         }
+        if initial_data.len() > MAX_PAYLOAD_SIZE {
+            return Err("Initial data exceeds maximum payload size");
+        }
 
         let feed_id = Self::compute_feed_id(env, feed_type);
         let now = env.ledger().timestamp();
@@ -143,6 +188,9 @@ impl FeedManager {
 
         if new_data.is_empty() {
             return Err("Data payload cannot be empty");
+        }
+        if new_data.len() > MAX_PAYLOAD_SIZE {
+            return Err("Data payload exceeds maximum payload size");
         }
 
         let now = env.ledger().timestamp();
@@ -249,11 +297,7 @@ impl FeedManager {
     /// Get feed update lag (seconds behind expected update)
     pub fn get_feed_update_lag(feed: &DataFeed, current_time: u64) -> u64 {
         let age = current_time.saturating_sub(feed.last_updated);
-        if age > feed.update_frequency {
-            age - feed.update_frequency
-        } else {
-            0
-        }
+        age.saturating_sub(feed.update_frequency)
     }
 
     /// Check data quality score (0-100)
@@ -324,6 +368,56 @@ impl FeedManager {
         feed.is_active = true;
         feed.last_updated = current_time;
         Ok(())
+    }
+
+    /// Paginated and filtered query over a collection of feeds
+    pub fn query_feeds_paginated(
+        env: &Env,
+        all_feeds: &Vec<DataFeed>,
+        query: &FeedPageQuery,
+    ) -> FeedPageResult {
+        let max_limit = 100u32;
+        let limit = if query.limit == 0 || query.limit > max_limit {
+            max_limit
+        } else {
+            query.limit
+        };
+
+        let mut filtered = Vec::new(env);
+        let len = all_feeds.len();
+
+        for i in 0..len {
+            let feed = all_feeds.get(i).unwrap();
+            let matches_type = query.feed_type.map_or(true, |t| feed.feed_type == t);
+            let matches_min = query.min_timestamp.map_or(true, |min_ts| feed.last_updated >= min_ts);
+            let matches_max = query.max_timestamp.map_or(true, |max_ts| feed.last_updated <= max_ts);
+
+            if matches_type && matches_min && matches_max {
+                filtered.push_back(feed);
+            }
+        }
+
+        let total = filtered.len();
+        let start = query.cursor;
+        let mut page = Vec::new(env);
+        let mut next_cursor = None;
+
+        if start < total {
+            let end = (start + limit).min(total);
+            for i in start..end {
+                page.push_back(filtered.get(i).unwrap());
+            }
+            if end < total {
+                next_cursor = Some(end);
+            }
+        }
+
+        FeedPageResult {
+            feeds: page,
+            next_cursor,
+            has_more: next_cursor.is_some(),
+            total,
+        }
     }
 }
 

@@ -43,6 +43,21 @@ pub const AUDIT_OUTCOME_DENIED: &str = "denied";
 /// Bridge relay identity and configuration
 #[contracttype]
 #[derive(Clone, Debug, Eq, PartialEq)]
+pub struct OracleDisputeChallenge {
+    pub challenge_id: u32,
+    pub challenger: Address,
+    pub relayer: Address,
+    pub bonded_stake: u128,
+    pub created_at: u64,
+    pub penalty_window_seconds: u64,
+    pub is_resolved: bool,
+    pub is_slashed: bool,
+    pub reward_distributed: u128,
+    pub burned_stake: u128,
+}
+
+#[contracttype]
+#[derive(Clone, Debug, Eq, PartialEq)]
 pub struct BridgeRelay {
     /// Relay's Stellar address
     pub relay_address: Address,
@@ -249,6 +264,10 @@ pub enum BridgeKey {
     VerificationCache(Bytes, Bytes, u128),
     /// Ethereum chain ID for this bridge (e.g., 1 for mainnet, 5 for Goerli)
     EthChainId,
+    /// Oracle dispute challenge record
+    OracleDispute(u32),
+    /// Counter for dispute challenges
+    OracleDisputeNextId,
     /// Monotonic sequence counter for pending attestations.
     AttestationNextSeq,
     /// Ordered attestation id index: seq -> attestation id.
@@ -1191,6 +1210,85 @@ fn enforce_bridge_role(
             (caller, env.ledger().timestamp()),
         );
         Ok(())
+    /// Open a dispute challenge against an oracle attestation with a bonded stake
+    pub fn open_oracle_dispute(
+        env: Env,
+        challenger: Address,
+        relayer: Address,
+        bonded_stake: u128,
+    ) -> u32 {
+        challenger.require_auth();
+        let dispute_id: u32 = env
+            .storage()
+            .instance()
+            .get(&BridgeKey::OracleDisputeNextId)
+            .unwrap_or(1);
+        env.storage()
+            .instance()
+            .set(&BridgeKey::OracleDisputeNextId, &(dispute_id + 1));
+
+        let challenge = OracleDisputeChallenge {
+            challenge_id: dispute_id,
+            challenger: challenger.clone(),
+            relayer: relayer.clone(),
+            bonded_stake,
+            created_at: env.ledger().timestamp(),
+            penalty_window_seconds: 7 * 86400,
+            is_resolved: false,
+            is_slashed: false,
+            reward_distributed: 0,
+            burned_stake: 0,
+        };
+
+        env.storage()
+            .instance()
+            .set(&BridgeKey::OracleDispute(dispute_id), &challenge);
+
+        env.events().publish(
+            (Symbol::new(&env, "bridge"), Symbol::new(&env, "dispute_opened")),
+            (dispute_id, challenger, relayer, bonded_stake),
+        );
+
+        dispute_id
+    }
+
+    /// Resolve an oracle dispute challenge. If rejected, enforce slashing penalty window
+    /// where 50% of slashed stake is awarded to the accused relayer and 50% is burned.
+    pub fn resolve_oracle_dispute(
+        env: Env,
+        caller: Address,
+        dispute_id: u32,
+        challenge_valid: bool,
+    ) -> Result<OracleDisputeChallenge, BridgeError> {
+        caller.require_auth();
+        let key = BridgeKey::OracleDispute(dispute_id);
+        let mut challenge: OracleDisputeChallenge = env
+            .storage()
+            .instance()
+            .get(&key)
+            .ok_or(BridgeError::RelayNotFound)?;
+
+        if challenge.is_resolved {
+            return Ok(challenge);
+        }
+
+        challenge.is_resolved = true;
+
+        if !challenge_valid {
+            challenge.is_slashed = true;
+            let reward = challenge.bonded_stake / 2;
+            let burned = challenge.bonded_stake - reward;
+            challenge.reward_distributed = reward;
+            challenge.burned_stake = burned;
+
+            env.events().publish(
+                (Symbol::new(&env, "bridge"), Symbol::new(&env, "challenger_slashed")),
+                (dispute_id, challenge.challenger.clone(), challenge.relayer.clone(), reward, burned),
+            );
+        }
+
+        env.storage().instance().set(&key, &challenge);
+        Ok(challenge)
     }
 }
 

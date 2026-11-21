@@ -293,6 +293,94 @@ mod tests {
     }
 
     #[test]
+    fn test_byzantine_actor_fuzz_invariants() {
+        let ctx = setup();
+        let env = &ctx.env;
+        let unauthorized = Address::generate(env);
+
+        let event_type = Symbol::new(env, "byzantine");
+        let key = key_id(env);
+
+        for seed in 0u32..32 {
+            let mut payload = [0u8; 40];
+            payload[0..4].copy_from_slice(&seed.to_be_bytes());
+            payload[4..].fill(seed as u8);
+            let result = ctx.client.try_log_confidential_event(
+                &ctx.submitter,
+                &event_type,
+                &Bytes::from_slice(env, &payload),
+                &AccessControlPolicy::Public,
+                &fresh_proof(&ctx),
+                &key,
+            );
+            assert!(result.is_ok());
+        }
+
+        let too_short = Bytes::from_slice(env, b"short");
+        let rejected = ctx.client.try_log_confidential_event(
+            &unauthorized,
+            &event_type,
+            &Bytes::from_slice(env, b"payload"),
+            &AccessControlPolicy::Public,
+            &too_short,
+            &key,
+        );
+        assert!(rejected.is_err());
+    }
+
+    #[test]
+    fn test_simultaneous_validator_attestation_is_duplicate_safe() {
+        let ctx = setup();
+        let env = &ctx.env;
+        let payload = Bytes::from_slice(env, b"race-safe-payload");
+        let event_id = log(&ctx, b"race-safe-payload", &AccessControlPolicy::Public);
+        let payload_hash = env.crypto().sha256(&payload).to_bytes();
+
+        let attestation = ctx
+            .client
+            .attest_confidential_event(&ctx.admin, &event_id, &payload_hash);
+        assert_eq!(attestation.validator, ctx.admin);
+        assert_eq!(
+            ctx.client.get_confidential_attestation(&event_id, &ctx.admin),
+            Some(attestation)
+        );
+        assert!(ctx
+            .client
+            .try_attest_confidential_event(
+                &ctx.admin,
+                &event_id,
+                &payload_hash,
+            )
+            .is_err());
+    }
+
+    #[test]
+    fn test_network_partition_fails_closed_and_recovers_by_epoch() {
+        let ctx = setup();
+        let env = &ctx.env;
+
+        ctx.client.set_confidential_partition(&ctx.admin, &true);
+        assert!(ctx.client.confidential_partitioned());
+        assert_eq!(ctx.client.confidential_partition_epoch(), 1);
+
+        assert!(ctx
+            .client
+            .try_log_confidential_event(
+                &ctx.submitter,
+                &Symbol::new(env, "partition"),
+                &Bytes::from_slice(env, b"payload"),
+                &AccessControlPolicy::Public,
+                &fresh_proof(&ctx),
+                &key_id(env),
+            )
+            .is_err());
+
+        ctx.client.set_confidential_partition(&ctx.admin, &false);
+        assert!(!ctx.client.confidential_partitioned());
+        assert_eq!(ctx.client.confidential_partition_epoch(), 1);
+    }
+
+    #[test]
     fn test_confidential_analytics_aggregation() {
         let ctx = setup();
         let id1 = log(&ctx, b"chunk_1", &AccessControlPolicy::Public);
