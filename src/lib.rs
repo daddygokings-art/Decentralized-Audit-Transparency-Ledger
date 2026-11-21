@@ -21,6 +21,7 @@ pub mod compliance_validators;
 pub mod tax;
 pub mod vat_engine;
 pub mod rwa_custody;
+pub mod zk_verifier;
 pub mod rwa_oracle;
 // Domain-separated Merkle tree helpers shared by hash-chained logs
 // (RWA oracle price history, CQRS event store).
@@ -7629,4 +7630,7 @@ mod cbdc_privacy_tests;
 #[cfg(test)]
 mod chaos_tests;
 #[cfg(test)]
+mod merkle_fuzz_tests;
+#[cfg(test)]
+mod zk_verifier_tests;
 mod oracle_bridge_fuzz_tests;
