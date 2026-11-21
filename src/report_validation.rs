@@ -544,6 +544,7 @@ pub fn validate_report(env: &Env, report: &RegulatoryReport, now: u64) -> Valida
 #[cfg(test)]
 mod tests {
     use super::*;
+    use soroban_sdk::testutils::Address as _;
     use soroban_sdk::{Address, Bytes, BytesN, Env, Vec};
 
     use crate::regulatory_reporting::{ReportStatus, RegulatoryAuthority, RegulatoryReport, ReportFormat};
@@ -575,14 +576,21 @@ mod tests {
             status: ReportStatus::Draft,
             created_at: 1_700_000_000,
             updated_at: 1_700_000_000,
-            last_validation: None,
+            last_validation: ValidationResult {
+                passed: false,
+                error_count: 0,
+                warning_count: 0,
+                errors: Vec::new(env),
+                warnings: Vec::new(env),
+                validated_at: 0,
+            },
             prev_report_hash: BytesN::from_array(env, &[0u8; 32]),
             report_hash: BytesN::from_array(env, &[2u8; 32]),
             source_event_ids: Vec::new(env),
         }
     }
 
-    fn with_fields(env: &Env, mut report: RegulatoryReport, fields: &[u8]) -> RegulatoryReport {
+    fn with_fields(_env: &Env, mut report: RegulatoryReport, fields: &[u8]) -> RegulatoryReport {
         report.content.extend_from_slice(fields);
         report
     }
