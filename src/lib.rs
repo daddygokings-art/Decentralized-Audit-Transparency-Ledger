@@ -7494,15 +7494,8 @@ pub use cbdc_privacy::{
     PageCursor, PageLimit, QueryFilter, PaginatedQueryResult, CbdcPrivacyQuery, CbdcPrivacyQueryClient,
 };
 
-// Governance dashboard types & audit trail (issue #365 governance UI).
-pub mod governance_dashboard;
-
 #[cfg(test)]
 mod cbdc_tests;
-
-#[cfg(test)]
-mod cbdc_privacy_pagination_tests;
-
 
 // SupTech Integration Modules
 pub mod suptech_types;
@@ -7547,9 +7540,6 @@ mod supply_chain_tests;
 
 #[cfg(test)]
 mod rbac_gating_tests;
-
-#[cfg(test)]
-mod governance_dashboard_tests;
 
 #[cfg(test)]
 mod data_retention_tests;
