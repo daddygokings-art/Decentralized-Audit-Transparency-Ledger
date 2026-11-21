@@ -141,10 +141,28 @@ jobs:
                 next();
               });
               app.use(express.json());
-              app.get('/', (_, res) => res.json({ status: 'ok' }));
-              app.get('/favicon.ico', (_, res) => { res.setHeader('Content-Type', 'image/x-icon'); res.status(200).end(); });
-              app.get('/robots.txt', (_, res) => res.type('text/plain').send('User-agent: *\nDisallow: /'));
-              app.get('/sitemap.xml', (_, res) => res.type('application/xml').send('<?xml version=\"1.0\" encoding=\"UTF-8\"?><urlset xmlns=\"http://www.sitemaps.org/schemas/sitemap/0.9\"></urlset>'));
+              const setPublicCacheHeaders = (res) => {
+                res.setHeader('Cache-Control', 'public, max-age=300');
+                res.removeHeader('Pragma');
+                res.removeHeader('Expires');
+              };
+              app.get('/', (_, res) => {
+                setPublicCacheHeaders(res);
+                res.json({ status: 'ok' });
+              });
+              app.get('/favicon.ico', (_, res) => {
+                setPublicCacheHeaders(res);
+                res.setHeader('Content-Type', 'image/x-icon');
+                res.status(200).end();
+              });
+              app.get('/robots.txt', (_, res) => {
+                setPublicCacheHeaders(res);
+                res.type('text/plain').send('User-agent: *\nDisallow: /');
+              });
+              app.get('/sitemap.xml', (_, res) => {
+                setPublicCacheHeaders(res);
+                res.type('application/xml').send('<?xml version=\"1.0\" encoding=\"UTF-8\"?><urlset xmlns=\"http://www.sitemaps.org/schemas/sitemap/0.9\"></urlset>');
+              });
               app.get('/health', (_, res) => res.json({ status: 'ok' }));
               app.get('/api/events', (_, res) => res.json({ events: [], total: 0 }));
               app.listen(3000, () => console.log('DAST stub listening on :3000'));
@@ -162,7 +180,7 @@ jobs:
           # api/rest/src/dastTarget.ts) and are deliberately left active so a
           # regression re-opens a finding instead of passing silently.
           # Issue #928 extended coverage to /favicon.ico (CSP fallback +
-          # no-store Cache-Control) to clear 10055 and 10049 on that route.
+          # public cache policy) to clear 10055 and 10049 on that route.
           cat > .zap/rules.tsv <<'EOF'
           10015	IGNORE	(Incomplete or No Cache-control Header Set)
           10027	IGNORE	(Information Disclosure - Suspicious Comments)

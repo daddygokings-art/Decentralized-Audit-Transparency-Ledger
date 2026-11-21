@@ -29,6 +29,22 @@ describe("REST API security integration", () => {
     expect(res.headers["content-security-policy"]).toMatch(/'nonce-/);
   });
 
+  it.each(["/", "/robots.txt", "/sitemap.xml"])(
+    "allows caching the public %s response",
+    async (path) => {
+      const res = await client.get(path);
+      expect(res.status).toBe(200);
+      expect(res.headers["cache-control"]).toBe("public, max-age=300");
+      expect(res.headers.pragma).toBeUndefined();
+      expect(res.headers.expires).toBeUndefined();
+    }
+  );
+
+  it("keeps dynamic API responses non-storable", async () => {
+    const res = await client.get("/healthz");
+    expect(res.headers["cache-control"]).toContain("no-store");
+  });
+
   it("exposes OIDC discovery and JWKS under /oauth", async () => {
     const discovery = await client.get("/oauth/.well-known/openid-configuration");
     expect(discovery.status).toBe(200);

@@ -90,8 +90,8 @@ The ZAP baseline scan additionally flagged four HTTP response header findings ac
 - &bull; **Severity**: INFORMATIONAL
 - &bull; **CWE**: N/A
 - &bull; **Status**: **RESOLVED**
-- &bull; **Description**: ZAP flagged responses lacking explicit cache control directives.
-- &bull; **Remediation**: `securityHeadersMiddleware` now sets `Cache-Control: no-store, no-cache, must-revalidate, private` along with `Pragma: no-cache` and `Expires: 0` on all responses.
+- &bull; **Description**: ZAP reported cache policy on public content and dynamic API responses.
+- &bull; **Remediation**: Dynamic and user-specific API responses remain non-storable (`Cache-Control: no-store`). Public status and discovery routes (`/`, `/robots.txt`, `/sitemap.xml`, and `/favicon.ico`) explicitly use `Cache-Control: public, max-age=300` and omit legacy `Pragma` and `Expires` headers.
 
 ### Finding SEC-009: CSP Failure to Define Directive with No Fallback [ZAP-10055]
 - &bull; **Severity**: MEDIUM
@@ -115,12 +115,11 @@ The ZAP baseline scan additionally flagged four HTTP response header findings ac
 - &bull; **Severity**: INFORMATIONAL
 - &bull; **CWE**: N/A
 - &bull; **Status**: **RESOLVED**
-- &bull; **Description**: The October 2026 ZAP scan (issue #928) reported Non-Storable Content alerts on five routes: `http://localhost:3000`, `http://localhost:3000/`, `http://localhost:3000/favicon.ico`, `http://localhost:3000/robots.txt`, and `http://localhost:3000/sitemap.xml`. The `/favicon.ico` route was a new addition to this alert because it lacked an explicit `Cache-Control` header.
+- &bull; **Description**: The October 2026 ZAP scan (issue #928) reported Non-Storable Content alerts on five public routes: `http://localhost:3000`, `http://localhost:3000/`, `http://localhost:3000/favicon.ico`, `http://localhost:3000/robots.txt`, and `http://localhost:3000/sitemap.xml`. Later scan runs repeated the alert for the root, robots, and sitemap endpoints.
 - &bull; **Remediation**:
-  - **DAST target** (`api/rest/src/dastTarget.ts`): The `securityHeaders()` middleware already sets `Cache-Control: no-store, no-cache, must-revalidate, proxy-revalidate, max-age=0` on every response including the new `/favicon.ico` handler.
-  - **Next.js middleware** (`ui/src/middleware.ts`, `ui/middleware.ts`): Now applies `Cache-Control: no-store, no-cache, must-revalidate, proxy-revalidate, max-age=0` to `/favicon.ico` (previously excluded from the matcher).
-  - **Next.js config** (`ui/next.config.js`): Added `/favicon.ico` to the `headers()` array with both `securityHeaders` and `cacheHeaders`, ensuring `Cache-Control`, `Pragma`, and `Expires` headers are set on the favicon route.
-  - **DAST workflow** (`.github/workflows/dast.yml`): The fallback express stub now includes `/favicon.ico` and the middleware applies `Cache-Control: no-store` to all routes.
+  - **REST API** (`api/rest/src/server.ts`): The public root, robots, and sitemap responses use a five-minute public cache policy. Other REST responses retain the default non-storable policy.
+  - **DAST target** (`api/rest/src/dastTarget.ts`) and workflow fallback (`.github/workflows/dast.yml`): Apply the same public cache policy to the root, robots, sitemap, and favicon responses while retaining `no-store` for dynamic responses.
+  - **Cache headers**: Public responses remove `Pragma` and `Expires`, which otherwise conflict with the explicit public policy.
 
 ---
 
