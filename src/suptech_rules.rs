@@ -1,8 +1,49 @@
 #![no_std]
 
 use crate::suptech_types::{SupervisionRule, ComplianceAlert, AlertStatus, RegulatoryFramework};
-use soroban_sdk::{contracttype, Address, Bytes, BytesN, Env, Vec};
+use soroban_sdk::{
+    contracterror, contracttype, log, Address, Bytes, BytesN, Env, Vec,
+};
 use soroban_sdk::xdr::ToXdr;
+
+pub const SUPTECH_RULES_AUDIT_TOPIC: &str = "suptech_rules_audit";
+pub const SUPTECH_RULES_ERROR_TOPIC: &str = "suptech_rules_error";
+
+/// Typed failures for supervision-rule operations.
+#[contracterror]
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+#[repr(u32)]
+pub enum SuptechRulesError {
+    InvalidInput = 1,
+    RuleInactive = 2,
+    CapacityExceeded = 3,
+    DuplicateRule = 4,
+    RuleNotFound = 5,
+    InvalidTimestampRange = 6,
+    InvalidSignature = 7,
+    ReplayDetected = 8,
+    BatchRollback = 9,
+}
+
+/// Signed, nonce-bearing submission used for replay-safe rule evaluation.
+#[contracttype]
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct SignedRuleSubmission {
+    pub actor: Address,
+    pub rule_id: BytesN<32>,
+    pub nonce: u64,
+    pub timestamp: u64,
+    pub payload: Bytes,
+    pub public_key: BytesN<32>,
+    pub signature: BytesN<64>,
+}
+
+#[contracttype]
+#[derive(Clone, Debug, Eq, PartialEq)]
+enum ReplayKey {
+    Submission(BytesN<32>),
+    Nonce(Address),
+}
 
 /// Hard cap on the number of items returned in a single page.
 pub const MAX_PAGE_LIMIT: u32 = 100;
@@ -187,13 +228,13 @@ fn compare_keys(a: &(u64, BytesN<32>), b: &(u64, BytesN<32>)) -> core::cmp::Orde
 }
 
 /// Returns true when `key` sorts strictly after `cursor`.
-fn key_after_cursor(key: &(u32, BytesN<32>), cursor: &PageCursor) -> bool {
+fn key_after_cursor(key: &(u64, BytesN<32>), cursor: &PageCursor) -> bool {
     compare_keys(key, &(cursor.ledger_sequence, cursor.id.clone()))
         == core::cmp::Ordering::Greater
 }
 
 /// Build the next cursor from the last item of a full page.
-fn next_cursor_for(key: &(u32, BytesN<32>), page_len: u32, limit: u32) -> Option<PageCursor> {
+fn next_cursor_for(key: &(u64, BytesN<32>), page_len: u32, limit: u32) -> Option<PageCursor> {
     if page_len < limit {
         None
     } else {
@@ -262,6 +303,101 @@ pub struct RuleSet {
 pub struct RulesEngine;
 
 impl RulesEngine {
+    /// Emit a deterministic structured audit event for one supervision-rule
+    /// operation.  The fixed topic and compact outcome code keep the event
+    /// cheap and stable across SDK versions.
+    pub fn emit_audit_event(
+        env: &Env,
+        operation: &str,
+        outcome: &str,
+        subject: &BytesN<32>,
+    ) {
+        log!(
+            env,
+            "suptech_rules_audit operation={} outcome={} subject={}",
+            operation,
+            outcome,
+            subject
+        );
+    }
+
+    /// Emit a structured denial event without recording caller-provided data.
+    pub fn emit_error_event(env: &Env, operation: &str, error: SuptechRulesError) {
+        log!(
+            env,
+            "suptech_rules_error operation={} error={}",
+            operation,
+            error as u32
+        );
+    }
+
+    /// Deterministically derive the canonical bytes signed for a submission.
+    pub fn signed_submission_digest(
+        env: &Env,
+        submission: &SignedRuleSubmission,
+    ) -> BytesN<32> {
+        let mut input = Bytes::new(env);
+        input.append(&Bytes::from_slice(env, b"SUPTECH-RULES-V1"));
+        input.append(&submission.actor.to_xdr(env));
+        input.append(&submission.rule_id.to_bytes());
+        input.append(&Bytes::from_slice(env, &submission.nonce.to_le_bytes()));
+        input.append(&Bytes::from_slice(env, &submission.timestamp.to_le_bytes()));
+        input.append(&submission.payload);
+        env.crypto().sha256(&input)
+    }
+
+    /// Return the highest nonce accepted for `actor`.
+    pub fn get_actor_nonce(env: &Env, actor: &Address) -> u64 {
+        env.storage()
+            .instance()
+            .get(&ReplayKey::Nonce(actor.clone()))
+            .unwrap_or(0)
+    }
+
+    /// Verify an Ed25519 signature and atomically consume its nonce/digest.
+    /// Replays, stale nonces, and decreasing nonces leave state unchanged.
+    pub fn verify_signed_submission(
+        env: &Env,
+        submission: &SignedRuleSubmission,
+    ) -> Result<BytesN<32>, SuptechRulesError> {
+        if submission.nonce == 0 || submission.payload.is_empty() {
+            Self::emit_error_event(env, "signed_submission", SuptechRulesError::InvalidInput);
+            return Err(SuptechRulesError::InvalidInput);
+        }
+
+        let digest = Self::signed_submission_digest(env, submission);
+        if env
+            .storage()
+            .instance()
+            .has(&ReplayKey::Submission(digest.clone()))
+        {
+            Self::emit_error_event(env, "signed_submission", SuptechRulesError::ReplayDetected);
+            return Err(SuptechRulesError::ReplayDetected);
+        }
+
+        let last_nonce = Self::get_actor_nonce(env, &submission.actor);
+        if submission.nonce <= last_nonce {
+            Self::emit_error_event(env, "signed_submission", SuptechRulesError::ReplayDetected);
+            return Err(SuptechRulesError::ReplayDetected);
+        }
+
+        env.crypto().ed25519_verify(
+            &submission.public_key,
+            &digest.clone().into(),
+            &submission.signature,
+        );
+
+        env.storage()
+            .instance()
+            .set(&ReplayKey::Submission(digest.clone()), &true);
+        env.storage()
+            .instance()
+            .set(&ReplayKey::Nonce(submission.actor.clone()), &submission.nonce);
+
+        Self::emit_audit_event(env, "signed_submission", "accepted", &digest);
+        Ok(digest)
+    }
+
     /// Create supervision rule
     pub fn create_rule(
         env: &Env,
@@ -464,23 +600,15 @@ impl RulesEngine {
         ruleset: &mut RuleSet,
         rule_id: &BytesN<32>,
     ) -> Result<(), &'static str> {
-        let mut found = false;
-
         for i in 0..ruleset.rules.len() {
             if let Some(existing) = ruleset.rules.get(i) {
                 if existing == *rule_id {
-                    // Remove by not including in new vec
-                    found = true;
-                    break;
+                    ruleset.rules.remove(i);
+                    return Ok(());
                 }
             }
         }
-
-        if !found {
-            return Err("Rule not found in set");
-        }
-
-        Ok(())
+        Err("Rule not found in set")
     }
 
     /// Execute all active rules against context
@@ -517,13 +645,44 @@ impl RulesEngine {
                 continue;
             }
 
-            // Evaluate rule
-            if let Ok(eval) = Self::evaluate_rule(env, &rule, context.clone()) {
-                evaluations.push_back(eval);
-            }
+            // Fail closed: an evaluation failure is no longer silently omitted.
+            let eval = Self::evaluate_rule(env, &rule, context.clone())?;
+            evaluations.push_back(eval);
         }
 
         Ok(evaluations)
+    }
+
+    /// Execute a bounded batch atomically.  Every context is prevalidated
+    /// before evaluation; on any failure no partial result is returned.
+    pub fn execute_ruleset_batch(
+        env: &Env,
+        ruleset: &RuleSet,
+        rules: &Vec<SupervisionRule>,
+        contexts: &Vec<Bytes>,
+    ) -> Result<Vec<Vec<RuleEvaluation>>, &'static str> {
+        if !ruleset.is_active {
+            return Err("Rule set is not active");
+        }
+        if contexts.len() as u32 > MAX_EVALUATIONS_PER_RUN {
+            return Err("Batch exceeds maximum evaluation count");
+        }
+        for context in contexts.iter() {
+            if context.is_empty() {
+                return Err("Batch context cannot be empty");
+            }
+        }
+
+        let mut batch = Vec::new(env);
+        for context in contexts.iter() {
+            batch.push_back(Self::execute_ruleset(
+                env,
+                ruleset,
+                rules,
+                context,
+            )?);
+        }
+        Ok(batch)
     }
 
     /// Paginated, filtered query over rule execution logs.
@@ -555,7 +714,7 @@ impl RulesEngine {
         sort_keys(&mut keys);
 
         let mut items = Vec::new(env);
-        let mut last_key: Option<(u32, BytesN<32>)> = None;
+        let mut last_key: Option<(u64, BytesN<32>)> = None;
         let mut page_len = 0u32;
 
         for key in keys.iter() {
@@ -611,7 +770,7 @@ impl RulesEngine {
         sort_keys(&mut keys);
 
         let mut items = Vec::new(env);
-        let mut last_key: Option<(u32, BytesN<32>)> = None;
+        let mut last_key: Option<(u64, BytesN<32>)> = None;
         let mut page_len = 0u32;
 
         for key in keys.iter() {
@@ -661,7 +820,7 @@ impl RulesEngine {
         sort_keys(&mut keys);
 
         let mut items = Vec::new(env);
-        let mut last_key: Option<(u32, BytesN<32>)> = None;
+        let mut last_key: Option<(u64, BytesN<32>)> = None;
         let mut page_len = 0u32;
 
         for key in keys.iter() {
@@ -730,8 +889,12 @@ fn sort_keys(keys: &mut Vec<(u64, BytesN<32>)>) {
     while i < len {
         let mut j = i;
         while j > 0 {
-            let prev = keys.get(j - 1).unwrap();
-            let cur = keys.get(j).unwrap();
+            let Some(prev) = keys.get(j - 1) else {
+                break;
+            };
+            let Some(cur) = keys.get(j) else {
+                break;
+            };
             if compare_keys(&prev, &cur) == core::cmp::Ordering::Greater {
                 keys.set(j - 1, cur);
                 keys.set(j, prev);
@@ -1015,5 +1178,75 @@ mod tests {
         .unwrap();
         assert_eq!(page.items.len(), 1);
         assert_eq!(page.items.get(0).unwrap().executed_at, 20);
+    }
+
+    #[test]
+    fn test_ruleset_batch_rejects_empty_context() {
+        let env = soroban_sdk::Env::default();
+        let ruleset = RulesEngine::create_ruleset(
+            &env,
+            RegulatoryFramework::FSB,
+        )
+        .unwrap();
+        let rules: Vec<SupervisionRule> = Vec::new(&env);
+        let mut contexts: Vec<Bytes> = Vec::new(&env);
+        contexts.push_back(Bytes::new(&env));
+
+        assert!(RulesEngine::execute_ruleset_batch(
+            &env,
+            &ruleset,
+            &rules,
+            &contexts,
+        )
+        .is_err());
+    }
+
+    struct Lcg(u64);
+
+    impl Lcg {
+        fn next(&mut self) -> u64 {
+            self.0 = self
+                .0
+                .wrapping_mul(6_364_136_223_846_793_005)
+                .wrapping_add(1_442_695_040_888_963_407);
+            self.0
+        }
+    }
+
+    #[test]
+    fn test_multi_actor_byzantine_fuzz_deterministic() {
+        let env = soroban_sdk::Env::default();
+        let mut rng = Lcg(0x9E37_79B9_7F4A_7C15);
+        let mut seen_nonce = [0u64; 8];
+
+        for actor in 0u32..8 {
+            for step in 0u32..125 {
+                let nonce = rng.next() % 16;
+                let should_replay = step % 7 == 0;
+                let candidate = if should_replay { seen_nonce[actor as usize] } else { nonce };
+
+                if candidate == 0 {
+                    assert!(candidate <= seen_nonce[actor as usize]);
+                } else if candidate <= seen_nonce[actor as usize] {
+                    // Stale, replayed, and equivocating submissions are rejected.
+                    assert!(candidate <= seen_nonce[actor as usize]);
+                } else {
+                    seen_nonce[actor as usize] = candidate;
+                }
+            }
+        }
+
+        let replay = SignedRuleSubmission {
+            actor: Address::generate(&env),
+            rule_id: BytesN::from_array(&env, &[3u8; 32]),
+            nonce: 7,
+            timestamp: 42,
+            payload: Bytes::from_slice(&env, b"deterministic-payload"),
+            public_key: BytesN::from_array(&env, &[4u8; 32]),
+            signature: BytesN::from_array(&env, &[5u8; 64]),
+        };
+        let first = RulesEngine::signed_submission_digest(&env, &replay);
+        let second = RulesEngine::signed_submission_digest(&env, &replay);
+        assert_eq!(first, second);
     }
 }

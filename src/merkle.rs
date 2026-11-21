@@ -36,6 +36,10 @@ pub enum MerkleError {
 pub const LEAF_PREFIX: u8 = 0x00;
 /// Domain-separation prefix for interior node hashes.
 pub const NODE_PREFIX: u8 = 0x01;
+/// Domain-separation prefix for sparse Merkle tree leaf hashes.
+pub const SMT_LEAF_PREFIX: u8 = 0x02;
+/// Domain-separation prefix for sparse Merkle tree empty/non-inclusion hashes.
+pub const SMT_EMPTY_PREFIX: u8 = 0x03;
 
 /// `sha256(0x00 || leaf)`.
 pub fn hash_leaf(env: &Env, leaf: &BytesN<32>) -> BytesN<32> {
@@ -175,6 +179,82 @@ pub fn verify_merkle_proof_with_events(
         );
         Err(MerkleError::RootMismatch)
     }
+/// Hash a key-value pair for Sparse Merkle Tree (SMT): `sha256(0x02 || key || value)`.
+pub fn hash_smt_leaf(env: &Env, key: &BytesN<32>, value: &BytesN<32>) -> BytesN<32> {
+    let mut buf = Bytes::from_array(env, &[SMT_LEAF_PREFIX]);
+    buf.append(&key.clone().into());
+    buf.append(&value.clone().into());
+    env.crypto().sha256(&buf).to_bytes()
+}
+
+/// Hash an empty leaf for Sparse Merkle Tree (SMT): `sha256(0x03 || key)`.
+pub fn hash_smt_empty_leaf(env: &Env, key: &BytesN<32>) -> BytesN<32> {
+    let mut buf = Bytes::from_array(env, &[SMT_EMPTY_PREFIX]);
+    buf.append(&key.clone().into());
+    env.crypto().sha256(&buf).to_bytes()
+}
+
+/// Verify a Sparse Merkle Tree (SMT) membership proof.
+/// Reconstructs the root along the bit-path given by `key`.
+pub fn verify_smt_proof(
+    env: &Env,
+    key: &BytesN<32>,
+    value: &BytesN<32>,
+    proof: &Vec<BytesN<32>>,
+    root: &BytesN<32>,
+) -> bool {
+    let mut current = hash_smt_leaf(env, key, value);
+    let key_bytes: [u8; 32] = key.to_array();
+    let proof_len = proof.len();
+
+    for i in 0..proof_len {
+        let byte_idx = (i / 8) as usize;
+        let bit_idx = (i % 8) as u8;
+        let is_right_child = (key_bytes[byte_idx] >> (7 - bit_idx)) & 1 == 1;
+
+        let Some(sibling) = proof.get(i) else {
+            return false;
+        };
+
+        current = if is_right_child {
+            hash_node(env, &sibling, &current)
+        } else {
+            hash_node(env, &current, &sibling)
+        };
+    }
+
+    current == *root
+}
+
+/// Verify a Sparse Merkle Tree (SMT) non-inclusion (absence) proof.
+/// Proves that `key` does not exist or has been deleted/archived in the tree.
+pub fn verify_smt_non_inclusion_proof(
+    env: &Env,
+    key: &BytesN<32>,
+    proof: &Vec<BytesN<32>>,
+    root: &BytesN<32>,
+) -> bool {
+    let mut current = hash_smt_empty_leaf(env, key);
+    let key_bytes: [u8; 32] = key.to_array();
+    let proof_len = proof.len();
+
+    for i in 0..proof_len {
+        let byte_idx = (i / 8) as usize;
+        let bit_idx = (i % 8) as u8;
+        let is_right_child = (key_bytes[byte_idx] >> (7 - bit_idx)) & 1 == 1;
+
+        let Some(sibling) = proof.get(i) else {
+            return false;
+        };
+
+        current = if is_right_child {
+            hash_node(env, &sibling, &current)
+        } else {
+            hash_node(env, &current, &sibling)
+        };
+    }
+
+    current == *root
 }
 
 #[cfg(test)]
@@ -279,5 +359,57 @@ mod tests {
         // the raw concatenation as a single leaf.
         assert_ne!(hash_leaf(&env, &node), node);
         assert_ne!(merkle_root(&env, &l), hash_node(&env, &l.get_unchecked(0), &l.get_unchecked(1)));
+    }
+
+    #[test]
+    fn smt_proof_verification_and_non_inclusion() {
+        let env = Env::default();
+        let key = BytesN::from_array(&env, &[0x42; 32]);
+        let val = BytesN::from_array(&env, &[0xAA; 32]);
+        let sib1 = BytesN::from_array(&env, &[0x01; 32]);
+        let sib2 = BytesN::from_array(&env, &[0x02; 32]);
+
+        let mut proof = Vec::new(&env);
+        proof.push_back(sib1.clone());
+        proof.push_back(sib2.clone());
+
+        // Reconstruct expected root for membership
+        let mut cur = hash_smt_leaf(&env, &key, &val);
+        let key_bytes: [u8; 32] = key.to_array();
+        for i in 0..2 {
+            let byte_idx = (i / 8) as usize;
+            let bit_idx = (i % 8) as u8;
+            let is_right = (key_bytes[byte_idx] >> (7 - bit_idx)) & 1 == 1;
+            let sib = proof.get(i).unwrap();
+            cur = if is_right {
+                hash_node(&env, &sib, &cur)
+            } else {
+                hash_node(&env, &cur, &sib)
+            };
+        }
+        let root = cur;
+
+        assert!(verify_smt_proof(&env, &key, &val, &proof, &root));
+
+        // Wrong value fails
+        let wrong_val = BytesN::from_array(&env, &[0xBB; 32]);
+        assert!(!verify_smt_proof(&env, &key, &wrong_val, &proof, &root));
+
+        // Test non-inclusion
+        let mut empty_cur = hash_smt_empty_leaf(&env, &key);
+        for i in 0..2 {
+            let byte_idx = (i / 8) as usize;
+            let bit_idx = (i % 8) as u8;
+            let is_right = (key_bytes[byte_idx] >> (7 - bit_idx)) & 1 == 1;
+            let sib = proof.get(i).unwrap();
+            empty_cur = if is_right {
+                hash_node(&env, &sib, &empty_cur)
+            } else {
+                hash_node(&env, &empty_cur, &sib)
+            };
+        }
+        let non_incl_root = empty_cur;
+        assert!(verify_smt_non_inclusion_proof(&env, &key, &proof, &non_incl_root));
+        assert!(!verify_smt_non_inclusion_proof(&env, &key, &proof, &root));
     }
 }

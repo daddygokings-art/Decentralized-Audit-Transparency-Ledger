@@ -41,6 +41,10 @@ pub const COMMITMENT_DOMAIN_TAG: &[u8] = b"DATL/tamper-evidence/commitment/v1";
 /// window in which a leaked-but-unsubmitted witness stays usable
 /// (~1 day at 5s ledgers).
 pub const MAX_WITNESS_VALIDITY_LEDGERS: u32 = 17_280;
+/// Signatures from one validator set are deduplicated within each 10,000-ledger epoch.
+pub const WITNESS_EPOCH_LENGTH_LEDGERS: u32 = 10_000;
+/// Bounds roster fingerprinting and the temporary canonical-sort buffer.
+pub const MAX_VALIDATORS_PER_SET: usize = 64;
 /// A `u32` leaf index can address at most 2^32 leaves.
 pub const MAX_MERKLE_DEPTH: u32 = 32;
 /// Maximum number of links verified in one call. Bounds worst-case CPU and
@@ -56,6 +60,8 @@ pub const MAX_REPORTED_COMPROMISED: usize = 64;
 
 const MERKLE_LEAF_PREFIX: u8 = 0x00;
 const MERKLE_NODE_PREFIX: u8 = 0x01;
+const MERKLE_EXPIRY_PREFIX: u8 = 0x02;
+const VALIDATOR_SET_DOMAIN_TAG: &[u8] = b"DATL/tamper-evidence/validator-set/v1";
 
 /// Typed failures surfaced by the tamper-evidence subsystem.
 ///
@@ -98,6 +104,16 @@ pub enum TamperEvidenceError {
     BatchTooLarge = 15,
     /// Parallel input vectors have different lengths.
     LengthMismatch = 16,
+    /// This validator already signed for this validator set in the current epoch.
+    RedundantSignature = 17,
+    /// The record's committed expiry ledger has not been reached.
+    RecordNotExpired = 18,
+    /// The proof root is not pinned by an accepted validator witness.
+    UnanchoredProofRoot = 19,
+    /// A different proof is already committed for this record index.
+    ProofCommitmentConflict = 20,
+    /// The validator roster exceeds [`MAX_VALIDATORS_PER_SET`].
+    ValidatorSetTooLarge = 21,
 }
 
 /// Published once per chain verification.
@@ -221,6 +237,26 @@ pub struct ArchiveProof {
     pub valid: bool,
 }
 
+/// Merkle inclusion proof that a record's expiration was committed.
+#[contracttype]
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct ExpirationProof {
+    /// Sequential event index being proven expired.
+    pub event_index: u32,
+    /// Hash of the expired event.
+    pub event_hash: BytesN<32>,
+    /// Ledger sequence at which the expiration was recorded.
+    pub expired_at_ledger: u32,
+    /// Validator-accepted root of the expiration commitment tree.
+    pub expiry_root: BytesN<32>,
+    /// Position of this commitment among the tree's leaves.
+    pub leaf_index: u32,
+    /// Sibling hashes from the leaf up to (excluding) the root.
+    pub merkle_path: Vec<BytesN<32>>,
+    /// Whether the proof was valid when constructed. Ignored during verification.
+    pub valid: bool,
+}
+
 /// Witness for hash chain commitment
 #[contracttype]
 #[derive(Clone, Debug, Eq, PartialEq)]
@@ -262,6 +298,12 @@ pub enum TamperEvidenceKey {
     SignerNonce(BytesN<32>),
     /// Root accepted for an event index
     AcceptedRoot(u32),
+    /// Validator/set/epoch tuple already used to accept a witness.
+    ValidatorEpochSigner(BytesN<32>, BytesN<32>, u32),
+    /// Proof committed for an archived event index.
+    CommittedArchiveProof(u32),
+    /// Persistent proof commitment for an expired event index.
+    CommittedExpiryProof(u32),
 }
 
 /// Configuration for tamper-evidence validation
@@ -475,6 +517,33 @@ impl TamperEvidenceHelper {
             .get(&TamperEvidenceKey::AcceptedRoot(event_index))
     }
 
+    /// Fingerprint a validator set independently of caller-provided ordering.
+    pub fn validator_set_fingerprint(
+        env: &Env,
+        trusted_signers: &Vec<BytesN<32>>,
+    ) -> Result<BytesN<32>, TamperEvidenceError> {
+        if trusted_signers.len() as usize > MAX_VALIDATORS_PER_SET {
+            return Err(TamperEvidenceError::ValidatorSetTooLarge);
+        }
+        let mut keys = [[0u8; 32]; MAX_VALIDATORS_PER_SET];
+        let mut len = 0usize;
+        for signer in trusted_signers.iter() {
+            keys[len] = signer.to_array();
+            len += 1;
+        }
+        keys[..len].sort_unstable();
+        let unique_len = (0..len).filter(|i| *i == 0 || keys[*i] != keys[*i - 1]).count();
+
+        let mut buf = Bytes::from_slice(env, VALIDATOR_SET_DOMAIN_TAG);
+        buf.extend_from_array(&(unique_len as u32).to_be_bytes());
+        for i in 0..len {
+            if i == 0 || keys[i] != keys[i - 1] {
+                buf.extend_from_array(&keys[i]);
+            }
+        }
+        Ok(env.crypto().sha256(&buf).into())
+    }
+
     /// Verify a validator-signed witness and record it.
     ///
     /// All cheap, stateful checks run before the signature check so that
@@ -515,6 +584,18 @@ impl TamperEvidenceHelper {
         if commitment != w.commitment_hash {
             return fail(TamperEvidenceError::CommitmentMismatch);
         }
+        let epoch = ledger.sequence() / WITNESS_EPOCH_LENGTH_LEDGERS;
+        let set_fingerprint = match Self::validator_set_fingerprint(env, trusted_signers) {
+            Ok(fingerprint) => fingerprint,
+            Err(error) => return fail(error),
+        };
+        let epoch_key = TamperEvidenceKey::ValidatorEpochSigner(set_fingerprint, signed.signer.clone(), epoch);
+        let already_signed_this_epoch = env.storage().persistent().has(&epoch_key);
+        if already_signed_this_epoch
+            && !matches!(Self::accepted_root(env, w.event_index), Some(root) if root != w.root_at_index)
+        {
+            return fail(TamperEvidenceError::RedundantSignature);
+        }
 
         let digest = Self::witness_digest(env, w, &signed.signer, signed.nonce, signed.valid_until_ledger);
         env.crypto()
@@ -535,10 +616,14 @@ impl TamperEvidenceHelper {
                 return fail(TamperEvidenceError::Equivocation);
             }
         }
+        if already_signed_this_epoch {
+            return fail(TamperEvidenceError::RedundantSignature);
+        }
 
         let storage = env.storage().persistent();
         storage.set(&TamperEvidenceKey::SignerNonce(signed.signer.clone()), &signed.nonce);
         storage.set(&TamperEvidenceKey::AcceptedRoot(w.event_index), &w.root_at_index);
+        storage.set(&epoch_key, &true);
 
         WitnessAcceptedEvent {
             event_index: w.event_index,
@@ -674,28 +759,7 @@ impl TamperEvidenceHelper {
         leaf_index: u32,
         merkle_path: &Vec<BytesN<32>>,
     ) -> Result<BytesN<32>, TamperEvidenceError> {
-        let depth = merkle_path.len();
-        if depth == 0 {
-            return Err(TamperEvidenceError::EmptyMerklePath);
-        }
-        if depth > MAX_MERKLE_DEPTH {
-            return Err(TamperEvidenceError::MerklePathTooLong);
-        }
-        // A tree of this depth has 2^depth leaves; higher index bits would be
-        // silently ignored, letting one proof verify under many indices.
-        if depth < MAX_MERKLE_DEPTH && (leaf_index >> depth) != 0 {
-            return Err(TamperEvidenceError::IndexOutOfRange);
-        }
-
-        let mut node = Self::merkle_leaf(env, event_hash);
-        for (level, sibling) in merkle_path.iter().enumerate() {
-            node = if (leaf_index >> level) & 1 == 0 {
-                Self::merkle_node(env, &node, &sibling)
-            } else {
-                Self::merkle_node(env, &sibling, &node)
-            };
-        }
-        Ok(node)
+        Self::compute_merkle_root_from_leaf(env, Self::merkle_leaf(env, event_hash), leaf_index, merkle_path)
     }
 
     /// Create proof that event is immutable by archive. The returned
@@ -726,6 +790,145 @@ impl TamperEvidenceHelper {
             Self::compute_merkle_root(env, &proof.event_hash, proof.leaf_index, &proof.merkle_path),
             Ok(root) if root == proof.archive_root
         )
+    }
+
+    /// Hash an expiration commitment leaf. Its distinct prefix and explicit
+    /// index/deadline prevent archive leaves or altered expiry claims aliasing it.
+    pub fn expiration_leaf(
+        env: &Env,
+        event_index: u32,
+        event_hash: &BytesN<32>,
+        expired_at_ledger: u32,
+    ) -> BytesN<32> {
+        let mut buf = Bytes::from_array(env, &[MERKLE_EXPIRY_PREFIX]);
+        buf.extend_from_array(&event_index.to_be_bytes());
+        buf.append(&event_hash.clone().into());
+        buf.extend_from_array(&expired_at_ledger.to_be_bytes());
+        env.crypto().sha256(&buf).into()
+    }
+
+    /// Reconstruct a Merkle root from an already-hashed leaf.
+    fn compute_merkle_root_from_leaf(
+        env: &Env,
+        mut node: BytesN<32>,
+        leaf_index: u32,
+        merkle_path: &Vec<BytesN<32>>,
+    ) -> Result<BytesN<32>, TamperEvidenceError> {
+        let depth = merkle_path.len();
+        if depth == 0 {
+            return Err(TamperEvidenceError::EmptyMerklePath);
+        }
+        if depth > MAX_MERKLE_DEPTH {
+            return Err(TamperEvidenceError::MerklePathTooLong);
+        }
+        if depth < MAX_MERKLE_DEPTH && (leaf_index >> depth) != 0 {
+            return Err(TamperEvidenceError::IndexOutOfRange);
+        }
+
+        for (level, sibling) in merkle_path.iter().enumerate() {
+            node = if (leaf_index >> level) & 1 == 0 {
+                Self::merkle_node(env, &node, &sibling)
+            } else {
+                Self::merkle_node(env, &sibling, &node)
+            };
+        }
+        Ok(node)
+    }
+
+    /// Build a proof that a committed expiry leaf is included in `expiry_root`.
+    pub fn create_expiration_proof(
+        env: &Env,
+        event_index: u32,
+        event_hash: &BytesN<32>,
+        expired_at_ledger: u32,
+        expiry_root: &BytesN<32>,
+        leaf_index: u32,
+        merkle_path: Vec<BytesN<32>>,
+    ) -> Result<ExpirationProof, TamperEvidenceError> {
+        if env.ledger().sequence() < expired_at_ledger {
+            return Err(Self::reject(env, TamperEvidenceError::RecordNotExpired));
+        }
+        let leaf = Self::expiration_leaf(env, event_index, event_hash, expired_at_ledger);
+        let root = Self::compute_merkle_root_from_leaf(env, leaf, leaf_index, &merkle_path)
+            .map_err(|e| Self::reject(env, e))?;
+        Ok(ExpirationProof {
+            event_index,
+            event_hash: event_hash.clone(),
+            expired_at_ledger,
+            expiry_root: expiry_root.clone(),
+            leaf_index,
+            merkle_path,
+            valid: root == *expiry_root,
+        })
+    }
+
+    /// Verify both the Merkle inclusion and that the committed expiry ledger
+    /// has arrived. The proof's `valid` flag is never trusted.
+    pub fn verify_expiration_proof(env: &Env, proof: &ExpirationProof) -> bool {
+        if env.ledger().sequence() < proof.expired_at_ledger {
+            return false;
+        }
+        let leaf = Self::expiration_leaf(env, proof.event_index, &proof.event_hash, proof.expired_at_ledger);
+        matches!(
+            Self::compute_merkle_root_from_leaf(env, leaf, proof.leaf_index, &proof.merkle_path),
+            Ok(root) if root == proof.expiry_root
+        )
+    }
+
+    /// Persist an archive proof only when its root was accepted by a validator witness.
+    pub fn commit_archive_proof(
+        env: &Env,
+        event_index: u32,
+        proof: &ArchiveProof,
+    ) -> Result<(), TamperEvidenceError> {
+        if !Self::verify_archive_proof(env, proof) {
+            return Err(Self::reject(env, TamperEvidenceError::CommitmentMismatch));
+        }
+        if Self::accepted_root(env, event_index).as_ref() != Some(&proof.archive_root) {
+            return Err(Self::reject(env, TamperEvidenceError::UnanchoredProofRoot));
+        }
+        let key = TamperEvidenceKey::CommittedArchiveProof(event_index);
+        if let Some(existing) = env.storage().persistent().get::<_, ArchiveProof>(&key) {
+            if &existing != proof {
+                return Err(Self::reject(env, TamperEvidenceError::ProofCommitmentConflict));
+            }
+            return Ok(());
+        }
+        env.storage().persistent().set(&key, proof);
+        Ok(())
+    }
+
+    /// Persist an expiry proof only when its root was accepted by a validator witness.
+    pub fn commit_expiration_proof(env: &Env, proof: &ExpirationProof) -> Result<(), TamperEvidenceError> {
+        if !Self::verify_expiration_proof(env, proof) {
+            return Err(Self::reject(env, TamperEvidenceError::CommitmentMismatch));
+        }
+        if Self::accepted_root(env, proof.event_index).as_ref() != Some(&proof.expiry_root) {
+            return Err(Self::reject(env, TamperEvidenceError::UnanchoredProofRoot));
+        }
+        let key = TamperEvidenceKey::CommittedExpiryProof(proof.event_index);
+        if let Some(existing) = env.storage().persistent().get::<_, ExpirationProof>(&key) {
+            if &existing != proof {
+                return Err(Self::reject(env, TamperEvidenceError::ProofCommitmentConflict));
+            }
+            return Ok(());
+        }
+        env.storage().persistent().set(&key, proof);
+        Ok(())
+    }
+
+    /// Retrieve the persistent proof commitment for an archived event.
+    pub fn committed_archive_proof(env: &Env, event_index: u32) -> Option<ArchiveProof> {
+        env.storage()
+            .persistent()
+            .get(&TamperEvidenceKey::CommittedArchiveProof(event_index))
+    }
+
+    /// Retrieve the persistent proof commitment for an expired event.
+    pub fn committed_expiration_proof(env: &Env, event_index: u32) -> Option<ExpirationProof> {
+        env.storage()
+            .persistent()
+            .get(&TamperEvidenceKey::CommittedExpiryProof(event_index))
     }
 }
 
@@ -1346,6 +1549,173 @@ mod signature_tests {
             assert_eq!(TamperEvidenceHelper::accepted_root(&env, 7), Some(h(&env, 0xAB)));
             // A rejected witness does not burn the nonce.
             assert_eq!(TamperEvidenceHelper::last_nonce(&env, &b.pk(&env)), Some(1));
+        });
+    }
+
+    #[test]
+    fn signatures_are_deduplicated_per_set_and_ledger_epoch() {
+        let (env, id) = setup();
+        let a = Validator::new(1);
+        let b = Validator::new(2);
+        env.as_contract(&id, || {
+            let set = Vec::from_array(&env, [a.pk(&env), b.pk(&env)]);
+            let first = TamperEvidenceHelper::create_chain_witness(&env, 7, h(&env, 0xAB));
+            TamperEvidenceHelper::accept_signed_witness(&env, &a.sign(&env, &first, 1, 1_010), &set).unwrap();
+
+            let next = TamperEvidenceHelper::create_chain_witness(&env, 8, h(&env, 0xAC));
+            assert_eq!(
+                TamperEvidenceHelper::accept_signed_witness(
+                    &env,
+                    &a.sign(&env, &next, 2, 1_010),
+                    &Vec::from_array(&env, [b.pk(&env), a.pk(&env)])
+                ),
+                Err(TamperEvidenceError::RedundantSignature)
+            );
+            assert_eq!(TamperEvidenceHelper::last_nonce(&env, &a.pk(&env)), Some(1));
+
+            // A different roster is a different validator set.
+            let expanded_set = Vec::from_array(&env, [a.pk(&env), b.pk(&env), Validator::new(3).pk(&env)]);
+            TamperEvidenceHelper::accept_signed_witness(&env, &a.sign(&env, &next, 2, 1_010), &expanded_set).unwrap();
+
+            env.ledger().with_mut(|ledger| {
+                ledger.sequence_number = WITNESS_EPOCH_LENGTH_LEDGERS;
+                ledger.timestamp = ledger.timestamp.saturating_add(5);
+            });
+            let next_epoch = TamperEvidenceHelper::create_chain_witness(&env, 9, h(&env, 0xAD));
+            TamperEvidenceHelper::accept_signed_witness(
+                &env,
+                &a.sign(&env, &next_epoch, 3, WITNESS_EPOCH_LENGTH_LEDGERS + 10),
+                &set,
+            )
+            .unwrap();
+        });
+    }
+
+    #[test]
+    fn archive_proof_is_persisted_only_after_validator_root_acceptance() {
+        let (env, id) = setup();
+        let validator = Validator::new(1);
+        env.as_contract(&id, || {
+            let event_index = 7;
+            let event_hash = h(&env, 0xA7);
+            let sibling = h(&env, 0xB8);
+            let leaf = TamperEvidenceHelper::merkle_leaf(&env, &event_hash);
+            let root = TamperEvidenceHelper::merkle_node(&env, &leaf, &sibling);
+            let proof = TamperEvidenceHelper::create_archive_proof(
+                &env,
+                &event_hash,
+                &root,
+                0,
+                Vec::from_array(&env, [sibling]),
+            )
+            .unwrap();
+            assert_eq!(
+                TamperEvidenceHelper::commit_archive_proof(&env, event_index, &proof),
+                Err(TamperEvidenceError::UnanchoredProofRoot)
+            );
+
+            let witness = TamperEvidenceHelper::create_chain_witness(&env, event_index, root);
+            let validator_set = Vec::from_array(&env, [validator.pk(&env)]);
+            TamperEvidenceHelper::accept_signed_witness(
+                &env,
+                &validator.sign(&env, &witness, 1, 1_010),
+                &validator_set,
+            )
+            .unwrap();
+            TamperEvidenceHelper::commit_archive_proof(&env, event_index, &proof).unwrap();
+            assert_eq!(
+                TamperEvidenceHelper::committed_archive_proof(&env, event_index),
+                Some(proof)
+            );
+        });
+    }
+
+    #[test]
+    fn expiration_proofs_require_expired_and_validator_anchored_roots() {
+        let (env, id) = setup();
+        let validator = Validator::new(1);
+        env.as_contract(&id, || {
+            let event_index = 7;
+            let event_hash = h(&env, 0xA7);
+            let expired_at = env.ledger().sequence();
+            let sibling = h(&env, 0xB8);
+            let leaf = TamperEvidenceHelper::expiration_leaf(&env, event_index, &event_hash, expired_at);
+            let root = TamperEvidenceHelper::merkle_node(&env, &leaf, &sibling);
+            let path = Vec::from_array(&env, [sibling]);
+
+            let proof = TamperEvidenceHelper::create_expiration_proof(
+                &env,
+                event_index,
+                &event_hash,
+                expired_at,
+                &root,
+                0,
+                path,
+            )
+            .unwrap();
+            assert!(proof.valid);
+            assert!(TamperEvidenceHelper::verify_expiration_proof(&env, &proof));
+
+            let mut altered = proof.clone();
+            altered.event_hash = h(&env, 0xA8);
+            altered.valid = true;
+            assert!(!TamperEvidenceHelper::verify_expiration_proof(&env, &altered));
+
+            let not_yet_expired = TamperEvidenceHelper::create_expiration_proof(
+                &env,
+                event_index,
+                &event_hash,
+                expired_at + 1,
+                &root,
+                0,
+                Vec::from_array(&env, [h(&env, 0xB8)]),
+            );
+            assert_eq!(not_yet_expired, Err(TamperEvidenceError::RecordNotExpired));
+
+            let witness = TamperEvidenceHelper::create_chain_witness(&env, event_index, root.clone());
+            let validator_set = Vec::from_array(&env, [validator.pk(&env)]);
+            TamperEvidenceHelper::accept_signed_witness(
+                &env,
+                &validator.sign(&env, &witness, 1, 1_010),
+                &validator_set,
+            )
+            .unwrap();
+            TamperEvidenceHelper::commit_expiration_proof(&env, &proof).unwrap();
+            assert_eq!(
+                TamperEvidenceHelper::committed_expiration_proof(&env, event_index),
+                Some(proof.clone())
+            );
+            assert_eq!(
+                TamperEvidenceHelper::commit_expiration_proof(&env, &altered),
+                Err(TamperEvidenceError::CommitmentMismatch)
+            );
+        });
+    }
+
+    #[test]
+    fn expiry_proof_rejects_roots_without_validator_witnesses() {
+        let (env, id) = setup();
+        env.as_contract(&id, || {
+            let event_hash = h(&env, 0xA7);
+            let expired_at = env.ledger().sequence();
+            let sibling = h(&env, 0xB8);
+            let leaf = TamperEvidenceHelper::expiration_leaf(&env, 4, &event_hash, expired_at);
+            let root = TamperEvidenceHelper::merkle_node(&env, &leaf, &sibling);
+            let proof = TamperEvidenceHelper::create_expiration_proof(
+                &env,
+                4,
+                &event_hash,
+                expired_at,
+                &root,
+                0,
+                Vec::from_array(&env, [sibling]),
+            )
+            .unwrap();
+            assert_eq!(
+                TamperEvidenceHelper::commit_expiration_proof(&env, &proof),
+                Err(TamperEvidenceError::UnanchoredProofRoot)
+            );
+            assert_eq!(TamperEvidenceHelper::committed_expiration_proof(&env, 4), None);
         });
     }
 
