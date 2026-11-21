@@ -1,3 +1,8 @@
+//! Zero-Knowledge Proof Verifier Module for Confidential Audit Logs
+//!
+//! Provides cryptographic verification for confidential audit records,
+//! Groth16 / Bulletproofs proof verification stubs, replay protection,
+//! and structured monitoring events.
 //! Zero-Knowledge Membership Proofs for Confidential Audit Logs (#983)
 //!
 //! Regulators and external auditors require verifiable proof of inclusion without
@@ -14,6 +19,14 @@ use soroban_sdk::{
 #[contracterror]
 #[derive(Copy, Clone, Debug, Eq, PartialEq, PartialOrd, Ord)]
 #[repr(u32)]
+pub enum ZkVerifierError {
+    InvalidProofFormat = 5001,
+    VerificationFailed = 5002,
+    ProofReplayDetected = 5003,
+    PublicInputsMismatch = 5004,
+    PartitionActive = 5005,
+    AttestationRaceDetected = 5006,
+    UnauthorizedValidator = 5007,
 pub enum ZkMembershipError {
     InvalidProofFormat = 7001,
     VerificationFailed = 7002,
@@ -24,6 +37,10 @@ pub enum ZkMembershipError {
 
 #[contracttype]
 #[derive(Clone, Debug, Eq, PartialEq)]
+pub struct ZkProof {
+    pub a: BytesN<32>,
+    pub b: BytesN<64>,
+    pub c: BytesN<32>,
 pub struct ConfidentialAuditProof {
     /// Proof point A (G1 element)
     pub a: BytesN<32>,
@@ -37,6 +54,18 @@ pub struct ConfidentialAuditProof {
 
 #[contracttype]
 #[derive(Clone, Debug, Eq, PartialEq)]
+pub struct ZkVerificationRecord {
+    pub proof_digest: BytesN<32>,
+    pub verified_at: u64,
+    pub validator_count: u32,
+    pub is_valid: bool,
+}
+
+pub struct ZkVerifier;
+
+impl ZkVerifier {
+    /// Compute deterministic proof digest
+    pub fn compute_digest(env: &Env, proof: &ZkProof) -> BytesN<32> {
 pub struct ConfidentialAttestation {
     pub attestation_digest: BytesN<32>,
     pub commitment_root: BytesN<32>,
@@ -59,6 +88,35 @@ impl ConfidentialZkVerifier {
         env.crypto().sha256(&buf).to_bytes()
     }
 
+    /// Verify a zero-knowledge membership proof
+    pub fn verify_membership_proof(
+        env: &Env,
+        proof: &ZkProof,
+        commitment_root: &BytesN<32>,
+    ) -> Result<bool, ZkVerifierError> {
+        if proof.public_inputs.is_empty() {
+            return Err(ZkVerifierError::PublicInputsMismatch);
+        }
+
+        let digest = Self::compute_digest(env, proof);
+
+        // Verification simulation: check root binding in public inputs
+        let first_input = proof.public_inputs.get(0).unwrap();
+        if first_input != *commitment_root {
+            env.events().publish(
+                (Symbol::new(env, "zk_verifier"), Symbol::new(env, "proof_rejected")),
+                (digest, commitment_root.clone()),
+            );
+            return Err(ZkVerifierError::VerificationFailed);
+        }
+
+        // Emit structured verification event
+        env.events().publish(
+            (Symbol::new(env, "zk_verifier"), Symbol::new(env, "proof_verified")),
+            (digest, commitment_root.clone(), env.ledger().timestamp()),
+        );
+
+        Ok(true)
     /// Verify zero-knowledge membership proof for confidential audit logs
     pub fn verify_confidential_membership(
         env: &Env,

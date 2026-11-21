@@ -20,7 +20,20 @@
 //! is pure and deterministic: identical inputs give identical roots on every
 //! host.
 
-use soroban_sdk::{contracttype, Bytes, BytesN, Env, Symbol, Vec};
+use soroban_sdk::{contracterror, Bytes, BytesN, Env, Symbol, Vec, contracttype};
+
+
+
+#[contracterror]
+#[derive(Copy, Clone, Debug, Eq, PartialEq, PartialOrd, Ord)]
+#[repr(u32)]
+pub enum MerkleError {
+    LeafIndexOutOfRange = 6001,
+    ProofMalformed = 6002,
+    RootMismatch = 6003,
+    EmptyLeaves = 6004,
+}
+
 
 /// Merkle checkpoint record for network partition recovery
 #[contracttype]
@@ -153,6 +166,32 @@ pub fn verify_merkle_proof(
     used == proof.len() && hash == *root
 }
 
+/// Verify a Merkle proof with structured monitoring events and modern error propagation.
+pub fn verify_merkle_proof_with_events(
+    env: &Env,
+    leaf: &BytesN<32>,
+    index: u32,
+    leaf_count: u32,
+    proof: &Vec<BytesN<32>>,
+    root: &BytesN<32>,
+) -> Result<bool, MerkleError> {
+    if index >= leaf_count {
+        return Err(MerkleError::LeafIndexOutOfRange);
+    }
+    let ok = verify_merkle_proof(env, leaf, index, leaf_count, proof, root);
+    if ok {
+        env.events().publish(
+            (Symbol::new(env, "merkle_tree"), Symbol::new(env, "proof_verified")),
+            (index, leaf.clone(), root.clone()),
+        );
+        Ok(true)
+    } else {
+        env.events().publish(
+            (Symbol::new(env, "merkle_tree"), Symbol::new(env, "proof_failed")),
+            (index, leaf.clone(), root.clone()),
+        );
+        Err(MerkleError::RootMismatch)
+    }
 /// Batch verify multiple Merkle proofs with optimized CPU metering and memory footprint.
 pub fn verify_merkle_batch(
     env: &Env,
