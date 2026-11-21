@@ -14,8 +14,9 @@
 //! - Cross-field validation rules
 //! - Cancellation path
 
-#[cfg(test)]
+#[allow(clippy::module_inception)]
 mod regulatory_reporting_tests {
+    use soroban_sdk::testutils::Address as _;
     use soroban_sdk::{Address, Bytes, BytesN, Env, Vec};
 
     use crate::regulatory_reporting::{
@@ -31,11 +32,11 @@ mod regulatory_reporting_tests {
         record_accepted, record_cancelled, record_generated, record_overdue, record_rejected,
         record_submitted, record_validated, verify_trail,
     };
-    use crate::submission_tracker::{
-        apply_acknowledgment, cancel_report, check_transition, create_submission,
-        ingest_acknowledgment, is_overdue, mark_overdue, mark_submitted, mark_validated,
-        next_attempt,
+    use crate::submission_tracker::test_support::{
+        apply_acknowledgment, cancel_report, create_submission, ingest_acknowledgment,
+        mark_overdue, mark_submitted, mark_validated, setup,
     };
+    use crate::submission_tracker::{check_transition, is_overdue, next_attempt};
 
     // ─────────────────────────────────────────────────────────────────────
     // Test fixtures
@@ -127,7 +128,14 @@ mod regulatory_reporting_tests {
             status: ReportStatus::Draft,
             created_at: 1_700_000_000,
             updated_at: 1_700_000_000,
-            last_validation: None,
+            last_validation: ValidationResult {
+                passed: false,
+                error_count: 0,
+                warning_count: 0,
+                errors: Vec::new(env),
+                warnings: Vec::new(env),
+                validated_at: 0,
+            },
             prev_report_hash: zero_hash(env),
             report_hash: BytesN::from_array(env, &[2u8; 32]),
             source_event_ids: Vec::new(env),
@@ -529,9 +537,7 @@ mod regulatory_reporting_tests {
 
     #[test]
     fn test_full_happy_path_finra_oats() {
-        let env = Env::default();
-        env.mock_all_auths();
-        let caller = Address::generate(&env);
+        let (env, caller) = setup();
         let mut report = valid_report_for(&env, RegulatoryAuthority::FINRA, ReportFormat::FinraOATS);
         let config = authority_config(&env, RegulatoryAuthority::FINRA);
         let now = 1_700_000_100u64;
@@ -571,9 +577,7 @@ mod regulatory_reporting_tests {
 
     #[test]
     fn test_rejection_then_resubmit_mica_casp() {
-        let env = Env::default();
-        env.mock_all_auths();
-        let caller = Address::generate(&env);
+        let (env, caller) = setup();
         let mut report = valid_report_for(&env, RegulatoryAuthority::MiCA, ReportFormat::MiCACASP);
         let config = authority_config(&env, RegulatoryAuthority::MiCA);
         let now = 1_700_000_100u64;
@@ -615,10 +619,9 @@ mod regulatory_reporting_tests {
 
     #[test]
     fn test_max_retries_exceeded() {
-        let env = Env::default();
-        env.mock_all_auths();
-        let caller = Address::generate(&env);
-        let report = valid_report_for(&env, RegulatoryAuthority::SEC, ReportFormat::SecFormADV);
+        let (env, caller) = setup();
+        let mut report = valid_report_for(&env, RegulatoryAuthority::SEC, ReportFormat::SecFormADV);
+        report.status = ReportStatus::Validated;
         let config = authority_config(&env, RegulatoryAuthority::SEC); // max_retries=3
         // Attempt 4 exceeds max
         let result = create_submission(&env, &caller, &report, 4, &config, 1_700_000_100);
@@ -627,10 +630,9 @@ mod regulatory_reporting_tests {
 
     #[test]
     fn test_submission_deadline_exceeded() {
-        let env = Env::default();
-        env.mock_all_auths();
-        let caller = Address::generate(&env);
-        let report = valid_report_for(&env, RegulatoryAuthority::CFTC, ReportFormat::CftcSwapData);
+        let (env, caller) = setup();
+        let mut report = valid_report_for(&env, RegulatoryAuthority::CFTC, ReportFormat::CftcSwapData);
+        report.status = ReportStatus::Validated;
         let config = authority_config(&env, RegulatoryAuthority::CFTC);
         let result = create_submission(&env, &caller, &report, 1, &config, 2_000_000_000); // past deadline
         assert!(matches!(result, Err(ReportingError::DeadlineExceeded)));
@@ -638,10 +640,9 @@ mod regulatory_reporting_tests {
 
     #[test]
     fn test_disabled_authority_blocks_submission() {
-        let env = Env::default();
-        env.mock_all_auths();
-        let caller = Address::generate(&env);
-        let report = valid_report_for(&env, RegulatoryAuthority::BaFin, ReportFormat::BaFinWpHG);
+        let (env, caller) = setup();
+        let mut report = valid_report_for(&env, RegulatoryAuthority::BaFin, ReportFormat::BaFinWpHG);
+        report.status = ReportStatus::Validated;
         let mut config = authority_config(&env, RegulatoryAuthority::BaFin);
         config.enabled = false;
         let result = create_submission(&env, &caller, &report, 1, &config, 1_700_000_100);
@@ -711,9 +712,7 @@ mod regulatory_reporting_tests {
 
     #[test]
     fn test_mark_overdue_from_submitted() {
-        let env = Env::default();
-        env.mock_all_auths();
-        let caller = Address::generate(&env);
+        let (env, caller) = setup();
         let mut report = valid_report_for(&env, RegulatoryAuthority::MAS, ReportFormat::MasTRR);
         report.status = ReportStatus::Submitted;
         mark_overdue(&env, &caller, &mut report, 1_800_000_000).unwrap();
@@ -722,9 +721,7 @@ mod regulatory_reporting_tests {
 
     #[test]
     fn test_cancel_from_validated() {
-        let env = Env::default();
-        env.mock_all_auths();
-        let caller = Address::generate(&env);
+        let (env, caller) = setup();
         let mut report = valid_report_for(&env, RegulatoryAuthority::BaFin, ReportFormat::BaFinAnaCredit);
         mark_validated(&env, &caller, &mut report, 1_700_000_100).unwrap();
         cancel_report(&env, &caller, &mut report, 1_700_000_200).unwrap();
@@ -737,9 +734,7 @@ mod regulatory_reporting_tests {
 
     #[test]
     fn test_linear_retry_delay() {
-        let env = Env::default();
-        env.mock_all_auths();
-        let caller = Address::generate(&env);
+        let (env, caller) = setup();
         let mut report = valid_report_for(&env, RegulatoryAuthority::FINRA, ReportFormat::FinraOATS);
         report.status = ReportStatus::Validated;
         let mut config = authority_config(&env, RegulatoryAuthority::FINRA);
@@ -752,9 +747,7 @@ mod regulatory_reporting_tests {
 
     #[test]
     fn test_exponential_retry_delay_attempt_3() {
-        let env = Env::default();
-        env.mock_all_auths();
-        let caller = Address::generate(&env);
+        let (env, caller) = setup();
         let mut report = valid_report_for(&env, RegulatoryAuthority::FINRA, ReportFormat::FinraOATS);
         report.status = ReportStatus::Validated;
         let config = authority_config(&env, RegulatoryAuthority::FINRA); // backoff=true, delay=30s
@@ -785,9 +778,7 @@ mod regulatory_reporting_tests {
 
     #[test]
     fn test_ack_correlates_report_and_submission() {
-        let env = Env::default();
-        env.mock_all_auths();
-        let caller = Address::generate(&env);
+        let (env, caller) = setup();
         let sub = RegulatorySubmission {
             id: BytesN::from_array(&env, &[10u8; 32]),
             report_id: BytesN::from_array(&env, &[1u8; 32]),
@@ -820,9 +811,7 @@ mod regulatory_reporting_tests {
 
     #[test]
     fn test_empty_reference_number_fails_ack() {
-        let env = Env::default();
-        env.mock_all_auths();
-        let caller = Address::generate(&env);
+        let (env, caller) = setup();
         let sub = RegulatorySubmission {
             id: BytesN::from_array(&env, &[10u8; 32]),
             report_id: BytesN::from_array(&env, &[1u8; 32]),
