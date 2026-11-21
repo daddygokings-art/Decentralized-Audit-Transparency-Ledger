@@ -58,6 +58,15 @@ To prevent unbounded storage rent consumption and CPU instruction exhaustion:
 
 Any violation immediately reverts with `PayloadTooLarge`, `InvalidPolicy`, `PolicyTooLarge`, or `InvalidZKProof`, ensuring $\Sigma' = \Sigma$.
 
+### `INV-CONF-REPLAY` — Proof & Key Replay Resistance
+Let $C \subseteq \mathbb{B}^{32}$ be the set of consumed proof commitments and
+$R: \text{Address} \rightharpoonup \mathcal{P}(\mathbb{B}^{32})$ the retired key digests per owner.
+- Accepting an event with proof $\pi$ requires $\text{SHA-256}(\pi) \notin C$ and sets $C' = C \cup \{\text{SHA-256}(\pi)\}$; otherwise it reverts with `ProofReplay` (code 15). Proofs are therefore single-use across all submitters.
+- $\text{register}(u, k)$ requires $K(u)$ not active (`KeyAlreadyRegistered`, code 17) and $\text{SHA-256}(k) \notin R(u)$ (`KeyReplay`, code 16).
+- $\text{rotate}(u, k)$ requires $k \neq K(u).\text{public\_key}$ and $\text{SHA-256}(k) \notin R(u)$, and adds the previous key digest to $R(u)$.
+- $\text{revoke}(u)$ adds the revoked key digest to $R(u)$.
+- Transaction-signature replay is prevented by the Soroban host (`require_auth` nonce + signature expiration ledger, bound to network and contract).
+
 ### `INV-CONF-AGGREGATION` — Privacy-Preserving Analytics Invariance
 Given a batch of event IDs $B = [id_0, id_1, \dots, id_{m-1}]$ with $m \le \text{MAX\_AGGREGATE\_BATCH} = 256$:
 $$\text{aggregate\_confidential\_events}(B).\text{total\_events} = m$$
