@@ -16,9 +16,10 @@ Complete pipeline for generating, validating, submitting, and tracking regulator
 8. [Audit Trail](#audit-trail)
 9. [REST API Reference](#rest-api-reference)
 10. [Configuration](#configuration)
-11. [Error Codes](#error-codes)
-12. [Testing](#testing)
-13. [Deployment Notes](#deployment-notes)
+11. [Robustness and Fault Tolerance](#robustness-and-fault-tolerance)
+12. [Error Codes](#error-codes)
+13. [Testing](#testing)
+14. [Deployment Notes](#deployment-notes)
 
 ---
 
@@ -590,6 +591,86 @@ AuthorityConfig {
 
 ---
 
+## Robustness and Fault Tolerance
+
+### Concurrent validator attestations
+
+The pure transition helpers (`apply_acknowledgment`, `mark_*`) mutate a
+caller-held copy of a report, so two validators working from the same snapshot
+could both apply a transition, and acknowledgments with different
+`received_at` clocks got different ack ids. `attest_acknowledgment` is the
+race-free, storage-backed entry point:
+
+- **Compare-and-swap versions.** Every report stored via `save_report` has a
+  monotonic version. Attestors pass the version they observed; a mismatch
+  fails with `StaleReportVersion` and writes nothing.
+- **First-writer-wins acknowledgments.** The first ack committed for a
+  submission is canonical. Replaying the same outcome and reference is an
+  idempotent no-op that returns the canonical ack (`replayed = true`) in any
+  arrival order. A different outcome or reference fails with
+  `ConflictingAcknowledgment`.
+- **Idempotent submission storage.** `store_submission` never re-indexes an
+  identical submission. A different submission under an existing id fails with
+  `DuplicateSubmission`.
+- **Validate-then-commit.** All checks run before the first storage write.
+
+### Network partitions
+
+When the path to the regulator, or between validators, partitions after a
+submission is dispatched, the acknowledgment may never arrive:
+
+- **Detection.** `find_stalled_submissions(ack_timeout, now, cursor, limit)`
+  scans the submission index in bounded pages. It returns latest-attempt
+  submissions that are still `Submitted` and have no acknowledgment after
+  `ack_timeout` seconds.
+- **Recovery.** `recover_stalled_submission` is CAS-guarded by the report
+  version. Before the deadline, it creates and stores the next attempt using
+  the normal `max_retries` and back-off rules. Past the deadline, it marks the
+  report `Overdue`. Concurrent recoverers get `StaleReportVersion`. Calling it
+  on a healthy submission fails with `SubmissionNotStalled`.
+- **Healing.** The superseded submission stays open. If a late *acceptance*
+  arrives after the partition heals, it still resolves the report. A late
+  *rejection* of a superseded attempt is recorded for audit
+  (`superseded = true`) but does not change the report, so the live attempt's
+  lifecycle is not disturbed.
+- **Trail reconciliation.** `reconcile_trails(local, remote)` verifies both
+  hash chains (`TrailCorrupted`). If one trail is a prefix of the other, it
+  fast-forwards to the longer one in either argument order. If they diverge,
+  it reports `TrailForkDetected` with the first diverging sequence number.
+  Forks are never merged automatically.
+
+### Large-batch CPU and memory
+
+The Soroban budget meter showed the following changes (host test build,
+soroban-sdk 28):
+
+| Operation | CPU before → after | Memory before → after |
+|---|---|---|
+| Append 200 audit entries | 5.68M → 4.67M (−18%) | 554K → 453K (−18%) |
+| Verify 200-entry trail | 4.59M → 3.19M (−30%) | 226K → 124K (−45%) |
+| 200 submission ids | 2.03M → 1.68M (−17%) | 97K → 55K (−43%) |
+| Store 60 submissions (sequential) | 26.7M → 15.1M (−43%) | 6.74M → 4.25M (−37%) |
+
+- **Hash preimages** for entries, submission ids and ack ids pack their
+  fixed-width fields into a stack buffer. Each preimage now takes 3 host calls
+  instead of 6. The byte layout is unchanged, and tests compare the output to
+  the old encoding to prove that.
+- **`verify_trail`** decodes each entry once and carries the running hash
+  forward.
+- **`verify_trail_segment(segment, start_sequence, prev_hash)`** verifies a
+  very long trail in chunks across several invocations, so each call stays
+  within its CPU budget.
+- **`store_submissions_batch`** stores up to `MAX_SUBMISSION_BATCH` (48)
+  submissions. All items are validated before any write. It reads and writes
+  the counter once per batch and fits Soroban's per-invocation footprint
+  limits. Larger batches fail with `BatchTooLarge`. (Without a bound, about
+  67 or more stores in one invocation exceed the 200 written-entries limit.)
+- First-attempt submissions skip the `LatestAttempt` write, and
+  `list_submissions` no longer probes storage with a placeholder id when an
+  index slot is missing.
+
+---
+
 ## Error Codes
 
 | Code | Description |
@@ -609,6 +690,15 @@ AuthorityConfig {
 | `ConfigNotFound` (212) | Authority configuration not found |
 | `PipelinePaused` (213) | Reporting pipeline is paused |
 | `UnauthorizedEntity` (214) | Entity not authorized to manage this report |
+| `NonceTooLow` (215) | Supplied nonce does not match the stored nonce |
+| `NonceExhausted` (216) | Submitter nonce space exhausted |
+| `ConflictingAcknowledgment` (217) | A different ack outcome is already recorded for the submission |
+| `StaleReportVersion` (218) | Expected report version is stale (another writer committed first) |
+| `DuplicateSubmission` (219) | A different submission already exists under this id |
+| `SubmissionNotStalled` (220) | Recovery requested for a submission that is acknowledged, superseded, or not timed out |
+| `TrailForkDetected` (221) | Two copies of a report's audit trail diverge |
+| `TrailCorrupted` (222) | An audit trail failed hash-chain verification |
+| `BatchTooLarge` (223) | Batch exceeds `MAX_SUBMISSION_BATCH` |
 
 ---
 
