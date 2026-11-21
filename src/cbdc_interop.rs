@@ -147,6 +147,35 @@ pub enum InteropError {
     InvalidStatus = 28,
     /// No validator set has been configured.
     ValidatorsNotConfigured = 29,
+    /// Network partition active; operations paused.
+    NetworkPartitionActive = 30,
+    /// Recovery nonce mismatch.
+    RecoveryNonceMismatch = 31,
+    /// Partition recovery window expired.
+    PartitionWindowExpired = 32,
+    /// Caller unauthorized for cross-ledger operation.
+    Unauthorized = 33,
+}
+
+/// Network partition recovery state tracking.
+#[contracttype]
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct PartitionRecoveryState {
+    pub is_partitioned: bool,
+    pub partition_started_at: u64,
+    pub recovery_nonce: u32,
+    pub recovery_digest: BytesN<32>,
+}
+
+impl PartitionRecoveryState {
+    pub fn default(env: &Env) -> Self {
+        Self {
+            is_partitioned: false,
+            partition_started_at: 0,
+            recovery_nonce: 0,
+            recovery_digest: BytesN::from_array(env, &[0u8; 32]),
+        }
+    }
 }
 
 /// Exchange rate between two CBDC pilots.

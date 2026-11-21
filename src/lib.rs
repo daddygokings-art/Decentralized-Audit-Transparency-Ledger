@@ -7633,3 +7633,4 @@ mod chaos_tests;
 mod merkle_fuzz_tests;
 #[cfg(test)]
 mod zk_verifier_tests;
+mod oracle_bridge_fuzz_tests;
