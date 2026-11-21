@@ -197,18 +197,22 @@ pub enum InteropError {
     InvalidStatus = 28,
     /// No validator set has been configured.
     ValidatorsNotConfigured = 29,
+    NetworkPartitionActive = 30,
+    RecoveryNonceMismatch = 31,
+    PartitionWindowExpired = 32,
+    Unauthorized = 33,
     /// Authorization expiry is in the past.
-    AuthorizationExpired = 30,
+    AuthorizationExpired = 36,
     /// Authorization expiry exceeds [`MAX_AUTH_VALIDITY_SECS`] from now.
-    AuthorizationValidityTooLong = 31,
+    AuthorizationValidityTooLong = 37,
     /// Nonce is not strictly greater than the signer's last consumed nonce.
-    NonceReplayed = 32,
+    NonceReplayed = 38,
     /// Fewer distinct valid attestations than the quorum threshold.
-    QuorumNotReached = 33,
+    QuorumNotReached = 39,
     /// Signed authorization is bound to a different settlement id.
-    SettlementMismatch = 34,
+    SettlementMismatch = 40,
     /// Attestation bundle is longer than [`MAX_VALIDATORS`].
-    TooManyAttestations = 35,
+    TooManyAttestations = 41,
 }
 
 impl InteropError {
@@ -256,6 +260,10 @@ impl InteropError {
             InteropError::QuorumNotReached => symbol_short!("NO_QUORUM"),
             InteropError::SettlementMismatch => symbol_short!("STL_MISM"),
             InteropError::TooManyAttestations => symbol_short!("TOO_MANY"),
+            InteropError::NetworkPartitionActive => symbol_short!("PART_ACT"),
+            InteropError::RecoveryNonceMismatch => symbol_short!("REC_NONCE"),
+            InteropError::PartitionWindowExpired => symbol_short!("PART_WIN"),
+            InteropError::Unauthorized => symbol_short!("UNAUTH"),
         }
     }
 }
@@ -370,6 +378,27 @@ pub struct SettlementFinalized {
     pub finalized_hash: Option<BytesN<32>>,
     /// Canonical [`AttestationState`] digest at finalization.
     pub digest: BytesN<32>,
+}
+
+/// Network partition recovery state tracking.
+#[contracttype]
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct PartitionRecoveryState {
+    pub is_partitioned: bool,
+    pub partition_started_at: u64,
+    pub recovery_nonce: u32,
+    pub recovery_digest: BytesN<32>,
+}
+
+impl PartitionRecoveryState {
+    pub fn default(env: &Env) -> Self {
+        Self {
+            is_partitioned: false,
+            partition_started_at: 0,
+            recovery_nonce: 0,
+            recovery_digest: BytesN::from_array(env, &[0u8; 32]),
+        }
+    }
 }
 
 /// Exchange rate between two CBDC pilots.

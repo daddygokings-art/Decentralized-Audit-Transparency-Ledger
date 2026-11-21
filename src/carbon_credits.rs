@@ -276,6 +276,9 @@ pub struct CarbonReductionReport {
 
 /// Maximum number of items that can be returned in a single page.
 pub const MAX_PAGE_LIMIT: u32 = 100;
+pub const MAX_SERIAL_LENGTH: u32 = 128;
+pub const MAX_REGISTRY_CREDITS: u32 = 10_000;
+pub const MAX_BATCH_RETIREMENT: u32 = 100;
 
 /// Opaque cursor for paginated queries.
 ///
@@ -657,7 +660,7 @@ pub fn tokenize_credit(
         .storage()
         .persistent()
         .get(&CarbonCreditKey::CarbonCredit(credit_id.clone()))
-        .unwrap_or_else(|| panic!("Credit not found"));
+        .unwrap_or_else(|| panic_with_error!(env, CarbonCreditError::CreditNotFound));
 
     // A credit is tokenized at most once, and never after retirement.
     if credit.tokenization.token_id != zero_id(env) || credit.status == CreditStatus::Retired {
@@ -723,7 +726,7 @@ pub fn retire_credit(
         .storage()
         .persistent()
         .get(&CarbonCreditKey::CarbonCredit(credit_id.clone()))
-        .unwrap_or_else(|| panic!("Credit not found"));
+        .unwrap_or_else(|| panic_with_error!(env, CarbonCreditError::CreditNotFound));
 
     if credit.status == CreditStatus::Retired {
         return false; // Already retired
@@ -786,7 +789,7 @@ pub fn check_retirement_status(env: &Env, credit_id: BytesN<32>) -> bool {
         .storage()
         .persistent()
         .get(&CarbonCreditKey::CarbonCredit(credit_id))
-        .unwrap_or_else(|| panic!("Credit not found"));
+        .unwrap_or_else(|| panic_with_error!(env, CarbonCreditError::CreditNotFound));
 
     credit.status == CreditStatus::Retired
 }
@@ -811,7 +814,7 @@ pub fn transfer_credit(
         .storage()
         .persistent()
         .get(&CarbonCreditKey::CarbonCredit(credit_id.clone()))
-        .unwrap_or_else(|| panic!("Credit not found"));
+        .unwrap_or_else(|| panic_with_error!(env, CarbonCreditError::CreditNotFound));
 
     if credit.status == CreditStatus::Retired {
         return false; // Can't transfer retired credits
@@ -1017,7 +1020,7 @@ pub fn audit_renewable_usage(
         .storage()
         .persistent()
         .get(&CarbonCreditKey::CarbonCredit(credit_id.clone()))
-        .unwrap_or_else(|| panic!("Credit not found"));
+        .unwrap_or_else(|| panic_with_error!(env, CarbonCreditError::CreditNotFound));
 
     let mut issues = Vec::new(env);
     let mut approved = true;
@@ -1075,7 +1078,7 @@ pub fn verify_offset_authenticity(
         .storage()
         .persistent()
         .get(&CarbonCreditKey::CarbonCredit(credit_id))
-        .unwrap_or_else(|| panic!("Credit not found"));
+        .unwrap_or_else(|| panic_with_error!(env, CarbonCreditError::CreditNotFound));
 
     // Verify offset has valid verifier
     if credit.offset.verification_body != verifier {
@@ -1106,7 +1109,7 @@ pub fn register_credit(
         .storage()
         .persistent()
         .get(&CarbonCreditKey::CarbonCredit(credit_id.clone()))
-        .unwrap_or_else(|| panic!("Credit not found"));
+        .unwrap_or_else(|| panic_with_error!(env, CarbonCreditError::CreditNotFound));
 
     // Update registry registration date
     credit.registry.registry_id = registry_id.clone();
@@ -1177,7 +1180,7 @@ pub fn link_to_standard(
         .storage()
         .persistent()
         .get(&CarbonCreditKey::CarbonCredit(credit_id.clone()))
-        .unwrap_or_else(|| panic!("Credit not found"));
+        .unwrap_or_else(|| panic_with_error!(env, CarbonCreditError::CreditNotFound));
 
     let standard_code = standard.clone() as u32;
     credit.registry.compliance_standard = standard;
@@ -1204,7 +1207,7 @@ pub fn verify_registry_compliance(
         .storage()
         .persistent()
         .get(&CarbonCreditKey::CarbonCredit(credit_id))
-        .unwrap_or_else(|| panic!("Credit not found"));
+        .unwrap_or_else(|| panic_with_error!(env, CarbonCreditError::CreditNotFound));
 
     // Check if credit is registered
     if credit.registry.registry_id.is_empty() {
@@ -1228,7 +1231,7 @@ pub fn calculate_carbon_reduction(
         .storage()
         .persistent()
         .get(&CarbonCreditKey::CarbonCredit(credit_id))
-        .unwrap_or_else(|| panic!("Credit not found"));
+        .unwrap_or_else(|| panic_with_error!(env, CarbonCreditError::CreditNotFound));
 
     credit.carbon_tonnes
 }
@@ -1328,7 +1331,7 @@ pub fn verify_standard_compliance(
         .storage()
         .persistent()
         .get(&CarbonCreditKey::CarbonCredit(credit_id))
-        .unwrap_or_else(|| panic!("Credit not found"));
+        .unwrap_or_else(|| panic_with_error!(env, CarbonCreditError::CreditNotFound));
 
     credit.registry.compliance_standard == standard
 }
@@ -1342,7 +1345,7 @@ pub fn check_data_integrity(
         .storage()
         .persistent()
         .get(&CarbonCreditKey::CarbonCredit(credit_id))
-        .unwrap_or_else(|| panic!("Credit not found"));
+        .unwrap_or_else(|| panic_with_error!(env, CarbonCreditError::CreditNotFound));
 
     // Verify carbon amount is reasonable
     if credit.carbon_tonnes == 0 || credit.carbon_tonnes > 1_000_000 {
@@ -1376,7 +1379,7 @@ pub fn get_credit_status(env: &Env, credit_id: BytesN<32>) -> CreditStatus {
         .storage()
         .persistent()
         .get(&CarbonCreditKey::CarbonCredit(credit_id))
-        .unwrap_or_else(|| panic!("Credit not found"));
+        .unwrap_or_else(|| panic_with_error!(env, CarbonCreditError::CreditNotFound));
 
     credit.status
 }
@@ -1386,7 +1389,7 @@ pub fn get_credit_details(env: &Env, credit_id: BytesN<32>) -> CarbonCredit {
     env.storage()
         .persistent()
         .get(&CarbonCreditKey::CarbonCredit(credit_id))
-        .unwrap_or_else(|| panic!("Credit not found"))
+        .unwrap_or_else(|| panic_with_error!(env, CarbonCreditError::CreditNotFound))
 }
 
 /// Get issuer credits
