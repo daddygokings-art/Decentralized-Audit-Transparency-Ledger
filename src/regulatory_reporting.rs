@@ -478,6 +478,23 @@ pub enum ReportingError {
     NonceTooLow = 215,
     /// Nonce has reached the exhaustion threshold for this submitter.
     NonceExhausted = 216,
+    /// A different acknowledgment outcome was already recorded for this
+    /// submission (equivocating or racing validator attestations).
+    ConflictingAcknowledgment = 217,
+    /// The caller's expected report version is stale: another attestation
+    /// committed first (optimistic-concurrency check failed).
+    StaleReportVersion = 218,
+    /// A submission with the same id but different contents already exists.
+    DuplicateSubmission = 219,
+    /// Recovery was requested for a submission that is not stalled (it was
+    /// acknowledged, superseded, or its acknowledgment timeout has not elapsed).
+    SubmissionNotStalled = 220,
+    /// Two audit trails for the same report diverge (partition fork).
+    TrailForkDetected = 221,
+    /// An audit trail failed hash-chain verification.
+    TrailCorrupted = 222,
+    /// A batch exceeds the per-invocation size limit.
+    BatchTooLarge = 223,
 }
 
 // ─────────────────────────────────────────────────────────────────────────────
