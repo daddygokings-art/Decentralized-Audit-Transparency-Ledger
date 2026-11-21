@@ -13,7 +13,7 @@
 //! * outsiders, forged/impersonated signatures, cross-contract replays and
 //!   expired witnesses are never accepted;
 //! * honest submissions succeed unless a Byzantine validator pinned a
-//!   conflicting root first, in which case the conflict is reported.
+//!   conflicting root first or the signer already signed in this epoch.
 //!
 //! A second property tampers with random links of a hash chain and checks
 //! that exactly the predicted links are flagged, and that verification and
@@ -111,6 +111,7 @@ struct World {
     // Reference model.
     nonces: BTreeMap<usize, u64>,
     roots: BTreeMap<u32, BytesN<32>>,
+    signed_epoch: BTreeMap<usize, u32>,
     last_accepted: BTreeMap<usize, SignedWitness>,
 }
 
@@ -138,6 +139,7 @@ impl World {
             trusted,
             nonces: BTreeMap::new(),
             roots: BTreeMap::new(),
+            signed_epoch: BTreeMap::new(),
             last_accepted: BTreeMap::new(),
         }
     }
@@ -205,6 +207,11 @@ impl World {
         }
         match self.roots.get(&sw.witness.event_index) {
             Some(r) if *r != sw.witness.root_at_index => Expect::Rejected(TamperEvidenceError::Equivocation),
+            _ if self.signed_epoch.get(&v)
+                == Some(&(self.env.ledger().sequence() / WITNESS_EPOCH_LENGTH_LEDGERS)) =>
+            {
+                Expect::Rejected(TamperEvidenceError::RedundantSignature)
+            }
             _ => Expect::Accepted,
         }
     }
@@ -224,6 +231,10 @@ impl World {
         self.roots
             .entry(sw.witness.event_index)
             .or_insert(sw.witness.root_at_index.clone());
+        self.signed_epoch.insert(
+            v,
+            self.env.ledger().sequence() / WITNESS_EPOCH_LENGTH_LEDGERS,
+        );
         self.last_accepted.insert(v, sw);
     }
 
