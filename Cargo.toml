@@ -1,5 +1,3 @@
-cargo-features = ["trim-paths"]
-
 [package]
 name = "audit-ledger"
 version = "0.1.0"
@@ -11,10 +9,6 @@ publish = false
 
 [lib]
 crate-type = ["cdylib", "lib"]
-
-[[bin]]
-name = "drip"
-path = "src/bin/drip.rs"
 
 [features]
 # `AuditLedger` is the deployed contract; a Soroban WASM exposes a single contract
@@ -128,9 +122,6 @@ lto = "fat"
 
 # [source.vendored-sources]
 # directory = "vendor"
-
-[net]
-offline = true
 
 # [patch.crates-io]
 # soroban-sdk = { version = "27.0.6" }
