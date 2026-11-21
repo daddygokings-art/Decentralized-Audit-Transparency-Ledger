@@ -980,6 +980,7 @@ pub fn generate_report(
 #[cfg(test)]
 mod tests {
     use super::*;
+    use soroban_sdk::testutils::Address as _;
     use soroban_sdk::{Bytes, BytesN, Env, Vec};
 
     fn make_input(env: &Env) -> ReportInput<'_> {
@@ -1123,7 +1124,7 @@ mod tests {
         let input = make_input(&env);
         let report = FinraGenerators::oats(&input, 1_700_000_000);
         // Content must be non-empty and start with 'a' (the "authority=" prefix)
-        assert!(report.content.len() > 0, "Content must not be empty");
+        assert!(!report.content.is_empty(), "Content must not be empty");
         assert_eq!(report.content.get(0).unwrap(), b'a');
     }
 }

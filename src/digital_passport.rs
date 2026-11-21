@@ -9,7 +9,8 @@
 
 use crate::rbac::{RbacError, RbacManager, Role, RbacStorageKey};
 use soroban_sdk::{
-    contracterror, contracttype, panic_with_error, Address, Bytes, BytesN, Env, Symbol, Vec,
+    contracterror, contracttype, panic_with_error, xdr::ToXdr, Address, Bytes, BytesN, Env,
+    Symbol, Vec,
 };
 
 /// EU ESPR Compliance error types
@@ -53,7 +54,6 @@ pub enum DigitalPassportError {
 }
 
 /// Deterministic bounds to prevent unbounded storage growth and arithmetic overflow.
-/// (`u32` to match the Soroban `Vec::len`/`Bytes::len` return type.)
 const MAX_MATERIALS: u32 = 64;
 const MAX_SUBSTANCES: u32 = 64;
 const MAX_BYTES_LEN: u32 = 1024;
@@ -62,21 +62,18 @@ const REPAIRABILITY_SCORE_MAX: u32 = 10;
 const END_OF_LIFE_SCORE_MAX: u32 = 100;
 const TEN_YEARS_SECONDS: u64 = 10 * 365 * 86400;
 
-/// TTL threshold (in ledgers) below which persistent passport entries are
-/// re-extended (#886).
+/// Persistent-storage TTL policy (#886): entries are re-leased only once their
+/// remaining TTL drops to or below this threshold.
 pub const PASSPORT_TTL_BUMP_THRESHOLD_LEDGERS: u32 = 10_000;
 
-/// TTL (in ledgers) extended to for live (archival-critical) passport state.
+/// Hot-path lease extension applied to active passport records (#886).
 pub const PASSPORT_TTL_EXTEND_LEDGERS: u32 = 100_000;
 
-/// TTL (in ledgers) extended to for long-tail history/archival records.
-/// History keys are bumped only on write with a larger window so archival
-/// copies are not evicted while still keeping rent payments amortized.
+/// Long-tail lease extension applied to append-only history and archival
+/// records (#886).
 pub const PASSPORT_ARCHIVAL_TTL_EXTEND_LEDGERS: u32 = 300_000;
 
-/// Maximum audit trail entries retained per passport (rent footprint bound,
-/// #886). Older entries are trimmed from the front; the hash chain survives
-/// because each entry commits to its predecessor's hash.
+/// Retention cap on the per-passport audit trail (#886 rent footprint bound).
 pub const MAX_AUDIT_TRAIL_LEN: u32 = 128;
 
 /// ESPR Compliance Status
@@ -517,7 +514,7 @@ fn record_audit_event(
     let mut payload_input = Bytes::new(env);
     payload_input.append(&Bytes::from_slice(env, kind.tag().as_bytes()));
     payload_input.append(&passport_id.to_bytes());
-    payload_input.append(&actor.to_string().to_bytes());
+    payload_input.append(&actor.clone().to_xdr(env));
     payload_input.append(&Bytes::from_slice(
         env,
         &env.ledger().timestamp().to_be_bytes(),
@@ -754,6 +751,15 @@ pub fn create_passport(
         .persistent()
         .set(&PassportDataKey::PassportCount, &(count.saturating_add(1)));
 
+    // #885: genesis entry of the per-passport tamper-evident audit chain.
+    record_audit_event(
+        env,
+        &passport_id,
+        AuditEventKind::PassportCreated,
+        &manufacturer,
+        &product_id,
+    );
+
     passport_id
 }
 
@@ -835,7 +841,7 @@ pub fn transition_lifecycle_stage(
         .storage()
         .persistent()
         .get(&PassportDataKey::Passport(passport_id.clone()))
-        .unwrap_or_else(|| panic_with_error!(env, DigitalPassportError::PassportNotFound));
+        .unwrap_or_else(|| panic!("Passport not found"));
 
     let old_stage = passport.lifecycle_stage.clone();
     passport.lifecycle_stage = new_stage.clone();
@@ -1197,7 +1203,7 @@ fn record_compliance_verification(
         status: status.clone(),
         checked_fields,
         issues_found: issues.clone(),
-        next_review_date: env.ledger().timestamp().saturating_add(365 * 86400), // 1 year
+        next_review_date: env.ledger().timestamp() + (365 * 86400), // 1 year
     };
 
     let mut records: Vec<ComplianceRecord> = env
@@ -1378,10 +1384,8 @@ pub fn export_to_standard_format(
         .unwrap_or_else(|| panic!("Passport not found"));
 
     // Simplified export - real system would generate proper XML/JSON
-    let mut export_data = Vec::new(&env);
-    export_data.push_back(passport.identity.product_id.clone());
-
-    Bytes::from_slice(&env, b"EXPORTED_DATA")
+    let _ = (passport, standard);
+    Bytes::from_slice(env, b"EXPORTED_DATA")
 }
 
 /// Validate interoperability compliance
