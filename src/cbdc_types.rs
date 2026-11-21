@@ -229,7 +229,7 @@ impl CBDCTransaction {
         input.append(&Bytes::from_slice(self.tx_id.env(), &self.timestamp.to_le_bytes()));
         input.append(&self.metadata);
 
-        env.crypto().sha256(&input)
+        self.tx_id.env().crypto().sha256(&input).to_bytes()
     }
 }
 
