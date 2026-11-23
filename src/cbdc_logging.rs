@@ -1,5 +1,3 @@
-#![no_std]
-
 use crate::cbdc_types::{CBDCPilot, CBDCTransaction, InteropProtocol, PrivacyTier};
 use soroban_sdk::{contracttype, Bytes, Env, Symbol, Vec};
 
@@ -77,6 +75,7 @@ pub struct CBDCEventConfig {
 }
 
 impl CBDCEventConfig {
+    #[allow(clippy::should_implement_trait)] // Kept as an inherent fn for API stability.
     pub fn default() -> Self {
         CBDCEventConfig {
             max_events: 100_000,
@@ -317,7 +316,6 @@ mod tests {
 
     #[test]
     fn test_cbdc_event_stats_success_rate() {
-        let config = CBDCEventConfig::default();
         let mut stats = CBDCEventStats::new(&soroban_sdk::Env::default());
 
         stats.total_success = 80;

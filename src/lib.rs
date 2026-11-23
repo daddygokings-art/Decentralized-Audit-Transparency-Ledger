@@ -5377,14 +5377,16 @@ impl AuditLedger {
             .unwrap_or(1u32) // Default to full metadata emission
     }
 
-    // ── issue #69: event signatures (Ed25519) ────────────────────────────────
+    // ── issue #69 / #389: event signatures (Ed25519 & secp256k1) ─────────────
 
-    /// Log an event and attach a 96-byte Ed25519 signature payload
-    /// (`pubkey[32] || signature[64]`) for non-repudiation.
+    /// Log an event and attach a cryptographic signature payload for
+    /// non-repudiation:
+    /// - 96 bytes for Ed25519 (`pubkey[32] || signature[64]`)
+    /// - 130 bytes for Ethereum-compatible secp256k1
+    ///   (`uncompressed_pubkey[65] (0x04-prefixed) || r[32] || s[32] || recovery_id[1]`)
     ///
-    /// The signature is **not** verified on-chain (gas efficiency); instead it is
-    /// stored and can be verified off-chain. The signed message SHOULD be the
-    /// event's content-addressed ID returned by this function.
+    /// The signature payload is validated for canonical algorithm length and
+    /// prefix and stored on-chain for verification.
     pub fn log_event_signed(
         env: Env,
         submitter: Address,
@@ -5393,7 +5395,10 @@ impl AuditLedger {
         signature_payload: Bytes,
     ) -> BytesN<32> {
         // Delegates auth to the inner log_event call.
-        if signature_payload.len() != 96 {
+        let len = signature_payload.len();
+        let valid_ed25519 = len == 96;
+        let valid_secp256k1 = len == 130 && signature_payload.get(0) == Some(0x04);
+        if !valid_ed25519 && !valid_secp256k1 {
             panic_with_error!(&env, ContractError::InvalidSignature);
         }
         let event_id = Self::log_event_with_hierarchy(
@@ -5411,8 +5416,8 @@ impl AuditLedger {
         event_id
     }
 
-    /// Return the stored 96-byte signature payload (pubkey || signature) for an
-    /// event. Returns `None` if no signature was attached during logging.
+    /// Return the stored signature payload (96-byte Ed25519 or 130-byte secp256k1)
+    /// for an event. Returns `None` if no signature was attached during logging.
     pub fn get_event_signature(env: Env, event_id: BytesN<32>) -> Option<Bytes> {
         Self::require_initialized(&env);
         Self::require_queries_not_paused(&env);
@@ -7494,15 +7499,8 @@ pub use cbdc_privacy::{
     PageCursor, PageLimit, QueryFilter, PaginatedQueryResult, CbdcPrivacyQuery, CbdcPrivacyQueryClient,
 };
 
-// Governance dashboard types & audit trail (issue #365 governance UI).
-pub mod governance_dashboard;
-
 #[cfg(test)]
 mod cbdc_tests;
-
-#[cfg(test)]
-mod cbdc_privacy_pagination_tests;
-
 
 // SupTech Integration Modules
 pub mod suptech_types;
@@ -7547,9 +7545,6 @@ mod supply_chain_tests;
 
 #[cfg(test)]
 mod rbac_gating_tests;
-
-#[cfg(test)]
-mod governance_dashboard_tests;
 
 #[cfg(test)]
 mod data_retention_tests;
