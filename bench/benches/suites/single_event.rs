@@ -271,6 +271,27 @@ pub fn run(bench: &mut Bench) {
     );
 
     bench.measure(
+        CaseSpec::new("single_event", "get_event_signature/lookup", "get_event_signature")
+            .metadata(64)
+            .notes("profile read gas for stored 96-byte event signature"),
+        || {
+            let fixture = Fixture::new();
+            let submitter = fixture.submitter.clone();
+            let event_type = Symbol::new(&fixture.env, "transfer");
+            let metadata = payload_bytes(&fixture, 64, 63);
+            let signature = payload_bytes(&fixture, 96, 69);
+            let event_id = fixture
+                .client
+                .log_event_signed(&submitter, &event_type, &metadata, &signature);
+            (fixture, event_id)
+        },
+        |fixture, event_id, _| {
+            let _ = fixture.client.get_event_signature(event_id);
+            1
+        },
+    );
+
+    bench.measure(
         CaseSpec::new("single_event", "log_event/with_custom_key", "log_event_with_custom_key")
             .metadata(64)
             .notes("caller-supplied dedup key under DedupPolicy::Custom"),

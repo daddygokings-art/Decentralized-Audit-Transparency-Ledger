@@ -1416,6 +1416,26 @@ fn test_log_event_signed_stores_signature() {
 }
 
 #[test]
+fn test_log_event_signed_supports_secp256k1_signature() {
+    let (env, _owner, client) = create_ledger();
+    let submitter = Address::generate(&env);
+
+    env.mock_all_auths();
+    let mut secp_raw = [0u8; 130];
+    secp_raw[0] = 0x04; // Uncompressed SEC1 public key prefix
+    let sig_payload = Bytes::from_slice(&env, &secp_raw);
+    let id = client.log_event_signed(
+        &submitter,
+        &symbol_short!("eth"),
+        &Bytes::from_slice(&env, b"secp256k1-event"),
+        &sig_payload,
+    );
+    let stored = client.get_event_signature(&id);
+    assert!(stored.is_some());
+    assert_eq!(stored.unwrap().len(), 130);
+}
+
+#[test]
 #[should_panic(expected = "HostError: Error(Contract, #12)")]
 fn test_log_event_signed_rejects_wrong_length() {
     let (env, _owner, client) = create_ledger();
