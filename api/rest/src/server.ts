@@ -695,6 +695,32 @@ v1.get("/export/events/stream", async (req, res) => {
   }
 });
 
+// GET /events/export - Unified export endpoint (supports format=json|csv, filter, and integrity proof) (#371)
+v1.get("/events/export", (req, res) => {
+  const fmt = (req.query.format as string) === "csv" ? "csv" : "json";
+  const options: ExportOptions = {
+    format: fmt,
+    filter: parseExportFilter(req.query as Record<string, unknown>),
+    limit: parseInt(req.query.limit as string) || undefined,
+    offset: parseInt(req.query.offset as string) || undefined,
+    fields: req.query.fields ? (req.query.fields as string).split(",") : undefined,
+    includeProof: req.query.proof !== "false",
+  };
+
+  const result = export_events(options);
+  res.setHeader("Content-Disposition", `attachment; filename="${result.filename}"`);
+  res.setHeader("Content-Type", result.contentType);
+  if (result.proof) {
+    res.setHeader("X-Export-Event-Count", String(result.proof.eventCount));
+    res.setHeader("X-Export-Hash", result.proof.exportHash);
+  }
+  if (fmt === "csv") {
+    res.send(result.data);
+  } else {
+    res.json(JSON.parse(result.data));
+  }
+});
+
 // GET /export/progress - Status info for streaming exports (#201)
 v1.get("/export/progress", (_req, res) => {
   res.json({
@@ -705,6 +731,7 @@ v1.get("/export/progress", (_req, res) => {
 });
 
 app.use("/v1", v1);
+app.use("/api/v1", v1);
 
 // Deprecated legacy version (#445): v0 stays alive and fully served by the
 // same v1 routes until its scheduled sunset, so old clients keep working
