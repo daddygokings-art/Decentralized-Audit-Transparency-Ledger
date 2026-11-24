@@ -7597,6 +7597,9 @@ mod rbac_gating_tests;
 #[cfg(test)]
 mod proptest;
 
+#[cfg(test)]
+pub(crate) mod vat_engine_test_support;
+
 // Multi-actor concurrency and fault-injection tests for the ML feature store (issue #858).
 #[cfg(test)]
 mod concurrent_tests;

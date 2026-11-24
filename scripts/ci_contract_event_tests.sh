@@ -16,6 +16,7 @@ INVARIANT_TEST_TARGETS=(
   "cbdc_offline"
   "cbdc_privacy"
   "supply_chain"
+  "vat_engine"
 )
 
 # Minimum line/branch coverage thresholds enforced by the coverage gate.
@@ -23,7 +24,6 @@ COVERAGE_LINE_THRESHOLD="${COVERAGE_LINE_THRESHOLD:-90}"
 COVERAGE_BRANCH_THRESHOLD="${COVERAGE_BRANCH_THRESHOLD:-90}"
 COVERAGE_CONFIG="${COVERAGE_CONFIG:-coverage.toml}"
 COVERAGE_GATE_ENABLED="${COVERAGE_GATE_ENABLED:-1}"
-=======
 
 if ! [[ "$TOTAL_SHARDS" =~ ^[1-9][0-9]*$ ]]; then
   echo "TOTAL_SHARDS must be a positive integer; got: $TOTAL_SHARDS" >&2
@@ -77,6 +77,8 @@ export SUPPLY_CHAIN_TEST_SEED="${SUPPLY_CHAIN_TEST_SEED:-0x5EEDC0DE}"
 export PROPTEST_CASES="${PROPTEST_CASES:-1024}"
 export PROPTEST_MAX_SHRINK_ITERS="${PROPTEST_MAX_SHRINK_ITERS:-4096}"
 export ML_FEATURE_STORE_CHAOS_SEED="${ML_FEATURE_STORE_CHAOS_SEED:-0x5eed}"
+# Keep the VAT engine state-machine property suite reproducible across CI shards.
+export VAT_ENGINE_PROPTEST_SEED="${VAT_ENGINE_PROPTEST_SEED:-0x8085EED}"
 
 mkdir -p "$LOG_DIR"
 LOG_FILE="$LOG_DIR/shard-${SHARD_INDEX}.log"
@@ -91,6 +93,7 @@ PINNED_TEST_TARGETS=(
   "supply_chain_invariants"
   "supply_chain_chaos"
   "concurrent_tests"
+  "proptest::vat_engine_invariants"
 )
 
 # Test target that exercises src/ml_feature_store.rs invariants, concurrency and
@@ -129,9 +132,9 @@ is_invariant_test() {
 
 mapfile -t all_tests < <(list_tests)
 
-# Ensure the supply-chain invariant/chaos suite is present in the discovered
-# test set. Missing targets indicate the suite was not wired into the crate and
-# must fail the coverage gate rather than silently pass.
+# Ensure the invariant and chaos suites are present in the discovered test set.
+# Missing targets indicate a suite was not wired into the crate and must fail
+# the coverage gate rather than silently pass.
 for pinned in "${PINNED_TEST_TARGETS[@]}"; do
   found=0
   for test_name in "${all_tests[@]}"; do
@@ -141,7 +144,7 @@ for pinned in "${PINNED_TEST_TARGETS[@]}"; do
     fi
   done
   if (( found == 0 )); then
-    echo "Required supply-chain test target '$pinned' was not discovered; ensure the invariant/chaos suite is compiled into the test binary." | tee -a "$LOG_FILE" >&2
+    echo "Required invariant test target '$pinned' was not discovered; ensure the suite is compiled into the test binary." | tee -a "$LOG_FILE" >&2
     exit 1
   fi
 done
@@ -266,10 +269,9 @@ for test_name in "${shard_tests[@]}"; do
   run_test_with_retry "$test_name" || exit 1
 done
 
-# Coverage gate: the supply-chain invariant/chaos suite must be exercised by
-# the contract event test pipeline. When coverage tooling is available, run the
-# pinned targets under it and enforce the `coverage.toml` thresholds for
-# `src/supply_chain.rs` (line and branch coverage > 90%).
+# Coverage gate: the invariant/chaos suites must be exercised by the contract
+# event test pipeline. When coverage tooling is available, run the pinned
+# targets under it and enforce the configured line and branch thresholds.
 if [[ "${ENABLE_COVERAGE_GATE:-0}" == "1" ]]; then
   if command -v cargo-llvm-cov >/dev/null 2>&1 || "$CARGO_BIN" llvm-cov --version >/dev/null 2>&1; then
     echo "Running supply-chain coverage gate for shard $SHARD_INDEX/$TOTAL_SHARDS" | tee -a "$LOG_FILE"
@@ -278,14 +280,14 @@ if [[ "${ENABLE_COVERAGE_GATE:-0}" == "1" ]]; then
       coverage_args+=("$pinned")
     done
     if ! "$CARGO_BIN" llvm-cov --no-report -- "${coverage_args[@]}" >> "$LOG_FILE" 2>&1; then
-      echo "FAIL: supply-chain coverage gate could not execute the invariant/chaos suite" | tee -a "$LOG_FILE" >&2
+      echo "FAIL: invariant coverage gate could not execute the pinned suites" | tee -a "$LOG_FILE" >&2
       exit 1
     fi
     if ! "$CARGO_BIN" llvm-cov report --fail-under-lines 90 --fail-under-branches 90 >> "$LOG_FILE" 2>&1; then
-      echo "FAIL: supply-chain coverage below coverage.toml thresholds (lines/branches must exceed 90%)" | tee -a "$LOG_FILE" >&2
+      echo "FAIL: coverage below coverage.toml thresholds (lines/branches must exceed 90%)" | tee -a "$LOG_FILE" >&2
       exit 1
     fi
-    echo "PASS: supply-chain coverage gate satisfied" | tee -a "$LOG_FILE"
+    echo "PASS: invariant coverage gate satisfied" | tee -a "$LOG_FILE"
   else
     echo "cargo-llvm-cov not available; skipping coverage gate for shard $SHARD_INDEX/$TOTAL_SHARDS" | tee -a "$LOG_FILE"
   fi

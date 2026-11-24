@@ -547,10 +547,79 @@ machine invariant over the abstract state
 
 ---
 
+## VAT Determination Engine Properties (`src/vat_engine.rs`)
+
+`VATDeterminationEngine` is stateless; the test suite uses a test-only journal
+model to check deterministic acceptance, batch atomicity, and recovery around
+the public determination API. The abstract state is
+`(records, transaction_ids, last_timestamp, hash_chain, merkle_root)`.
+The journal rules below describe the test harness and do not imply that the
+production engine persists submissions.
+
+### VAT-01 — Bounded and Deterministic Determinations
+
+| Field | Value |
+|-------|-------|
+| **Category** | safety |
+| **Description** | Every accepted transaction satisfies `supply_amount <= MAX_SUPPLY_AMOUNT` and `vat_rate <= MAX_VAT_RATE_BPS`. The jurisdiction, supply type, exemption, and reverse-charge rules produce a deterministic rate and amount; the amount is zero for exemptions and applicable reverse charges, and every calculated rate is at most 10,000 basis points. |
+| **Invariant** | `accepted(t) ⇒ validate_transaction(t) ∧ result.vat_rate <= 10_000 ∧ (result.is_exempt ∨ result.reverse_charge_applicable ⇒ result.vat_amount == 0)` |
+| **Fault Scenario** | Boundary amounts/rates and all jurisdiction/supply/exemption rule combinations |
+| **Status** | 🔶 Covered by deterministic boundary matrix and property sequences |
+
+---
+
+### VAT-02 — Duplicate and Timestamp Rejection
+
+| Field | Value |
+|-------|-------|
+| **Category** | safety |
+| **Description** | In the test journal, a transaction ID is committed at most once and accepted timestamps are non-decreasing. Duplicate IDs and strictly older timestamps are rejected without changing the state. |
+| **Invariant** | `duplicate(id) ∨ timestamp < last_timestamp ⇒ state_after == state_before` |
+| **Fault Scenario** | Duplicate submissions and out-of-order timestamps |
+| **Status** | 🔶 Covered by generated sequences and regression tests |
+
+---
+
+### VAT-03 — Mid-Batch Rollback Atomicity
+
+| Field | Value |
+|-------|-------|
+| **Category** | safety |
+| **Description** | An injected failure at any batch position restores the exact pre-batch journal state, including accepted IDs, determinations, timestamps, hash links, and Merkle leaves. |
+| **Invariant** | `batch_fails_at(k) ⇒ state_after == state_before` for every `0 <= k < batch.len()` |
+| **Fault Scenario** | Mid-batch failures at every position |
+| **Status** | 🔶 Covered by deterministic fault injection |
+
+---
+
+### VAT-04 — Hash-Chain and Merkle Integrity After Recovery
+
+| Field | Value |
+|-------|-------|
+| **Category** | safety |
+| **Description** | Each committed journal hash links the prior hash and current determination leaf. A recovery replay reproduces the same accepted IDs and hash chain; all Merkle proofs verify against the recomputed root, and a mutated leaf fails verification. |
+| **Invariant** | `chain[n] == H(0x02 || chain[n-1] || leaf[n]) ∧ replay(records) == state ∧ verify(proof(leaf[n]), root)` |
+| **Fault Scenario** | Replay after rollback, reordered submissions, and tampered Merkle leaves |
+| **Status** | 🔶 Covered by generated sequences and recovery checks |
+
+---
+
+### VAT-05 — Multi-Actor Serializable Interleaving
+
+| Field | Value |
+|-------|-------|
+| **Category** | safety |
+| **Description** | Interleaved submissions from multiple actors are equivalent to their accepted sequential order. Rejected duplicates do not change state, and recovery preserves the hash chain and Merkle commitments. |
+| **Invariant** | `interleaved(records) == sequential(accepted(records))` |
+| **Fault Scenario** | Concurrent multi-actor access (`src/concurrent_tests.rs`) |
+| **Status** | 🔶 Covered by deterministic interleaving test |
+
+---
+
 ## Fault-Injection Scenarios
 
 The following fault-injection scenarios are simulated by the test suite and must
-leave all MFS invariants intact:
+leave the applicable MFS and VAT invariants intact:
 
 | ID | Scenario | Injection Point | Expected Outcome |
 |----|----------|-----------------|------------------|
@@ -561,6 +630,10 @@ leave all MFS invariants intact:
 | FI-05 | Recovery replay | Replay accepted prefix after simulated crash | Recomputed Merkle root and hash chain identical to stored (MFS-04, MFS-05) |
 | FI-06 | Leaf tampering | Single-bit mutation of an anchored leaf | Merkle proof verification fails (MFS-04) |
 | FI-07 | Concurrent interleaving | Randomized interleaving of multi-actor operations | Final state linearizable; no invariant violation (MFS-08) |
+| FI-08 | VAT duplicate or reordered submission | Repeated ID or older transaction timestamp | Rejected without changing journal state (VAT-02) |
+| FI-09 | VAT batch rollback | Injected failure at each batch position | Full journal state, chain, and Merkle leaves restored (VAT-03) |
+| FI-10 | VAT recovery and tampering | Replay accepted VAT records, then mutate a leaf | Chain and root reproduced; mutated leaf proof rejected (VAT-04) |
+| FI-11 | VAT multi-actor interleaving | Rotate submissions among multiple actors | Accepted state remains serializable and recoverable (VAT-05) |
 
 ---
 
@@ -568,11 +641,11 @@ leave all MFS invariants intact:
 
 | Category | Total | Verified ✅ | Partial 🔶 | Pending 🔲 |
 |----------|-------|------------|-----------|-----------|
-| safety | 27 | 9 | 8 | 10 |
+| safety | 32 | 9 | 13 | 10 |
 | access-control | 5 | 5 | 0 | 0 |
 | liveness | 1 | 0 | 1 | 0 |
 | ml-feature-store | 8 | 0 | 0 | 8 |
-| **Total** | **41** | **14** | **9** | **18** |
+| **Total** | **46** | **14** | **14** | **18** |
 
 ---
 

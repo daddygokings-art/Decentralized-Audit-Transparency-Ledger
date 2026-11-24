@@ -1372,3 +1372,46 @@ mod rwa_oracle_concurrency {
     }
 }
 // ── end RWA oracle concurrent scenarios ─────────────────────────────────────
+
+#[test]
+fn concurrent_vat_engine_multi_actor_interleaving_recovers_consistently() {
+    use crate::vat_engine_test_support::{make_transaction, VatInput, VatJournal};
+    use soroban_sdk::testutils::Address as _;
+    use soroban_sdk::{Address, Env};
+
+    let env = Env::default();
+    let actors: std::vec::Vec<Address> = (0..4).map(|_| Address::generate(&env)).collect();
+    let mut journal = VatJournal::new(env.clone());
+
+    for round in 0..8u8 {
+        for offset in 0..4usize {
+            let actor_index = (offset + usize::from(round)) % actors.len();
+            let input = VatInput {
+                id: round * 4 + actor_index as u8,
+                timestamp: u64::from(round) + 1,
+                amount: 10_000 + actor_index as u64 * 100,
+                rate: 500 + actor_index as u32 * 100,
+                jurisdiction: actor_index as u8,
+                customer_jurisdiction: 0,
+                supply_type: round % 7,
+                exemption: 7,
+                is_b2b: actor_index % 2 == 0,
+            };
+            journal
+                .apply(make_transaction(&env, &input, &actors[actor_index]))
+                .unwrap();
+        }
+    }
+
+    assert_eq!(journal.transactions().len(), 32);
+    assert!(journal.assert_integrity());
+    let before = journal.snapshot();
+
+    let duplicate = journal.transactions()[0].clone();
+    assert!(journal.apply(duplicate).is_err());
+    assert_eq!(journal.snapshot(), before);
+
+    let recovered = journal.recover();
+    assert_eq!(recovered.snapshot(), before);
+    assert!(recovered.assert_integrity());
+}

@@ -1930,3 +1930,418 @@ mod rwa_oracle_invariants {
     }
 }
 // ── end RWA oracle state-machine invariants ─────────────────────────────────
+
+// ── VAT engine state-machine invariants (issue #808) ────────────────────────
+mod vat_engine_invariants {
+    use crate::tax::{TaxJurisdiction, VATDetermination, VATExemptionReason};
+    use crate::vat_engine::{
+        query_vat_determinations, VATDeterminationEngine, VATPageCursor, VATPageLimit, VATQueryFilter,
+        MAX_SUPPLY_AMOUNT, MAX_VAT_PAGE_LIMIT, MAX_VAT_RATE_BPS,
+    };
+    use crate::vat_engine_test_support::{make_transaction, JournalError, VatInput, VatJournal};
+    use ::proptest::prelude::*;
+    use ::proptest::test_runner::{Config, RngSeed};
+    use soroban_sdk::testutils::Address as _;
+    use soroban_sdk::{Address, Bytes, BytesN, Env, Vec as SorobanVec};
+
+    const DEFAULT_SEED: u64 = 0x808_5EED;
+
+    fn config(cases: u32) -> Config {
+        let seed = std::env::var("VAT_ENGINE_PROPTEST_SEED")
+            .ok()
+            .and_then(|value| {
+                let value = value.trim();
+                match value.strip_prefix("0x") {
+                    Some(hex) => u64::from_str_radix(hex, 16).ok(),
+                    None => value.parse().ok(),
+                }
+            })
+            .unwrap_or(DEFAULT_SEED);
+        Config {
+            cases,
+            rng_seed: RngSeed::Fixed(seed),
+            failure_persistence: None,
+            ..Config::default()
+        }
+    }
+
+    fn input(id: u8, timestamp: u64) -> VatInput {
+        VatInput {
+            id,
+            timestamp,
+            amount: 100_000,
+            rate: 2_000,
+            jurisdiction: 0,
+            customer_jurisdiction: 0,
+            supply_type: 0,
+            exemption: 7,
+            is_b2b: false,
+        }
+    }
+
+    fn input_strategy() -> impl Strategy<Value = VatInput> {
+        (
+            0u8..8,
+            0u64..128,
+            0u64..=MAX_SUPPLY_AMOUNT.saturating_add(1),
+            0u32..=MAX_VAT_RATE_BPS.saturating_add(1),
+            0u8..11,
+            0u8..11,
+            0u8..7,
+            0u8..8,
+            any::<bool>(),
+        )
+            .prop_map(
+                |(id, timestamp, amount, rate, jurisdiction, customer_jurisdiction, supply_type, exemption, is_b2b)| {
+                    VatInput {
+                        id,
+                        timestamp,
+                        amount,
+                        rate,
+                        jurisdiction,
+                        customer_jurisdiction,
+                        supply_type,
+                        exemption,
+                        is_b2b,
+                    }
+                },
+            )
+    }
+
+    fn determination(
+        env: &Env,
+        id: u8,
+        timestamp: u64,
+        rate: u32,
+        amount: u64,
+        is_exempt: bool,
+        reverse_charge: bool,
+        jurisdiction: TaxJurisdiction,
+        exemption_reason: VATExemptionReason,
+    ) -> VATDetermination {
+        VATDetermination {
+            transaction_id: BytesN::from_array(env, &[id; 32]),
+            vat_rate: rate,
+            is_exempt,
+            exemption_reason,
+            reverse_charge_applicable: reverse_charge,
+            place_of_supply: jurisdiction,
+            vat_amount: amount,
+            determined_at: timestamp,
+            source: Bytes::from_slice(env, b"VAT_ENGINE_V1"),
+        }
+    }
+
+    proptest! {
+        #![proptest_config(config(1024))]
+
+        /// 1,024 seeded sequences check duplicate IDs, out-of-order timestamps,
+        /// bounded VAT results, recovery replay, hash linkage, and Merkle proofs.
+        #[test]
+        fn prop_vat_engine_state_machine_invariants(inputs in prop::collection::vec(input_strategy(), 1..=16)) {
+            let env = Env::default();
+            let actor = Address::generate(&env);
+            let mut journal = VatJournal::new(env.clone());
+            journal
+                .apply(make_transaction(&env, &input(250, 0), &actor))
+                .unwrap();
+
+            for operation in inputs {
+                let transaction = make_transaction(&env, &operation, &actor);
+                let before = journal.snapshot();
+                match journal.apply(transaction) {
+                    Ok(()) => {
+                        let recorded = journal.determinations().last().unwrap();
+                        prop_assert!(recorded.vat_rate <= MAX_VAT_RATE_BPS);
+                        let latest = journal.transactions().last().unwrap();
+                        let expected_amount =
+                            if recorded.is_exempt || recorded.reverse_charge_applicable {
+                                0
+                            } else {
+                                VATDeterminationEngine::vat_amount_from_net(
+                                    latest.supply_amount,
+                                    recorded.vat_rate,
+                                )
+                            };
+                        prop_assert_eq!(recorded.vat_amount, expected_amount);
+                    }
+                    Err(_) => prop_assert_eq!(journal.snapshot(), before),
+                }
+                prop_assert!(journal.assert_integrity());
+            }
+
+            let recovered = journal.recover();
+            prop_assert_eq!(recovered.snapshot(), journal.snapshot());
+            prop_assert!(recovered.assert_integrity());
+        }
+    }
+
+    #[test]
+    fn vat_engine_rejects_duplicate_and_reordered_submissions_atomically() {
+        let env = Env::default();
+        let actor = Address::generate(&env);
+        let mut journal = VatJournal::new(env.clone());
+        let first = make_transaction(&env, &input(1, 10), &actor);
+        journal.apply(first.clone()).unwrap();
+
+        let before = journal.snapshot();
+        assert_eq!(journal.apply(first), Err(JournalError::DuplicateTransaction));
+        assert_eq!(journal.snapshot(), before);
+
+        let reordered = make_transaction(&env, &input(2, 9), &actor);
+        assert_eq!(journal.apply(reordered), Err(JournalError::OutOfOrderTimestamp));
+        assert_eq!(journal.snapshot(), before);
+        assert!(journal.assert_integrity());
+    }
+
+    #[test]
+    fn vat_engine_batch_faults_restore_each_committed_prefix() {
+        let env = Env::default();
+        let actor = Address::generate(&env);
+        let batch: std::vec::Vec<_> = (0..4)
+            .map(|index| make_transaction(&env, &input(10 + index, 11 + u64::from(index)), &actor))
+            .collect();
+
+        for fail_at in 0..batch.len() {
+            let mut journal = VatJournal::new(env.clone());
+            journal.apply(make_transaction(&env, &input(1, 10), &actor)).unwrap();
+            let before = journal.snapshot();
+            assert_eq!(
+                journal.apply_batch(&batch, Some(fail_at)),
+                Err(JournalError::InjectedFailure)
+            );
+            assert_eq!(journal.snapshot(), before);
+            assert!(journal.assert_integrity());
+        }
+    }
+
+    #[test]
+    fn vat_engine_rate_exemption_and_amount_boundaries() {
+        let env = Env::default();
+        let actor = Address::generate(&env);
+        for jurisdiction in 0..11 {
+            for supply_type in 0..7 {
+                for customer_jurisdiction in [0, 1] {
+                    for is_b2b in [false, true] {
+                        for exemption in 0..8 {
+                            let mut value = input(1, 1);
+                            value.jurisdiction = jurisdiction;
+                            value.customer_jurisdiction = customer_jurisdiction;
+                            value.supply_type = supply_type;
+                            value.is_b2b = is_b2b;
+                            value.exemption = exemption;
+                            let transaction = make_transaction(&env, &value, &actor);
+                            let rate = VATDeterminationEngine::determine_rate(&env, &transaction);
+                            assert!(rate <= MAX_VAT_RATE_BPS);
+                            let result = VATDeterminationEngine::determine_vat(&env, &transaction);
+                            assert!(result.vat_rate <= MAX_VAT_RATE_BPS);
+                            assert!(VATDeterminationEngine::validate_transaction(&transaction));
+                        }
+                    }
+                }
+            }
+        }
+
+        assert_eq!(VATDeterminationEngine::normalize_rate(u32::MAX), 10_000);
+        assert_eq!(
+            VATDeterminationEngine::vat_amount_from_net(u64::MAX, u32::MAX),
+            u64::MAX
+        );
+        assert_eq!(
+            VATDeterminationEngine::calculate_amounts(u64::MAX, u32::MAX, false).2,
+            u64::MAX
+        );
+        assert_eq!(
+            VATDeterminationEngine::calculate_amounts(u64::MAX, u32::MAX, true).2,
+            u64::MAX
+        );
+
+        let mut invalid_amount = make_transaction(&env, &input(2, 2), &actor);
+        invalid_amount.supply_amount = MAX_SUPPLY_AMOUNT + 1;
+        assert!(!VATDeterminationEngine::validate_transaction(&invalid_amount));
+        let mut invalid_rate = make_transaction(&env, &input(3, 3), &actor);
+        invalid_rate.vat_rate = MAX_VAT_RATE_BPS + 1;
+        assert!(!VATDeterminationEngine::validate_transaction(&invalid_rate));
+    }
+
+    #[test]
+    fn vat_engine_filtered_pagination_orders_and_validates_ranges() {
+        let env = Env::default();
+        let mut determinations = SorobanVec::new(&env);
+        determinations.push_back(determination(
+            &env,
+            1,
+            20,
+            2_000,
+            200,
+            false,
+            false,
+            TaxJurisdiction::EU,
+            VATExemptionReason::None,
+        ));
+        determinations.push_back(determination(
+            &env,
+            2,
+            10,
+            500,
+            50,
+            true,
+            false,
+            TaxJurisdiction::UK,
+            VATExemptionReason::Healthcare,
+        ));
+        determinations.push_back(determination(
+            &env,
+            3,
+            10,
+            1_000,
+            100,
+            false,
+            true,
+            TaxJurisdiction::EU,
+            VATExemptionReason::None,
+        ));
+        determinations.push_back(determination(
+            &env,
+            4,
+            30,
+            0,
+            0,
+            false,
+            false,
+            TaxJurisdiction::HongKong,
+            VATExemptionReason::None,
+        ));
+
+        assert!(VATPageLimit::new(0).is_err());
+        assert_eq!(VATPageLimit::new(2).unwrap().effective(), 2);
+        assert_eq!(
+            VATPageLimit::new(MAX_VAT_PAGE_LIMIT + 1).unwrap().effective(),
+            MAX_VAT_PAGE_LIMIT
+        );
+        assert_eq!(
+            crate::vat_engine::VATPageLimit {
+                limit: MAX_VAT_PAGE_LIMIT + 1
+            }
+            .effective(),
+            MAX_VAT_PAGE_LIMIT
+        );
+
+        let filter = VATQueryFilter::none();
+        let first_page =
+            query_vat_determinations(&env, &determinations, &filter, &None, &VATPageLimit::new(2).unwrap()).unwrap();
+        assert_eq!(
+            first_page.items.get(0).unwrap().transaction_id,
+            determinations.get(1).unwrap().transaction_id
+        );
+        assert_eq!(
+            first_page.items.get(1).unwrap().transaction_id,
+            determinations.get(2).unwrap().transaction_id
+        );
+        let cursor = first_page.next_cursor.unwrap();
+        let second_page = query_vat_determinations(
+            &env,
+            &determinations,
+            &filter,
+            &Some(cursor),
+            &VATPageLimit::new(2).unwrap(),
+        )
+        .unwrap();
+        assert_eq!(second_page.items.len(), 2);
+        let last_cursor = second_page.next_cursor.unwrap();
+        let exhausted = query_vat_determinations(
+            &env,
+            &determinations,
+            &filter,
+            &Some(last_cursor),
+            &VATPageLimit::new(2).unwrap(),
+        )
+        .unwrap();
+        assert!(exhausted.items.is_empty());
+        assert!(exhausted.next_cursor.is_none());
+
+        let single =
+            query_vat_determinations(&env, &determinations, &filter, &None, &VATPageLimit::new(1).unwrap()).unwrap();
+        let cursor = single.next_cursor.unwrap();
+        let after_last = VATPageCursor {
+            determined_at: 30,
+            transaction_id: BytesN::from_array(&env, &[4; 32]),
+        };
+        let empty = query_vat_determinations(
+            &env,
+            &determinations,
+            &filter,
+            &Some(after_last),
+            &VATPageLimit::new(2).unwrap(),
+        )
+        .unwrap();
+        assert!(empty.items.is_empty());
+        assert!(empty.next_cursor.is_none());
+        assert_eq!(cursor.determined_at, 10);
+
+        let mut invalid_rate = VATQueryFilter::none();
+        invalid_rate.min_vat_rate = Some(2);
+        invalid_rate.max_vat_rate = Some(1);
+        assert!(invalid_rate.validate().is_err());
+        let mut invalid_amount = VATQueryFilter::none();
+        invalid_amount.min_vat_amount = Some(2);
+        invalid_amount.max_vat_amount = Some(1);
+        assert!(invalid_amount.validate().is_err());
+        let mut invalid_time = VATQueryFilter::none();
+        invalid_time.min_determined_at = Some(2);
+        invalid_time.max_determined_at = Some(1);
+        assert!(invalid_time.validate().is_err());
+        assert!(query_vat_determinations(
+            &env,
+            &determinations,
+            &invalid_rate,
+            &None,
+            &VATPageLimit::new(2).unwrap(),
+        )
+        .is_err());
+
+        let candidate = determinations.get(0).unwrap();
+        let mut matching = VATQueryFilter::none();
+        matching.place_of_supply = Some(candidate.place_of_supply);
+        matching.is_exempt = Some(candidate.is_exempt);
+        matching.reverse_charge_applicable = Some(candidate.reverse_charge_applicable);
+        matching.min_vat_rate = Some(candidate.vat_rate);
+        matching.max_vat_rate = Some(candidate.vat_rate);
+        matching.min_vat_amount = Some(candidate.vat_amount);
+        matching.max_vat_amount = Some(candidate.vat_amount);
+        matching.min_determined_at = Some(candidate.determined_at);
+        matching.max_determined_at = Some(candidate.determined_at);
+        assert!(matching.matches(&candidate));
+
+        let mut mismatches = std::vec::Vec::new();
+        let mut mismatch = matching.clone();
+        mismatch.place_of_supply = Some(TaxJurisdiction::UK);
+        mismatches.push(mismatch);
+        let mut mismatch = matching.clone();
+        mismatch.is_exempt = Some(true);
+        mismatches.push(mismatch);
+        let mut mismatch = matching.clone();
+        mismatch.reverse_charge_applicable = Some(true);
+        mismatches.push(mismatch);
+        let mut mismatch = matching.clone();
+        mismatch.min_vat_rate = Some(candidate.vat_rate + 1);
+        mismatches.push(mismatch);
+        let mut mismatch = matching.clone();
+        mismatch.max_vat_rate = Some(candidate.vat_rate - 1);
+        mismatches.push(mismatch);
+        let mut mismatch = matching.clone();
+        mismatch.min_vat_amount = Some(candidate.vat_amount + 1);
+        mismatches.push(mismatch);
+        let mut mismatch = matching.clone();
+        mismatch.max_vat_amount = Some(candidate.vat_amount - 1);
+        mismatches.push(mismatch);
+        let mut mismatch = matching.clone();
+        mismatch.min_determined_at = Some(candidate.determined_at + 1);
+        mismatches.push(mismatch);
+        let mut mismatch = matching;
+        mismatch.max_determined_at = Some(candidate.determined_at - 1);
+        mismatches.push(mismatch);
+        assert!(mismatches.iter().all(|filter| !filter.matches(&candidate)));
+    }
+}
+// ── end VAT engine state-machine invariants ─────────────────────────────────

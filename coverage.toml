@@ -205,7 +205,8 @@ description = "Core tax computation logic"
 [[module]]
 name = "vat_engine"
 path_prefix = "src/vat_engine.rs"
-line = 60.0
+line = 91.0
+branch = 91.0
 description = "VAT calculation and jurisdiction rules"
 
 [[module]]
