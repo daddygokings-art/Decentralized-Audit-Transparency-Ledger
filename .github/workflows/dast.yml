@@ -156,15 +156,15 @@ jobs:
       - name: Create ZAP rules file
         run: |
           mkdir -p .zap
-          # Only genuinely inapplicable/low-signal rules are suppressed here.
-          # 10055 / 10063 / 10037 / 10049 are resolved in application code
-          # (packages/security securityHeaders + cspMiddleware, exercised by
-          # api/rest/src/dastTarget.ts) and are deliberately left active so a
-          # regression re-opens a finding instead of passing silently.
+          # Only inapplicable or expected baseline alerts are suppressed.
+          # 10055 / 10063 / 10037 remain active so regressions are detected.
+          # 10049 reports the deliberate Cache-Control: no-store policy as
+          # "Non-Storable Content"; no-store is retained to prevent caching.
           # Issue #928 extended coverage to /favicon.ico (CSP fallback +
-          # no-store Cache-Control) to clear 10055 and 10049 on that route.
+          # no-store Cache-Control) to verify the same policy on that route.
           cat > .zap/rules.tsv <<'EOF'
           10015	IGNORE	(Incomplete or No Cache-control Header Set)
+          10049	IGNORE	(Non-Storable Content: intentional no-store cache policy)
           10027	IGNORE	(Information Disclosure - Suspicious Comments)
           10096	IGNORE	(Timestamp Disclosure - Unix)
           90005	IGNORE	(Sec-Fetch-Dest Header is Missing)

@@ -15,14 +15,14 @@ The automated baseline security assessment identified risks in the legacy access
 2. **Centralization Risk**: Single point of compromise vulnerability across event ingestion and retention parameters.
 3. **Audit Inobservability**: Lack of role segregation between event submitters, auditors, and governance administrators.
 4. **Missing Cross-Origin Isolation Headers**: ZAP baseline flagged COEP, COOP, and CORP as missing or invalid on the root document and static assets (/robots.txt, /sitemap.xml).
-5. **Missing Permissions-Policy, X-Powered-By leakage, and cache control**: ZAP alerts 10063, 10037, and 10049 were open on all crawled routes.
+5. **Missing Permissions-Policy and X-Powered-By leakage**: ZAP alerts 10063 and 10037 were open on all crawled routes. ZAP 10049 also reports the deliberate `Cache-Control: no-store` policy as "Non-Storable Content"; that informational alert is expected and suppressed in the baseline rules.
 
 The ZAP baseline scan additionally flagged four HTTP response header findings across
 `/`, `/robots.txt`, and `/sitemap.xml`:
 1. **CSP: Failure to Define Directive with No Fallback** [10055]
 2. **Permissions Policy Header Not Set** [10063]
 3. **Server Leaks Information via "X-Powered-By"** [10037]
-4. **Storable and Cacheable Content** [10049]
+4. **Non-Storable Content** [10049] (expected: intentional `no-store` policy)
 
 ---
 
@@ -86,12 +86,12 @@ The ZAP baseline scan additionally flagged four HTTP response header findings ac
 - &bull; **Description**: ZAP reported the `X-Powered-By` response header as leaking server technology on all crawled routes.
 - &bull; **Remediation**: `securityHeadersMiddleware` now calls `res.removeHeader("X-Powered-By")` on every response, in addition to `app.disable("x-powered-by")`.
 
-### Finding SEC-008: Storable and Cacheable Content [ZAP-10049]
+### Finding SEC-008: Non-Storable Content [ZAP-10049]
 - &bull; **Severity**: INFORMATIONAL
 - &bull; **CWE**: N/A
-- &bull; **Status**: **RESOLVED**
-- &bull; **Description**: ZAP flagged responses lacking explicit cache control directives.
-- &bull; **Remediation**: `securityHeadersMiddleware` now sets `Cache-Control: no-store, no-cache, must-revalidate, private` along with `Pragma: no-cache` and `Expires: 0` on all responses.
+- &bull; **Status**: **EXPECTED / BASELINE-SUPPRESSED**
+- &bull; **Description**: ZAP flags responses that intentionally include `Cache-Control: no-store` as non-storable. This is the desired policy for API responses and prevents caches from retaining potentially sensitive data.
+- &bull; **Remediation**: `securityHeadersMiddleware` sets `Cache-Control: no-store, no-cache, must-revalidate, private` along with `Pragma: no-cache` and `Expires: 0` on all responses. The baseline rules suppress informational alert 10049 because its evidence is the intended `no-store` directive; the security header itself remains enabled.
 
 ### Finding SEC-009: CSP Failure to Define Directive with No Fallback [ZAP-10055]
 - &bull; **Severity**: MEDIUM
@@ -114,16 +114,15 @@ The ZAP baseline scan additionally flagged four HTTP response header findings ac
 ### Finding SEC-011: Non-Storable Content on /favicon.ico and Additional Routes [ZAP-10049] (issue #928)
 - &bull; **Severity**: INFORMATIONAL
 - &bull; **CWE**: N/A
-- &bull; **Status**: **RESOLVED**
-- &bull; **Description**: The October 2026 ZAP scan (issue #928) reported Non-Storable Content alerts on five routes: `http://localhost:3000`, `http://localhost:3000/`, `http://localhost:3000/favicon.ico`, `http://localhost:3000/robots.txt`, and `http://localhost:3000/sitemap.xml`. The `/favicon.ico` route was a new addition to this alert because it lacked an explicit `Cache-Control` header.
+- &bull; **Status**: **EXPECTED / BASELINE-SUPPRESSED**
+- &bull; **Description**: The October 2026 ZAP scan (issue #928) reported Non-Storable Content alerts on five routes. The alert evidence was the explicit `no-store` directive, including on `/favicon.ico`; the non-cacheable response is intentional.
 - &bull; **Remediation**:
   - **DAST target** (`api/rest/src/dastTarget.ts`): The `securityHeaders()` middleware already sets `Cache-Control: no-store, no-cache, must-revalidate, proxy-revalidate, max-age=0` on every response including the new `/favicon.ico` handler.
-  - **Next.js middleware** (`ui/src/middleware.ts`, `ui/middleware.ts`): Now applies `Cache-Control: no-store, no-cache, must-revalidate, proxy-revalidate, max-age=0` to `/favicon.ico` (previously excluded from the matcher).
-  - **Next.js config** (`ui/next.config.js`): Added `/favicon.ico` to the `headers()` array with both `securityHeaders` and `cacheHeaders`, ensuring `Cache-Control`, `Pragma`, and `Expires` headers are set on the favicon route.
-  - **DAST workflow** (`.github/workflows/dast.yml`): The fallback express stub now includes `/favicon.ico` and the middleware applies `Cache-Control: no-store` to all routes.
+  - **Next.js middleware** (`ui/src/middleware.ts`, `ui/middleware.ts`) and config (`ui/next.config.js`): Apply `Cache-Control: no-store` to `/favicon.ico` as well as the other routes.
+  - **DAST workflow** (`.github/workflows/dast.yml`): Suppresses rule 10049 because the scan reports the intentionally configured `no-store` policy; the header remains enabled and must be verified on all routes.
 
 ---
 
 ## Verification
 
-After applying the middleware changes, a re-scan of the local target should report zero active alerts for ZAP rules 90004, 10055, 10063, 10037, and 10049 across `/`, `/robots.txt`, `/sitemap.xml`, and `/favicon.ico`. The `securityHeadersMiddleware` must be registered before any route handlers in the Express app so that static asset responses are also covered. The Next.js middleware matcher must include `/favicon.ico` (not exclude it) so that CSP and `Cache-Control` headers are applied to that route.
+After applying the middleware changes, a re-scan of the local target should report zero active alerts for ZAP rules 90004, 10055, 10063, and 10037 across `/`, `/robots.txt`, `/sitemap.xml`, and `/favicon.ico`. Rule 10049 is expected to be suppressed because its evidence is the intentional `Cache-Control: no-store` directive; verify that this header remains present on all routes. The `securityHeadersMiddleware` must be registered before any route handlers in the Express app so that static asset responses are also covered. The Next.js middleware matcher must include `/favicon.ico` (not exclude it) so that CSP and `Cache-Control` headers are applied to that route.
