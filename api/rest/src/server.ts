@@ -35,6 +35,7 @@ import { createComplianceRouter } from "./compliance";
 import { createReplayRouter } from "./replay";
 import { createConfidentialRouter } from "./confidential";
 import { createAggregationRouter } from "./aggregation";
+import { setPublicCacheHeaders } from "./cacheHeaders";
 
 
 import {
@@ -171,9 +172,8 @@ app.use(
   })
 );
 
-// ZAP 10049: prevent caching of dynamic API responses. Static assets are
-// served by the frontend; every REST response here is user- or
-// state-dependent, so mark it non-storable and non-cacheable.
+// Keep dynamic API responses non-storable. Public routes that are safe to
+// cache override this policy in their handlers.
 app.use((_req, res, next) => {
   if (!res.getHeader("Cache-Control")) {
     res.setHeader("Cache-Control", "no-store, no-cache, must-revalidate, proxy-revalidate, max-age=0");
@@ -247,9 +247,7 @@ app.use((_req, res, next) => {
 });
 
 app.get(["/", "/robots.txt", "/sitemap.xml"], (req, res) => {
-  res.setHeader("Cache-Control", "no-store, no-cache, must-revalidate, proxy-revalidate, max-age=0");
-  res.setHeader("Pragma", "no-cache");
-  res.setHeader("Expires", "0");
+  setPublicCacheHeaders(res);
   res.setHeader("Cross-Origin-Embedder-Policy", "require-corp");
   res.setHeader("Cross-Origin-Opener-Policy", "same-origin");
   res.setHeader("Cross-Origin-Resource-Policy", "same-origin");

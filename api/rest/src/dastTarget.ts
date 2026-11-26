@@ -14,6 +14,7 @@
 import express from "express";
 
 import { securityHeaders, cspMiddleware } from "@audit-ledger/security";
+import { setPublicCacheHeaders } from "./cacheHeaders";
 import { securityHeadersMiddleware } from "./middleware";
 
 const app = express();
@@ -24,7 +25,7 @@ app.disable("etag");
 app.use(express.json());
 
 // Same header stack as src/server.ts: Permissions-Policy, X-Powered-By
-// removal and a default no-store Cache-Control (ZAP 10063 / 10037 / 10049).
+// removal and a default no-store Cache-Control for dynamic responses.
 app.use(securityHeaders());
 app.use(securityHeadersMiddleware);
 
@@ -63,16 +64,15 @@ app.post(
   }
 );
 
-// Minimal favicon response so ZAP finds a 200 (not a 404 that lacks
-// security headers) when crawling /favicon.ico (issue #928).
-// The middleware stack above already applied CSP, Cache-Control, and
-// all other hardening headers to this response.
+// Minimal public favicon response so ZAP finds a cacheable 200 response.
 app.get("/favicon.ico", (_req, res) => {
+  setPublicCacheHeaders(res);
   res.setHeader("Content-Type", "image/x-icon");
   res.status(200).end();
 });
 
 app.get(["/", "/robots.txt", "/sitemap.xml"], (req, res) => {
+  setPublicCacheHeaders(res);
   if (req.path === "/robots.txt") {
     res.type("text/plain").send("User-agent: *\nDisallow: /");
     return;
