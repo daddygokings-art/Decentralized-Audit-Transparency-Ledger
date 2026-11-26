@@ -1,6 +1,6 @@
 import http from "http";
 import { ApolloServer } from "@apollo/server";
-import { expressMiddleware } from "@apollo/server/express4";
+import { expressMiddleware } from "@as-integrations/express4";
 import express from "express";
 import { WebSocketServer, WebSocket } from "ws";
 import { useServer } from "graphql-ws/dist/use/ws";

@@ -11,10 +11,11 @@
     "test": "vitest run"
   },
   "dependencies": {
-    "@apollo/server": "^4.10.1",
-    "@graphql-tools/schema": "^9.0.19",
+    "@apollo/server": "^5.5.0",
+    "@as-integrations/express4": "^1.1.2",
+    "@graphql-tools/schema": "^10.1.5",
     "express": "^4.19.2",
-    "graphql": "^16.8.0",
+    "graphql": "^16.11.0",
     "graphql-subscriptions": "^3.0.0",
     "graphql-ws": "^6.0.8",
     "ws": "^8.14.0",
@@ -29,5 +30,10 @@
     "vitest": "^1.6.1",
     "typescript": "^5.4.5",
     "ts-node-dev": "^2.0.0"
+  },
+  "overrides": {
+    "@graphql-tools/utils": "12.1.0",
+    "qs": "6.16.1",
+    "toml": "5.0.1"
   }
 }

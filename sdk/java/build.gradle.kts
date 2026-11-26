@@ -18,10 +18,13 @@ java {
 
 dependencies {
     // HTTP Client
-    implementation 'org.apache.httpcomponents.client5:httpclient5:5.2.1'
+    implementation 'org.apache.httpcomponents.client5:httpclient5:5.6.3'
+    implementation 'org.apache.httpcomponents.core5:httpcore5:5.4.3'
+    implementation 'org.apache.httpcomponents.core5:httpcore5-h2:5.4.3'
     
     // JSON Processing
-    implementation 'com.fasterxml.jackson.core:jackson-databind:2.15.0'
+    implementation 'com.fasterxml.jackson.core:jackson-core:2.18.11'
+    implementation 'com.fasterxml.jackson.core:jackson-databind:2.18.11'
     
     // Kotlin Support
     implementation "org.jetbrains.kotlin:kotlin-stdlib-jdk8"
