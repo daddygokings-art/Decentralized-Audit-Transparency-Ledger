@@ -661,6 +661,7 @@ pub fn query_vat_determinations(
 #[cfg(test)]
 mod tests {
     use super::*;
+    use soroban_sdk::testutils::Address as _;
 
     #[test]
     fn test_vat_rate_rules_struct() {
@@ -680,13 +681,14 @@ mod tests {
     #[test]
     fn test_eu_goods_b2b_zero_rated() {
         // Intra-EU B2B goods supply should be zero-rated
+        let env = Env::default();
         let rate = VATDeterminationEngine::get_eu_rate(&VATTransaction {
             id: soroban_sdk::BytesN::from_array(&env, &[0u8; 32]),
-            supplier: soroban_sdk::Address::random(&Env::default()),
-            customer: soroban_sdk::Address::random(&Env::default()),
+            supplier: soroban_sdk::Address::generate(&env),
+            customer: soroban_sdk::Address::generate(&env),
             supply_type: VATSupplyType::Goods,
             supply_amount: 100000,
-            currency: Symbol::new(&Env::default(), "EUR"),
+            currency: Symbol::new(&env, "EUR"),
             timestamp: 0,
             place_of_supply: TaxJurisdiction::EU,
             customer_jurisdiction: TaxJurisdiction::EU,
@@ -695,7 +697,7 @@ mod tests {
             exemption_reason: VATExemptionReason::None,
             vat_rate: 0,
             vat_amount: 0,
-            description: soroban_sdk::Bytes::new(&Env::default()),
+            description: soroban_sdk::Bytes::new(&env),
         });
 
         assert_eq!(rate, 0);
@@ -703,13 +705,14 @@ mod tests {
 
     #[test]
     fn test_reverse_charge_b2b_cross_border() {
-        let mut transaction = VATTransaction {
+        let env = Env::default();
+        let transaction = VATTransaction {
             id: soroban_sdk::BytesN::from_array(&env, &[0u8; 32]),
-            supplier: soroban_sdk::Address::random(&Env::default()),
-            customer: soroban_sdk::Address::random(&Env::default()),
+            supplier: soroban_sdk::Address::generate(&env),
+            customer: soroban_sdk::Address::generate(&env),
             supply_type: VATSupplyType::Services,
             supply_amount: 100000,
-            currency: Symbol::new(&Env::default(), "EUR"),
+            currency: Symbol::new(&env, "EUR"),
             timestamp: 0,
             place_of_supply: TaxJurisdiction::EU,
             customer_jurisdiction: TaxJurisdiction::UK,
@@ -718,7 +721,7 @@ mod tests {
             exemption_reason: VATExemptionReason::None,
             vat_rate: 0,
             vat_amount: 0,
-            description: soroban_sdk::Bytes::new(&Env::default()),
+            description: soroban_sdk::Bytes::new(&env),
         };
 
         assert!(VATDeterminationEngine::should_apply_reverse_charge(&transaction));

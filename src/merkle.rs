@@ -140,7 +140,6 @@ pub fn verify_merkle_proof(
     proof: &Vec<BytesN<32>>,
     root: &BytesN<32>,
 ) -> bool {
-) -> Result<bool, MerkleError> {
     if index >= leaf_count {
         return false;
     }
@@ -195,6 +194,7 @@ pub fn verify_merkle_proof_with_events(
     leaf_count: u32,
     proof: &Vec<BytesN<32>>,
     root: &BytesN<32>,
+) -> Result<bool, MerkleError> {
     if index >= leaf_count {
         return Err(MerkleError::LeafIndexOutOfRange);
     }
