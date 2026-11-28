@@ -518,6 +518,15 @@ impl OfflineManager {
             Self::emit_denied_event(env, caller, "create_batch_settlement", "amount_exceeds_bound");
             return Err("Batch total amount exceeds maximum bound");
         }
+        for i in 0..batch_len {
+            let tx_id = tx_ids.get(i).ok_or("Batch transaction ID is missing")?;
+            for j in (i + 1)..batch_len {
+                if tx_ids.get(j) == Some(tx_id.clone()) {
+                    Self::emit_denied_event(env, caller, "create_batch_settlement", "duplicate_tx_id");
+                    return Err("Batch contains duplicate transaction IDs");
+                }
+            }
+        }
 
         let batch_id = Self::compute_batch_id(env, &tx_ids);
 
@@ -529,22 +538,16 @@ impl OfflineManager {
             created_at: env.ledger().timestamp(),
             settled_at: None,
         };
-        Self::emit_success_event(env, caller, "create_batch_settlement");
-        Ok(result)
-    }
-
-    /// Compute deterministic batch ID
-    pub fn compute_batch_id(env: &Env, tx_ids: &Vec<BytesN<32>>) -> BytesN<32> {
-        
-        let mut input = Bytes::new(env);
-
+        let key = OfflineStorageKey::Batch(result.batch_id.clone());
+        env.storage().persistent().set(&key, &result);
+        Self::maybe_bump_ttl(env, &key);
         let mut index = Self::read_batch_index(env);
-        if !index.iter().any(|h| h == batch_id) {
-            index.push_back(batch_id.clone());
+        if !index.iter().any(|h| h == result.batch_id) {
+            index.push_back(result.batch_id.clone());
             Self::write_batch_index(env, &index);
         }
-
-        env.crypto().sha256(&input)
+        Self::emit_success_event(env, caller, "create_batch_settlement");
+        Ok(result)
     }
 
     /// Settle batch on-chain and persist.
@@ -685,8 +688,6 @@ impl OfflineManager {
             (caller.clone(), env.ledger().timestamp(), code),
         );
     }
-}
-
     // ── Deterministic cursor-based pagination & filtered reads ────────
 
     /// List offline transactions matching `filter`, paginated by `cursor`.
@@ -932,9 +933,11 @@ impl OfflineManager {
     /// Compute deterministic batch ID.
     pub fn compute_batch_id(env: &Env, tx_ids: &Vec<BytesN<32>>) -> BytesN<32> {
         let mut input = Bytes::new(env);
+        input.append(&Bytes::from_slice(env, b"CBDC-BATCH-V1"));
+        input.append(&Bytes::from_slice(env, &((tx_ids.len() as u32).to_be_bytes())));
 
         for tx_id in tx_ids.iter() {
-            input.append(&tx_id.to_bytes());
+            input.extend_from_array(&tx_id.to_array());
         }
 
         env.crypto().sha256(&input).to_bytes()
@@ -1207,7 +1210,8 @@ mod tests {
             ],
         );
 
-        let batch = OfflineManager::create_batch_settlement(&env, tx_ids, 5000).unwrap();
+        let caller = Address::generate(&env);
+        let batch = OfflineManager::create_batch_settlement(&env, &caller, tx_ids, 5000).unwrap();
         let fetched = OfflineManager::get_batch_settlement(&env, &batch.batch_id).unwrap();
         assert_eq!(fetched.batch_id, batch.batch_id);
         assert_eq!(fetched.total_amount, 5000);
@@ -1224,12 +1228,10 @@ mod tests {
 
         for i in 0..5u32 {
             let tx_ids = Vec::from_array(&env, &[BytesN::from_array(&env, &[i; 32])]);
-            let batch = OfflineManager::create_batch_settlement(&env, tx_ids, 1000 * (i as u128 + 1)).unwrap();
-            let mut index = OfflineManager::read_batch_index(&env);
-            if !index.iter().any(|h| h == batch.batch_id) {
-                index.push_back(batch.batch_id.clone());
-                OfflineManager::write_batch_index(&env, &index);
-            }
+            let caller = Address::generate(&env);
+            let batch =
+                OfflineManager::create_batch_settlement(&env, &caller, tx_ids, 1000 * (i as u128 + 1))
+                    .unwrap();
         }
 
         let page1 = OfflineManager::list_batch_settlements(&env, None, Some(2));

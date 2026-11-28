@@ -169,6 +169,10 @@ pub const MAX_POLICY_PARTIES: u32 = 128;
 /// aggregation batch; bounds the in-memory accumulator its compute footprint.
 pub const MAX_AGGREGATE_BATCH: u32 = 256;
 
+/// Maximum number of keys a key record may contain.  This bounds key rotation
+/// and prevents oversized public-key values from being persisted.
+pub const MAX_PUBLIC_KEY_BYTES: u32 = 512;
+
 /// Privacy-preserving analytics aggregation result (aggregated without decrypting).
 #[contracttype]
 #[derive(Clone, Debug, Eq, PartialEq)]
@@ -179,6 +183,27 @@ pub struct ConfidentialAggregate {
     pub aggregated_at: u64,
 }
 
+/// One confidential event in a bounded batch submission.
+#[contracttype]
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct ConfidentialEventSubmission {
+    pub event_type: Symbol,
+    pub encrypted_metadata: Bytes,
+    pub access_policy: AccessControlPolicy,
+    pub zk_proof: Bytes,
+    pub key_id: BytesN<32>,
+}
+
+/// Deterministic validator attestation associated with a confidential event.
+#[contracttype]
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct ConfidentialAttestation {
+    pub event_id: BytesN<32>,
+    pub validator: Address,
+    pub expected_hash: BytesN<32>,
+    pub attested_at: u64,
+}
+
 #[contracttype]
 pub enum ConfidentialStorageKey {
     Admin,
@@ -186,6 +211,9 @@ pub enum ConfidentialStorageKey {
     KeyRecord(Address),
     NextSeq,
     TotalEvents,
+    PartitionEpoch,
+    Partitioned,
+    Attestation(BytesN<32>, Address),
     /// Replay marker: `sha256(zk_proof)` of an accepted proof -> event id.
     ConsumedProof(BytesN<32>),
     /// Replay marker: `(owner, sha256(public_key))` of a rotated-out or
@@ -223,6 +251,11 @@ pub enum ConfidentialError {
     KeyReplay = 16,
     /// An active key is already registered; use `rotate_encryption_key`.
     KeyAlreadyRegistered = 17,
+    DuplicateAttestation = 18,
+    StaleAttestation = 19,
+    NetworkPartition = 20,
+    RecoveryRequired = 21,
+    PublicKeyTooLarge = 22,
 }
 
 #[contract]
@@ -261,6 +294,15 @@ impl ConfidentialEventLedger {
         let operation = "register_encryption_key";
         let subject = Self::key_digest(&env, &public_key);
         Self::require_submitter(&env, &owner, operation, &subject)?;
+        if public_key.len() > MAX_PUBLIC_KEY_BYTES {
+            return Err(Self::deny(
+                &env,
+                &owner,
+                operation,
+                &subject,
+                ConfidentialError::PublicKeyTooLarge,
+            ));
+        }
         let existing: Option<EncryptionKeyRecord> = env
             .storage()
             .persistent()
@@ -275,7 +317,6 @@ impl ConfidentialEventLedger {
             ));
         }
         Self::reject_retired_key(&env, &owner, operation, &subject)?;
-
         let now = env.ledger().timestamp();
         let record = EncryptionKeyRecord {
             owner: owner.clone(),
@@ -303,6 +344,15 @@ impl ConfidentialEventLedger {
         let operation = "rotate_encryption_key";
         let subject = Self::key_digest(&env, &new_public_key);
         Self::require_submitter(&env, &owner, operation, &subject)?;
+        if new_public_key.len() > MAX_PUBLIC_KEY_BYTES {
+            return Err(Self::deny(
+                &env,
+                &owner,
+                operation,
+                &subject,
+                ConfidentialError::PublicKeyTooLarge,
+            ));
+        }
         let key = ConfidentialStorageKey::KeyRecord(owner.clone());
         let mut record = Self::load_key(&env, &owner, operation, &subject)?;
         if !record.active {
@@ -341,8 +391,16 @@ impl ConfidentialEventLedger {
         let operation = "revoke_encryption_key";
         let empty = Self::empty_digest(&env);
         Self::require_submitter(&env, &owner, operation, &empty)?;
-        let key = ConfidentialStorageKey::KeyRecord(owner.clone());
         let mut record = Self::load_key(&env, &owner, operation, &empty)?;
+        if !record.active {
+            return Err(Self::deny(
+                &env,
+                &owner,
+                operation,
+                &empty,
+                ConfidentialError::KeyRevoked,
+            ));
+        }
 
         record.active = false;
         env.storage().persistent().set(&key, &record);
@@ -367,6 +425,20 @@ impl ConfidentialEventLedger {
         let operation = "log_confidential_event";
         let empty = Self::empty_digest(&env);
         Self::require_submitter(&env, &submitter, operation, &empty)?;
+        if env
+            .storage()
+            .instance()
+            .get::<_, bool>(&ConfidentialStorageKey::Partitioned)
+            .unwrap_or(false)
+        {
+            return Err(Self::deny(
+                &env,
+                &submitter,
+                operation,
+                &empty,
+                ConfidentialError::NetworkPartition,
+            ));
+        }
 
         // Bound the rent footprint: reject oversized envelopes and proofs
         // before any storage is touched.
@@ -523,6 +595,183 @@ impl ConfidentialEventLedger {
 
         // Return the encrypted payload to the authorized requester for client-side decryption
         Ok(event.encrypted_payload)
+    }
+
+    /// Atomically log a bounded batch of confidential envelopes.  Every envelope
+    /// is validated before the first state write, so a malformed submission
+    /// cannot leave a partial batch behind.
+    pub fn log_confidential_event_batch(
+        env: Env,
+        submitter: Address,
+        submissions: Vec<ConfidentialEventSubmission>,
+    ) -> Result<Vec<BytesN<32>>, ConfidentialError> {
+        let operation = "log_confidential_event_batch";
+        let empty = Self::empty_digest(&env);
+        Self::require_submitter(&env, &submitter, operation, &empty)?;
+        if submissions.len() > MAX_AGGREGATE_BATCH {
+            return Err(Self::deny(
+                &env,
+                &submitter,
+                operation,
+                &empty,
+                ConfidentialError::BatchTooLarge,
+            ));
+        }
+        if env
+            .storage()
+            .instance()
+            .get::<_, bool>(&ConfidentialStorageKey::Partitioned)
+            .unwrap_or(false)
+        {
+            return Err(Self::deny(
+                &env,
+                &submitter,
+                operation,
+                &empty,
+                ConfidentialError::NetworkPartition,
+            ));
+        }
+
+        for submission in submissions.iter() {
+            if submission.encrypted_metadata.len() > MAX_ENCRYPTED_PAYLOAD_BYTES
+                || submission.zk_proof.len() > MAX_ZK_PROOF_BYTES
+            {
+                return Err(Self::deny(
+                    &env,
+                    &submitter,
+                    operation,
+                    &empty,
+                    ConfidentialError::PayloadTooLarge,
+                ));
+            }
+            if !Self::verify_zk_proof(
+                &submission.zk_proof,
+                &submission.encrypted_metadata,
+            ) {
+                return Err(Self::deny(
+                    &env,
+                    &submitter,
+                    operation,
+                    &empty,
+                    ConfidentialError::InvalidZKProof,
+                ));
+            }
+            if let Err(err) = Self::validate_policy(&submission.access_policy) {
+                return Err(Self::deny(&env, &submitter, operation, &empty, err));
+            }
+        }
+
+        let mut event_ids = Vec::new(&env);
+        for submission in submissions.iter() {
+            let event_id = Self::log_confidential_event(
+                env.clone(),
+                submitter.clone(),
+                submission.event_type.clone(),
+                submission.encrypted_metadata.clone(),
+                submission.access_policy.clone(),
+                submission.zk_proof.clone(),
+                submission.key_id.clone(),
+            )?;
+            event_ids.push_back(event_id);
+        }
+        Ok(event_ids)
+    }
+
+    /// Record a validator attestation against the exact event record.  The
+    /// validator may attest once per event, and expected_hash pins the record
+    /// they reviewed, preventing stale or replayed attestations.
+    pub fn attest_confidential_event(
+        env: Env,
+        validator: Address,
+        event_id: BytesN<32>,
+        expected_hash: BytesN<32>,
+    ) -> Result<ConfidentialAttestation, ConfidentialError> {
+        validator.require_auth();
+        if !RbacManager::has_role_min(&env, &validator, Role::Auditor) {
+            return Err(ConfidentialError::InsufficientRole);
+        }
+
+        let event: ConfidentialMetadata = env
+            .storage()
+            .persistent()
+            .get(&ConfidentialStorageKey::Event(event_id.clone()))
+            .ok_or(ConfidentialError::EventNotFound)?;
+        let actual_hash: BytesN<32> = env.crypto().sha256(&event.encrypted_payload);
+        if actual_hash != expected_hash {
+            return Err(ConfidentialError::StaleAttestation);
+        }
+
+        let key = ConfidentialStorageKey::Attestation(event_id.clone(), validator.clone());
+        if env.storage().persistent().has(&key) {
+            return Err(ConfidentialError::DuplicateAttestation);
+        }
+
+        let attestation = ConfidentialAttestation {
+            event_id: event_id.clone(),
+            validator: validator.clone(),
+            expected_hash,
+            attested_at: env.ledger().timestamp(),
+        };
+        env.storage().persistent().set(&key, &attestation);
+        env.storage()
+            .persistent()
+            .extend_ttl(&key, TTL_BUMP_THRESHOLD_LEDGERS, ARCHIVE_TTL_EXTEND_LEDGERS);
+        Ok(attestation)
+    }
+
+    /// Enter or leave network-partition mode.  Mutations fail closed while
+    /// partitioned and recover deterministically after an admin epoch bump.
+    pub fn set_confidential_partition(
+        env: Env,
+        admin: Address,
+        partitioned: bool,
+    ) -> Result<(), ConfidentialError> {
+        admin.require_auth();
+        let configured: Option<Address> =
+            env.storage()
+                .instance()
+                .get(&ConfidentialStorageKey::Admin);
+        if configured != Some(admin) {
+            return Err(ConfidentialError::Unauthorized);
+        }
+        env.storage()
+            .instance()
+            .set(&ConfidentialStorageKey::Partitioned, &partitioned);
+        if partitioned {
+            let epoch: u64 = env
+                .storage()
+                .instance()
+                .get(&ConfidentialStorageKey::PartitionEpoch)
+                .unwrap_or(0);
+            env.storage()
+                .instance()
+                .set(&ConfidentialStorageKey::PartitionEpoch, &(epoch + 1));
+        }
+        Ok(())
+    }
+
+    pub fn confidential_partitioned(env: Env) -> bool {
+        env.storage()
+            .instance()
+            .get::<_, bool>(&ConfidentialStorageKey::Partitioned)
+            .unwrap_or(false)
+    }
+
+    pub fn confidential_partition_epoch(env: Env) -> u64 {
+        env.storage()
+            .instance()
+            .get(&ConfidentialStorageKey::PartitionEpoch)
+            .unwrap_or(0)
+    }
+
+    pub fn get_confidential_attestation(
+        env: Env,
+        event_id: BytesN<32>,
+        validator: Address,
+    ) -> Option<ConfidentialAttestation> {
+        env.storage()
+            .persistent()
+            .get(&ConfidentialStorageKey::Attestation(event_id, validator))
     }
 
     /// Privacy-preserving analytics: aggregate multiple confidential events

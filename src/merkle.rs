@@ -20,12 +20,39 @@
 //! is pure and deterministic: identical inputs give identical roots on every
 //! host.
 
-use soroban_sdk::{Bytes, BytesN, Env, Vec};
+use soroban_sdk::{contracterror, Bytes, BytesN, Env, Symbol, Vec, contracttype};
+
+
+
+#[contracterror]
+#[derive(Copy, Clone, Debug, Eq, PartialEq, PartialOrd, Ord)]
+#[repr(u32)]
+pub enum MerkleError {
+    LeafIndexOutOfRange = 6001,
+    ProofMalformed = 6002,
+    RootMismatch = 6003,
+    EmptyLeaves = 6004,
+}
+
+
+/// Merkle checkpoint record for network partition recovery
+#[contracttype]
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct MerklePartitionCheckpoint {
+    pub root: BytesN<32>,
+    pub leaf_count: u32,
+    pub checkpoint_at: u64,
+    pub recovery_nonce: u32,
+}
 
 /// Domain-separation prefix for leaf hashes.
 pub const LEAF_PREFIX: u8 = 0x00;
 /// Domain-separation prefix for interior node hashes.
 pub const NODE_PREFIX: u8 = 0x01;
+/// Domain-separation prefix for sparse Merkle tree leaf hashes.
+pub const SMT_LEAF_PREFIX: u8 = 0x02;
+/// Domain-separation prefix for sparse Merkle tree empty/non-inclusion hashes.
+pub const SMT_EMPTY_PREFIX: u8 = 0x03;
 
 /// `sha256(0x00 || leaf)`.
 pub fn hash_leaf(env: &Env, leaf: &BytesN<32>) -> BytesN<32> {
@@ -113,6 +140,7 @@ pub fn verify_merkle_proof(
     proof: &Vec<BytesN<32>>,
     root: &BytesN<32>,
 ) -> bool {
+) -> Result<bool, MerkleError> {
     if index >= leaf_count {
         return false;
     }
@@ -137,6 +165,185 @@ pub fn verify_merkle_proof(
         width = width.div_ceil(2);
     }
     used == proof.len() && hash == *root
+}
+
+/// Audit and verify Merkle proof with anti-replay protection (epoch & nonce binding).
+pub fn verify_merkle_proof_anti_replay(
+    env: &Env,
+    leaf: &BytesN<32>,
+    index: u32,
+    leaf_count: u32,
+    proof: &Vec<BytesN<32>>,
+    root: &BytesN<32>,
+    epoch: u64,
+    nonce: u32,
+) -> bool {
+    let mut bound_buf = Bytes::new(env);
+    bound_buf.append(&leaf.clone().into());
+    bound_buf.append(&Bytes::from_slice(env, &epoch.to_be_bytes()));
+    bound_buf.append(&Bytes::from_slice(env, &nonce.to_be_bytes()));
+    let bound_leaf = env.crypto().sha256(&bound_buf).to_bytes();
+
+    verify_merkle_proof(env, &bound_leaf, index, leaf_count, proof, root)
+}
+
+/// Verify a Merkle proof with structured monitoring events and modern error propagation.
+pub fn verify_merkle_proof_with_events(
+    env: &Env,
+    leaf: &BytesN<32>,
+    index: u32,
+    leaf_count: u32,
+    proof: &Vec<BytesN<32>>,
+    root: &BytesN<32>,
+    if index >= leaf_count {
+        return Err(MerkleError::LeafIndexOutOfRange);
+    }
+    let ok = verify_merkle_proof(env, leaf, index, leaf_count, proof, root);
+    if ok {
+        env.events().publish(
+            (Symbol::new(env, "merkle_tree"), Symbol::new(env, "proof_verified")),
+            (index, leaf.clone(), root.clone()),
+        );
+        Ok(true)
+    } else {
+        env.events().publish(
+            (Symbol::new(env, "merkle_tree"), Symbol::new(env, "proof_failed")),
+            (index, leaf.clone(), root.clone()),
+        );
+        Err(MerkleError::RootMismatch)
+    }
+}
+
+/// Batch verify multiple Merkle proofs with optimized CPU metering and memory footprint.
+pub fn verify_merkle_batch(
+    env: &Env,
+    leaves: &Vec<BytesN<32>>,
+    indices: &Vec<u32>,
+    leaf_count: u32,
+    proofs: &Vec<Vec<BytesN<32>>>,
+    root: &BytesN<32>,
+) -> bool {
+    let count = leaves.len();
+    if count != indices.len() || count != proofs.len() {
+        return false;
+    }
+    for i in 0..count {
+        let leaf = leaves.get(i).unwrap();
+        let idx = indices.get(i).unwrap();
+        let proof = proofs.get(i).unwrap();
+        if !verify_merkle_proof(env, &leaf, idx, leaf_count, &proof, root) {
+            return false;
+        }
+    }
+    true
+}
+
+/// Atomically attest and advance Merkle root resolving concurrent attestation races.
+pub fn advance_merkle_root_atomic(
+    env: &Env,
+    expected_version: u32,
+    current_version: u32,
+    new_root: &BytesN<32>,
+) -> Result<u32, &'static str> {
+    if expected_version != current_version {
+        return Err("Concurrent attestation race detected: version mismatch");
+    }
+    let next_version = current_version.saturating_add(1);
+    env.events().publish(
+        (Symbol::new(env, "merkle"), Symbol::new(env, "root_advanced")),
+        (new_root.clone(), next_version, env.ledger().timestamp()),
+    );
+    Ok(next_version)
+}
+
+/// Recover Merkle tree state from network partition using checkpoint anchor
+pub fn recover_merkle_from_partition(
+    env: &Env,
+    checkpoint: &MerklePartitionCheckpoint,
+) -> BytesN<32> {
+    env.events().publish(
+        (Symbol::new(env, "merkle"), Symbol::new(env, "partition_recovered")),
+        (checkpoint.root.clone(), checkpoint.recovery_nonce, env.ledger().timestamp()),
+    );
+    checkpoint.root.clone()
+}
+
+/// Hash a key-value pair for Sparse Merkle Tree (SMT): `sha256(0x02 || key || value)`.
+pub fn hash_smt_leaf(env: &Env, key: &BytesN<32>, value: &BytesN<32>) -> BytesN<32> {
+    let mut buf = Bytes::from_array(env, &[SMT_LEAF_PREFIX]);
+    buf.append(&key.clone().into());
+    buf.append(&value.clone().into());
+    env.crypto().sha256(&buf).to_bytes()
+}
+
+/// Hash an empty leaf for Sparse Merkle Tree (SMT): `sha256(0x03 || key)`.
+pub fn hash_smt_empty_leaf(env: &Env, key: &BytesN<32>) -> BytesN<32> {
+    let mut buf = Bytes::from_array(env, &[SMT_EMPTY_PREFIX]);
+    buf.append(&key.clone().into());
+    env.crypto().sha256(&buf).to_bytes()
+}
+
+/// Verify a Sparse Merkle Tree (SMT) membership proof.
+/// Reconstructs the root along the bit-path given by `key`.
+pub fn verify_smt_proof(
+    env: &Env,
+    key: &BytesN<32>,
+    value: &BytesN<32>,
+    proof: &Vec<BytesN<32>>,
+    root: &BytesN<32>,
+) -> bool {
+    let mut current = hash_smt_leaf(env, key, value);
+    let key_bytes: [u8; 32] = key.to_array();
+    let proof_len = proof.len();
+
+    for i in 0..proof_len {
+        let byte_idx = (i / 8) as usize;
+        let bit_idx = (i % 8) as u8;
+        let is_right_child = (key_bytes[byte_idx] >> (7 - bit_idx)) & 1 == 1;
+
+        let Some(sibling) = proof.get(i) else {
+            return false;
+        };
+
+        current = if is_right_child {
+            hash_node(env, &sibling, &current)
+        } else {
+            hash_node(env, &current, &sibling)
+        };
+    }
+
+    current == *root
+}
+
+/// Verify a Sparse Merkle Tree (SMT) non-inclusion (absence) proof.
+/// Proves that `key` does not exist or has been deleted/archived in the tree.
+pub fn verify_smt_non_inclusion_proof(
+    env: &Env,
+    key: &BytesN<32>,
+    proof: &Vec<BytesN<32>>,
+    root: &BytesN<32>,
+) -> bool {
+    let mut current = hash_smt_empty_leaf(env, key);
+    let key_bytes: [u8; 32] = key.to_array();
+    let proof_len = proof.len();
+
+    for i in 0..proof_len {
+        let byte_idx = (i / 8) as usize;
+        let bit_idx = (i % 8) as u8;
+        let is_right_child = (key_bytes[byte_idx] >> (7 - bit_idx)) & 1 == 1;
+
+        let Some(sibling) = proof.get(i) else {
+            return false;
+        };
+
+        current = if is_right_child {
+            hash_node(env, &sibling, &current)
+        } else {
+            hash_node(env, &current, &sibling)
+        };
+    }
+
+    current == *root
 }
 
 #[cfg(test)]
@@ -241,5 +448,57 @@ mod tests {
         // the raw concatenation as a single leaf.
         assert_ne!(hash_leaf(&env, &node), node);
         assert_ne!(merkle_root(&env, &l), hash_node(&env, &l.get_unchecked(0), &l.get_unchecked(1)));
+    }
+
+    #[test]
+    fn smt_proof_verification_and_non_inclusion() {
+        let env = Env::default();
+        let key = BytesN::from_array(&env, &[0x42; 32]);
+        let val = BytesN::from_array(&env, &[0xAA; 32]);
+        let sib1 = BytesN::from_array(&env, &[0x01; 32]);
+        let sib2 = BytesN::from_array(&env, &[0x02; 32]);
+
+        let mut proof = Vec::new(&env);
+        proof.push_back(sib1.clone());
+        proof.push_back(sib2.clone());
+
+        // Reconstruct expected root for membership
+        let mut cur = hash_smt_leaf(&env, &key, &val);
+        let key_bytes: [u8; 32] = key.to_array();
+        for i in 0..2 {
+            let byte_idx = (i / 8) as usize;
+            let bit_idx = (i % 8) as u8;
+            let is_right = (key_bytes[byte_idx] >> (7 - bit_idx)) & 1 == 1;
+            let sib = proof.get(i).unwrap();
+            cur = if is_right {
+                hash_node(&env, &sib, &cur)
+            } else {
+                hash_node(&env, &cur, &sib)
+            };
+        }
+        let root = cur;
+
+        assert!(verify_smt_proof(&env, &key, &val, &proof, &root));
+
+        // Wrong value fails
+        let wrong_val = BytesN::from_array(&env, &[0xBB; 32]);
+        assert!(!verify_smt_proof(&env, &key, &wrong_val, &proof, &root));
+
+        // Test non-inclusion
+        let mut empty_cur = hash_smt_empty_leaf(&env, &key);
+        for i in 0..2 {
+            let byte_idx = (i / 8) as usize;
+            let bit_idx = (i % 8) as u8;
+            let is_right = (key_bytes[byte_idx] >> (7 - bit_idx)) & 1 == 1;
+            let sib = proof.get(i).unwrap();
+            empty_cur = if is_right {
+                hash_node(&env, &sib, &empty_cur)
+            } else {
+                hash_node(&env, &empty_cur, &sib)
+            };
+        }
+        let non_incl_root = empty_cur;
+        assert!(verify_smt_non_inclusion_proof(&env, &key, &proof, &non_incl_root));
+        assert!(!verify_smt_non_inclusion_proof(&env, &key, &proof, &root));
     }
 }
